@@ -12,7 +12,8 @@ authors = ["Nathan Sobo <nathan@zed.dev>"]
 keywords = ["desktop", "gui", "immediate"]
 categories = ["gui"]
 autobenches = false
-# Not a native library: carries `src_dir` to gpui_apple's build script (DEP_SKATHI_GPUI_SRC_DIR).
+# Not a native library: carries `src_dir` to gpui_apple's build script (DEP_SKATHI_GPUI_SRC_DIR)
+# and `windows_resources` to dependents that embed gpui's manifest.
 links = "skathi_gpui"
 
 

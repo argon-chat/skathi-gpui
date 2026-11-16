@@ -10,6 +10,12 @@ fn main() {
         "cargo::metadata=src_dir={}",
         manifest_dir.join("src").display()
     );
+    // The `.rc` and manifest, for a dependent that embeds them in its own executables
+    // (DEP_SKATHI_GPUI_WINDOWS_RESOURCES).
+    println!(
+        "cargo::metadata=windows_resources={}",
+        manifest_dir.join("resources").join("windows").display()
+    );
 
     // Leak detection does bookkeeping on every entity handle, so `test-support`
     // does not enable it: that feature must stay cheap enough to compile into
