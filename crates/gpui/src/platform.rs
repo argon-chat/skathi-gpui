@@ -3419,6 +3419,38 @@ pub enum CursorStyle {
     ContextualMenu,
 }
 
+impl CursorStyle {
+    /// Every style.
+    pub const ALL: [Self; 21] = [
+        Self::Arrow,
+        Self::IBeam,
+        Self::Crosshair,
+        Self::ClosedHand,
+        Self::OpenHand,
+        Self::PointingHand,
+        Self::ResizeLeft,
+        Self::ResizeRight,
+        Self::ResizeLeftRight,
+        Self::ResizeUp,
+        Self::ResizeDown,
+        Self::ResizeUpDown,
+        Self::ResizeUpLeftDownRight,
+        Self::ResizeUpRightDownLeft,
+        Self::ResizeColumn,
+        Self::ResizeRow,
+        Self::IBeamCursorForVerticalLayout,
+        Self::OperationNotAllowed,
+        Self::DragLink,
+        Self::DragCopy,
+        Self::ContextualMenu,
+    ];
+
+    /// Iterates over [`Self::ALL`], in place of strum's `EnumIter`, which gpui does not depend on.
+    pub fn iter() -> impl Iterator<Item = Self> {
+        Self::ALL.into_iter()
+    }
+}
+
 /// A clipboard item that should be copied to the clipboard
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClipboardItem {

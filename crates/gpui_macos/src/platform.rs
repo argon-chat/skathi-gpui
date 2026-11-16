@@ -60,7 +60,6 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use strum::IntoEnumIterator as _;
 
 const MAC_PLATFORM_IVAR: &CStr = c"platform";
 static mut APP_CLASS: *const AnyClass = ptr::null();
