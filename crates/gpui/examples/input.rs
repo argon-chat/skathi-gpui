@@ -523,6 +523,7 @@ impl Element for TextElement {
             background_color: None,
             underline: None,
             strikethrough: None,
+            ..Default::default()
         };
         let runs = if let Some(marked_range) = input.marked_range.as_ref() {
             vec![
@@ -536,6 +537,7 @@ impl Element for TextElement {
                         color: Some(run.color),
                         thickness: px(1.0),
                         wavy: false,
+                        ..Default::default()
                     }),
                     ..run.clone()
                 },

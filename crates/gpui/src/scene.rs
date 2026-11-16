@@ -3265,6 +3265,7 @@ mod tests {
             color: Hsla::default(),
             thickness: ScaledPixels(1.),
             wavy: false.into(),
+            transformation: TransformationMatrix::unit(),
         }
     }
 

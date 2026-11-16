@@ -146,6 +146,7 @@ impl RenderOnce for Specimen {
                     AbsoluteLength::Pixels(absolute_len) => absolute_len.into(),
                 },
                 DefiniteLength::Fraction(value) => value,
+                DefiniteLength::Calc { .. } => line_height,
             };
         }
 

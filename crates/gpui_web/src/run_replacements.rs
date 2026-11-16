@@ -233,6 +233,8 @@ mod tests {
             &[FontRun {
                 len: text.len(),
                 font_id: FontId(7),
+                tracking: px(0.),
+                word_spacing: px(0.),
             }],
             &layout,
         );
@@ -270,10 +272,14 @@ mod tests {
             FontRun {
                 len: 3,
                 font_id: FontId(7),
+                tracking: px(0.),
+                word_spacing: px(0.),
             },
             FontRun {
                 len: 3,
                 font_id: FontId(7),
+                tracking: px(0.),
+                word_spacing: px(0.),
             },
         ];
         let candidates = collect_candidates(text, &font_runs, &layout);
@@ -306,6 +312,8 @@ mod tests {
             &[FontRun {
                 len: 6,
                 font_id: FontId(7),
+                tracking: px(0.),
+                word_spacing: px(0.),
             }],
             &layout,
         );
@@ -334,6 +342,8 @@ mod tests {
         let font_runs = [FontRun {
             len: "😀".len(),
             font_id: FontId(7),
+            tracking: px(0.),
+            word_spacing: px(0.),
         }];
         for (id, color) in [(0, false), (1, false), (0, true), (1, true)] {
             layout.runs[0].glyphs = vec![source_glyph(0, 0.0, id, color)];
