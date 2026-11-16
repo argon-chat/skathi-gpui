@@ -79,6 +79,7 @@ pub struct WindowsWindowState {
     /// Shared with [`WindowsPlatformState::cursor_visible`].
     pub cursor_visible: Arc<AtomicBool>,
     pub nc_button_pressed: Cell<Option<u32>>,
+    pub(crate) maximizable: Cell<bool>,
 
     pub display: Cell<WindowsDisplay>,
     /// Flag to instruct the `VSyncProvider` thread to invalidate the directx devices
@@ -185,6 +186,7 @@ impl WindowsWindowState {
             current_cursor: Cell::new(current_cursor),
             cursor_visible,
             nc_button_pressed: Cell::new(nc_button_pressed),
+            maximizable: Cell::new(true),
             display: Cell::new(display),
             fullscreen: Cell::new(fullscreen),
             initial_placement: Cell::new(initial_placement),
@@ -542,7 +544,7 @@ impl WindowsWindow {
         let display = if let Some(display_id) = params.display_id {
             WindowsDisplay::new(display_id)
         } else {
-            None
+            WindowsDisplay::containing(params.bounds)
         }
         .or_else(WindowsDisplay::primary_monitor)
         .context("failed to find any monitor")?;
@@ -1093,6 +1095,46 @@ impl PlatformWindow for WindowsWindow {
                 self.state.initial_placement.set(Some(status));
             }
         }
+    }
+
+    // `zoom` never toggles here, so leaving the maximized state is its own command.
+    fn vn_set_maximized(&self, maximized: bool) {
+        if maximized {
+            self.zoom();
+        } else if self.is_maximized() {
+            unsafe { ShowWindowAsync(self.0.hwnd, SW_RESTORE).ok().log_err() };
+        } else if let Some(mut status) = self.state.initial_placement.take() {
+            if matches!(status.state, WindowOpenState::Maximized) {
+                status.state = WindowOpenState::Windowed;
+            }
+            self.state.initial_placement.set(Some(status));
+        }
+    }
+
+    fn vn_set_maximizable(&self, maximizable: bool) {
+        self.state.maximizable.set(maximizable);
+        if self.state.is_fullscreen() {
+            return;
+        }
+        let style = WINDOW_STYLE(unsafe { get_window_long(self.0.hwnd, GWL_STYLE) } as _);
+        let style = if maximizable && self.0.is_resizable {
+            style | WS_MAXIMIZEBOX
+        } else {
+            style & !WS_MAXIMIZEBOX
+        };
+        unsafe { set_window_long(self.0.hwnd, GWL_STYLE, style.0 as isize) };
+        unsafe {
+            SetWindowPos(
+                self.0.hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+        }
+        .log_err();
     }
 
     fn toggle_fullscreen(&self) {

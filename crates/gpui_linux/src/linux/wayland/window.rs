@@ -286,6 +286,12 @@ impl WaylandSurfaceState {
         if let Some(size) = params.window_min_size {
             toplevel.set_min_size(f32::from(size.width) as i32, f32::from(size.height) as i32);
         }
+        if !params.is_resizable {
+            let size = params.bounds.size;
+            let (width, height) = (f32::from(size.width) as i32, f32::from(size.height) as i32);
+            toplevel.set_min_size(width, height);
+            toplevel.set_max_size(width, height);
+        }
 
         // Attempt to set up window decorations based on the requested configuration
         let decoration = globals
@@ -602,9 +608,11 @@ impl WaylandWindowState {
             // Set max window size based on the GPU's maximum texture dimension.
             // This prevents the window from being resized larger than what the GPU can render.
             let max_texture_size = renderer.max_texture_size() as i32;
-            xdg_state
-                .toplevel
-                .set_max_size(max_texture_size, max_texture_size);
+            if options.is_resizable {
+                xdg_state
+                    .toplevel
+                    .set_max_size(max_texture_size, max_texture_size);
+            }
         }
 
         Ok(Self {
@@ -1994,6 +2002,43 @@ impl PlatformWindow for WaylandWindow {
 
     fn is_fullscreen(&self) -> bool {
         self.borrow().fullscreen
+    }
+
+    fn vn_set_maximized(&self, maximized: bool) {
+        if let Some(toplevel) = self.borrow().surface_state.toplevel() {
+            if maximized {
+                toplevel.set_maximized();
+            } else {
+                toplevel.unset_maximized();
+            }
+        }
+    }
+
+    fn vn_set_ignore_mouse(&self, ignore: bool) -> bool {
+        self.set_input_region(ignore.then_some(&[][..]));
+        true
+    }
+
+    fn vn_request_close(&self) {
+        let ptr = self.0.clone();
+        self.borrow()
+            .globals
+            .executor
+            .spawn(async move {
+                let callback = ptr.callbacks.borrow_mut().should_close.take();
+                let close = match callback {
+                    Some(mut should_close) => {
+                        let result = should_close();
+                        ptr.callbacks.borrow_mut().should_close = Some(should_close);
+                        result
+                    }
+                    None => true,
+                };
+                if close {
+                    ptr.close();
+                }
+            })
+            .detach();
     }
 
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {

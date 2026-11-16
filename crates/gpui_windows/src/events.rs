@@ -161,6 +161,11 @@ impl WindowsWindowInner {
             WM_SHOWWINDOW => self.handle_window_visibility_changed(handle, wparam),
             DM_POINTERHITTEST => self.handle_dm_pointer_hit_test(wparam),
             WM_GETOBJECT => self.handle_wm_getobject(wparam, lparam),
+            WM_SYSCOMMAND
+                if wparam.0 as u32 & 0xfff0 == SC_MAXIMIZE && !self.state.maximizable.get() =>
+            {
+                Some(0)
+            }
             WM_GPUI_CURSOR_STYLE_CHANGED
             | WM_GPUI_FORCE_UPDATE_WINDOW
             | WM_GPUI_GPU_DEVICE_LOST => self.handle_gpui_events(handle, msg, wparam, lparam),
@@ -1034,7 +1039,9 @@ impl WindowsWindowInner {
                 WindowControlArea::Drag if self.is_movable => Some(HTCAPTION as _),
                 WindowControlArea::Drag => None,
                 WindowControlArea::Close => Some(HTCLOSE as _),
-                WindowControlArea::Max if self.is_resizable => Some(HTMAXBUTTON as _),
+                WindowControlArea::Max if self.is_resizable && self.state.maximizable.get() => {
+                    Some(HTMAXBUTTON as _)
+                }
                 WindowControlArea::Max if self.is_movable => Some(HTCAPTION as _),
                 WindowControlArea::Max => Some(HTNOWHERE as _),
                 WindowControlArea::Min if self.is_minimizable => Some(HTMINBUTTON as _),
@@ -1198,7 +1205,7 @@ impl WindowsWindowInner {
                     true
                 }
                 (HTMINBUTTON, HTMINBUTTON) => true,
-                (HTMAXBUTTON, HTMAXBUTTON) if self.is_resizable => {
+                (HTMAXBUTTON, HTMAXBUTTON) if self.is_resizable && self.state.maximizable.get() => {
                     if self.state.is_maximized() {
                         unsafe { ShowWindowAsync(handle, SW_NORMAL).ok().log_err() };
                     } else {

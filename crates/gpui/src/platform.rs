@@ -1446,6 +1446,53 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
         None
     }
 
+    /// vue-native fork: maximizes or leaves the maximized state; unlike [`Self::zoom`], never toggles.
+    fn vn_set_maximized(&self, maximized: bool) {
+        if self.is_maximized() != maximized {
+            self.zoom();
+        }
+    }
+    /// vue-native fork: the platform's own maximized (zoomed) state.
+    fn vn_is_zoomed(&self) -> bool {
+        self.is_maximized()
+    }
+    /// vue-native fork: minimized, where the platform reports it.
+    fn vn_is_minimized(&self) -> bool {
+        false
+    }
+    /// vue-native fork: leaves the minimized state.
+    fn vn_unminimize(&self) {}
+    /// vue-native fork: hides the window without minimizing it. False where unsupported.
+    fn vn_hide(&self) -> bool {
+        false
+    }
+    /// vue-native fork: false while hidden by [`Self::vn_hide`] or not yet shown.
+    fn vn_is_shown(&self) -> bool {
+        true
+    }
+    /// vue-native fork: moves and/or resizes the outer frame, in the space of [`Self::bounds`].
+    /// False when the platform does not let a client do what was asked.
+    fn vn_set_frame(&self, _origin: Option<Point<Pixels>>, _size: Option<Size<Pixels>>) -> bool {
+        false
+    }
+    /// vue-native fork: keeps the window above normal windows. False where unsupported.
+    fn vn_set_always_on_top(&self, _on: bool) -> bool {
+        false
+    }
+    /// vue-native fork: whether the platform's own maximize control is enabled.
+    fn vn_set_maximizable(&self, _maximizable: bool) {}
+    /// vue-native fork: lets pointer input pass through to what is below. False where unsupported.
+    fn vn_set_ignore_mouse(&self, _ignore: bool) -> bool {
+        false
+    }
+    /// vue-native fork: keeps the window's contents out of screen capture. False where unsupported.
+    fn vn_set_content_protection(&self, _on: bool) -> bool {
+        false
+    }
+    /// vue-native fork: closes as the platform's own close button would, so the should-close
+    /// callback decides. Deferred: never runs inside the caller's update.
+    fn vn_request_close(&self) {}
+
     /// vue-native fork: hides the cursor and holds it in this window; mouse moves keep coming,
     /// their motion in [`PlatformWindow::take_pointer_motion`]. `unadjusted` asks for the
     /// device's own counts, without pointer acceleration. The platform lets go by itself when

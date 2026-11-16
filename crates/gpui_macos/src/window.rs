@@ -2127,6 +2127,189 @@ impl PlatformWindow for MacWindow {
         }
     }
 
+    fn show_window(
+        &self,
+        activate: bool,
+        should_show: Box<dyn FnOnce() -> bool>,
+        completed: Box<dyn FnOnce(bool)>,
+    ) -> bool {
+        let this = self.0.lock();
+        let window = this.native_window;
+        let view = this.native_view.as_ptr();
+        let closed = this.closed.clone();
+        this.foreground_executor
+            .spawn(async move {
+                if closed.load(Ordering::Acquire) || !should_show() {
+                    completed(false);
+                    return;
+                }
+                unsafe {
+                    let view = &*view.cast::<NSView>();
+                    view.setNeedsDisplay(true);
+                    if activate {
+                        let _: () =
+                            msg_send![window, makeKeyAndOrderFront: ptr::null_mut::<AnyObject>()];
+                    } else {
+                        let _: () = msg_send![window, orderFront: ptr::null_mut::<AnyObject>()];
+                    }
+                }
+                completed(true);
+            })
+            .detach();
+        true
+    }
+
+    fn vn_set_maximized(&self, maximized: bool) {
+        let this = self.0.lock();
+        if this.simple_fullscreen_state.is_some() {
+            return;
+        }
+        let window = this.native_window;
+        let closed = this.closed.clone();
+        this.foreground_executor
+            .spawn(async move {
+                if_window_not_closed(closed, || unsafe {
+                    let zoomed: bool = msg_send![window, isZoomed];
+                    if zoomed != maximized {
+                        let _: () = msg_send![window, zoom: ptr::null_mut::<AnyObject>()];
+                    }
+                })
+            })
+            .detach();
+    }
+
+    fn vn_is_zoomed(&self) -> bool {
+        let window = self.0.lock().native_window;
+        unsafe { msg_send![window, isZoomed] }
+    }
+
+    fn vn_is_minimized(&self) -> bool {
+        let window = self.0.lock().native_window;
+        unsafe { msg_send![window, isMiniaturized] }
+    }
+
+    fn vn_unminimize(&self) {
+        let this = self.0.lock();
+        let window = this.native_window;
+        let closed = this.closed.clone();
+        this.foreground_executor
+            .spawn(async move {
+                if_window_not_closed(closed, || unsafe {
+                    let _: () = msg_send![window, deminiaturize: ptr::null_mut::<AnyObject>()];
+                })
+            })
+            .detach();
+    }
+
+    fn vn_hide(&self) -> bool {
+        let window = self.0.lock().native_window;
+        unsafe {
+            let _: () = msg_send![window, orderOut: ptr::null_mut::<AnyObject>()];
+        }
+        true
+    }
+
+    fn vn_is_shown(&self) -> bool {
+        let window = self.0.lock().native_window;
+        let (visible, miniaturized): (bool, bool) = unsafe {
+            (
+                msg_send![window, isVisible],
+                msg_send![window, isMiniaturized],
+            )
+        };
+        visible || miniaturized
+    }
+
+    fn vn_set_frame(&self, origin: Option<Point<Pixels>>, size: Option<Size<Pixels>>) -> bool {
+        let this = self.0.lock();
+        if this.simple_fullscreen_state.is_some() || this.is_fullscreen() {
+            return false;
+        }
+        let window = this.native_window;
+        let closed = this.closed.clone();
+        this.foreground_executor
+            .spawn(async move {
+                if_window_not_closed(closed, || unsafe {
+                    let native = &*window.cast::<NSWindow>();
+                    let frame = native.frame();
+                    let width = size.map_or(frame.size.width, |s| s.width.as_f32() as f64);
+                    let height = size.map_or(frame.size.height, |s| s.height.as_f32() as f64);
+                    // `bounds()` is top-left based and relative to the window's current screen.
+                    let (left, top) = match (origin, native.screen()) {
+                        (Some(o), Some(screen)) => {
+                            let screen = screen.frame();
+                            (
+                                screen.origin.x + o.x.as_f32() as f64,
+                                screen.origin.y + screen.size.height - o.y.as_f32() as f64,
+                            )
+                        }
+                        _ => (frame.origin.x, frame.origin.y + frame.size.height),
+                    };
+                    let rect =
+                        NSRect::new(NSPoint::new(left, top - height), NSSize::new(width, height));
+                    let _: () = msg_send![window, setFrame: rect, display: Bool::YES];
+                })
+            })
+            .detach();
+        true
+    }
+
+    fn vn_set_always_on_top(&self, on: bool) -> bool {
+        let window = self.0.lock().native_window;
+        let level = if on {
+            NSFloatingWindowLevel
+        } else {
+            NSNormalWindowLevel
+        };
+        unsafe {
+            let _: () = msg_send![window, setLevel: level];
+        }
+        true
+    }
+
+    fn vn_set_maximizable(&self, maximizable: bool) {
+        let this = self.0.lock();
+        if let Some(zoom) = this
+            .native_window()
+            .standardWindowButton(NSWindowButton::ZoomButton)
+        {
+            unsafe {
+                let _: () = msg_send![&*zoom, setEnabled: maximizable];
+            }
+        }
+    }
+
+    fn vn_set_ignore_mouse(&self, ignore: bool) -> bool {
+        let window = self.0.lock().native_window;
+        unsafe {
+            let _: () = msg_send![window, setIgnoresMouseEvents: ignore];
+        }
+        true
+    }
+
+    fn vn_set_content_protection(&self, on: bool) -> bool {
+        // NSWindowSharingNone / NSWindowSharingReadOnly.
+        let sharing: NSUInteger = if on { 0 } else { 1 };
+        let window = self.0.lock().native_window;
+        unsafe {
+            let _: () = msg_send![window, setSharingType: sharing];
+        }
+        true
+    }
+
+    fn vn_request_close(&self) {
+        let this = self.0.lock();
+        let window = this.native_window;
+        let closed = this.closed.clone();
+        this.foreground_executor
+            .spawn(async move {
+                if_window_not_closed(closed, || unsafe {
+                    let _: () = msg_send![window, performClose: ptr::null_mut::<AnyObject>()];
+                })
+            })
+            .detach();
+    }
+
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
         self.0.as_ref().lock().request_frame_callback = Some(callback);
     }

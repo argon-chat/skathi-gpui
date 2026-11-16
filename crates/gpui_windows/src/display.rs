@@ -94,6 +94,20 @@ impl WindowsDisplay {
         WindowsDisplay::new(Self::display_id_for_monitor(monitor))
     }
 
+    /// The monitor holding the centre of `bounds`, each monitor reading them in its own logical
+    /// pixels, the primary first: a window asked for on a secondary monitor must not fall back to
+    /// the primary one.
+    pub(crate) fn containing(bounds: Bounds<Pixels>) -> Option<Self> {
+        Self::primary_monitor()
+            .into_iter()
+            .chain(
+                available_monitors().into_iter().filter_map(|monitor| {
+                    WindowsDisplay::new(Self::display_id_for_monitor(monitor))
+                }),
+            )
+            .find(|display| display.check_given_bounds(bounds))
+    }
+
     /// The DPI scale factor of this monitor, independent of whatever monitor
     /// a not-yet-positioned window currently happens to be on.
     pub(crate) fn scale_factor(&self) -> f32 {

@@ -3608,6 +3608,67 @@ impl Window {
         self.platform_window.vn_composition_underlay()
     }
 
+    /// vue-native: maximizes or leaves the maximized state without toggling.
+    pub fn vn_set_maximized(&self, maximized: bool) {
+        self.platform_window.vn_set_maximized(maximized)
+    }
+
+    /// vue-native: the platform's own maximized (zoomed) state.
+    pub fn vn_is_zoomed(&self) -> bool {
+        self.platform_window.vn_is_zoomed()
+    }
+
+    /// vue-native: minimized, where the platform reports it.
+    pub fn vn_is_minimized(&self) -> bool {
+        self.platform_window.vn_is_minimized()
+    }
+
+    /// vue-native: leaves the minimized state.
+    pub fn vn_unminimize(&self) {
+        self.platform_window.vn_unminimize()
+    }
+
+    /// vue-native: hides the window without minimizing it; false where unsupported.
+    pub fn vn_hide(&self) -> bool {
+        self.platform_window.vn_hide()
+    }
+
+    /// vue-native: false while hidden by [`Self::vn_hide`] or not yet shown.
+    pub fn vn_is_shown(&self) -> bool {
+        self.platform_window.vn_is_shown()
+    }
+
+    /// vue-native: moves and/or resizes the outer frame, in the space of [`Self::bounds`];
+    /// false when the platform refuses part of it.
+    pub fn vn_set_frame(&self, origin: Option<Point<Pixels>>, size: Option<Size<Pixels>>) -> bool {
+        self.platform_window.vn_set_frame(origin, size)
+    }
+
+    /// vue-native: keeps the window above normal windows; false where unsupported.
+    pub fn vn_set_always_on_top(&self, on: bool) -> bool {
+        self.platform_window.vn_set_always_on_top(on)
+    }
+
+    /// vue-native: whether the platform's own maximize control is enabled.
+    pub fn vn_set_maximizable(&self, maximizable: bool) {
+        self.platform_window.vn_set_maximizable(maximizable)
+    }
+
+    /// vue-native: lets pointer input pass through; false where unsupported.
+    pub fn vn_set_ignore_mouse(&self, ignore: bool) -> bool {
+        self.platform_window.vn_set_ignore_mouse(ignore)
+    }
+
+    /// vue-native: keeps the contents out of screen capture; false where unsupported.
+    pub fn vn_set_content_protection(&self, on: bool) -> bool {
+        self.platform_window.vn_set_content_protection(on)
+    }
+
+    /// vue-native: closes as the platform's close button would; the should-close callback decides.
+    pub fn vn_request_close(&self) {
+        self.platform_window.vn_request_close()
+    }
+
     /// Encode the window's native restorable state into an opaque blob.
     /// Returns `None` on platforms without native state restoration or if encoding fails.
     pub fn native_window_state(&self) -> Option<Vec<u8>> {

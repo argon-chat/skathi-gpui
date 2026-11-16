@@ -68,6 +68,7 @@ x11rb::atom_manager! {
         _NET_WM_STATE_FULLSCREEN,
         _NET_WM_STATE_HIDDEN,
         _NET_WM_STATE_FOCUSED,
+        _NET_WM_STATE_ABOVE,
         _NET_ACTIVE_WINDOW,
         _NET_WM_SYNC_REQUEST,
         _NET_WM_SYNC_REQUEST_COUNTER,
@@ -279,6 +280,8 @@ pub struct X11WindowState {
     maximized_vertical: bool,
     maximized_horizontal: bool,
     hidden: bool,
+    /// vue-native fork: false while created hidden (`show: false`) or withdrawn by `vn_hide`.
+    vn_shown: bool,
     active: bool,
     /// Owned by the client's `WindowRef`, which combines the mapped state with
     /// `VisibilityNotify`; this is the last value it reported.
@@ -812,6 +815,11 @@ impl X11WindowState {
                     Some((f32::from(size.width) as i32, f32::from(size.height) as i32));
             }
             size_hints.max_size = Some((max_texture_size as i32, max_texture_size as i32));
+            if !params.is_resizable {
+                let fixed = (bounds.size.width.0, bounds.size.height.0);
+                size_hints.min_size = Some(fixed);
+                size_hints.max_size = Some(fixed);
+            }
             check_reply(
                 || {
                     format!(
@@ -870,6 +878,7 @@ impl X11WindowState {
                 maximized_vertical: false,
                 maximized_horizontal: false,
                 hidden: false,
+                vn_shown: params.show,
                 appearance,
                 handle,
                 background_appearance: WindowBackgroundAppearance::Opaque,
@@ -935,8 +944,8 @@ impl Drop for X11Window {
 }
 
 enum WmHintPropertyState {
-    // Remove = 0,
-    // Add = 1,
+    Remove = 0,
+    Add = 1,
     Toggle = 2,
 }
 
@@ -1629,6 +1638,14 @@ impl PlatformWindow for X11Window {
     }
 
     fn activate(&self) {
+        // A window created hidden is shown by its activation, as on the other platforms.
+        if !std::mem::replace(&mut self.0.state.borrow_mut().vn_shown, true) {
+            check_reply(
+                || "X11 MapWindow failed.",
+                self.0.xcb.map_window(self.0.x_window),
+            )
+            .log_err();
+        }
         let data = [1, xproto::Time::CURRENT_TIME.into(), 0, 0, 0];
         let message = xproto::ClientMessageEvent::new(
             32,
@@ -1716,6 +1733,9 @@ impl PlatformWindow for X11Window {
     }
 
     fn map_window(&mut self) -> anyhow::Result<()> {
+        if !self.0.state.borrow().vn_shown {
+            return Ok(());
+        }
         check_reply(
             || "X11 MapWindow failed.",
             self.0.xcb.map_window(self.0.x_window),
@@ -1796,6 +1816,165 @@ impl PlatformWindow for X11Window {
 
     fn is_fullscreen(&self) -> bool {
         self.0.state.borrow().fullscreen
+    }
+
+    fn show_window(
+        &self,
+        activate: bool,
+        should_show: Box<dyn FnOnce() -> bool>,
+        completed: Box<dyn FnOnce(bool)>,
+    ) -> bool {
+        if !should_show() {
+            completed(false);
+            return true;
+        }
+        self.0.state.borrow_mut().vn_shown = true;
+        let mapped = check_reply(
+            || "X11 MapWindow failed.",
+            self.0.xcb.map_window(self.0.x_window),
+        )
+        .log_err()
+        .is_some();
+        xcb_flush(&self.0.xcb);
+        if mapped && activate {
+            self.activate();
+        }
+        completed(mapped);
+        true
+    }
+
+    fn vn_set_maximized(&self, maximized: bool) {
+        let state = self.0.state.borrow();
+        let action = if maximized {
+            WmHintPropertyState::Add
+        } else {
+            WmHintPropertyState::Remove
+        };
+        self.set_wm_hints(
+            || "X11 SendEvent to maximize a window failed.",
+            action,
+            state.atoms._NET_WM_STATE_MAXIMIZED_VERT,
+            state.atoms._NET_WM_STATE_MAXIMIZED_HORZ,
+        )
+        .log_err();
+    }
+
+    fn vn_is_minimized(&self) -> bool {
+        self.0.state.borrow().hidden
+    }
+
+    fn vn_unminimize(&self) {
+        // ICCCM: mapping an iconic window returns it to the normal state.
+        check_reply(
+            || "X11 MapWindow failed.",
+            self.0.xcb.map_window(self.0.x_window),
+        )
+        .log_err();
+        xcb_flush(&self.0.xcb);
+    }
+
+    fn vn_hide(&self) -> bool {
+        let root = {
+            let mut state = self.0.state.borrow_mut();
+            state.vn_shown = false;
+            state.x_root_window
+        };
+        check_reply(
+            || "X11 UnmapWindow failed.",
+            self.0.xcb.unmap_window(self.0.x_window),
+        )
+        .log_err();
+        // ICCCM 4.1.4: a synthetic UnmapNotify on the root withdraws a window the WM reparented.
+        let event = xproto::UnmapNotifyEvent {
+            response_type: xproto::UNMAP_NOTIFY_EVENT,
+            sequence: 0,
+            event: root,
+            window: self.0.x_window,
+            from_configure: false,
+        };
+        self.0
+            .xcb
+            .send_event(
+                false,
+                root,
+                xproto::EventMask::SUBSTRUCTURE_REDIRECT | xproto::EventMask::SUBSTRUCTURE_NOTIFY,
+                event,
+            )
+            .log_err();
+        xcb_flush(&self.0.xcb);
+        true
+    }
+
+    fn vn_is_shown(&self) -> bool {
+        self.0.state.borrow().vn_shown
+    }
+
+    fn vn_set_frame(&self, origin: Option<Point<Pixels>>, size: Option<Size<Pixels>>) -> bool {
+        let scale = self.0.state.borrow().scale_factor;
+        let mut aux = xproto::ConfigureWindowAux::new();
+        if let Some(origin) = origin {
+            aux = aux
+                .x((f32::from(origin.x) * scale).round() as i32)
+                .y((f32::from(origin.y) * scale).round() as i32);
+        }
+        if let Some(size) = size {
+            aux = aux
+                .width((f32::from(size.width) * scale).round().max(1.0) as u32)
+                .height((f32::from(size.height) * scale).round().max(1.0) as u32);
+        }
+        let ok = check_reply(
+            || "X11 ConfigureWindow failed.",
+            self.0.xcb.configure_window(self.0.x_window, &aux),
+        )
+        .log_err()
+        .is_some();
+        xcb_flush(&self.0.xcb);
+        ok
+    }
+
+    fn vn_set_always_on_top(&self, on: bool) -> bool {
+        let state = self.0.state.borrow();
+        let above = state.atoms._NET_WM_STATE_ABOVE;
+        if !state.vn_shown {
+            // Not mapped yet: the WM reads `_NET_WM_STATE` when it maps the window.
+            if on {
+                self.0
+                    .xcb
+                    .change_property32(
+                        xproto::PropMode::APPEND,
+                        self.0.x_window,
+                        state.atoms._NET_WM_STATE,
+                        xproto::AtomEnum::ATOM,
+                        &[above],
+                    )
+                    .log_err();
+            }
+            return true;
+        }
+        let action = if on {
+            WmHintPropertyState::Add
+        } else {
+            WmHintPropertyState::Remove
+        };
+        self.set_wm_hints(
+            || "X11 SendEvent to keep a window above failed.",
+            action,
+            above,
+            xproto::AtomEnum::NONE.into(),
+        )
+        .is_ok()
+    }
+
+    fn vn_request_close(&self) {
+        let ptr = self.0.clone();
+        let executor = self.0.state.borrow().executor.clone();
+        executor
+            .spawn(async move {
+                if ptr.should_close() {
+                    ptr.close();
+                }
+            })
+            .detach();
     }
 
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
