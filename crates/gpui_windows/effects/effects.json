@@ -1,0 +1,420 @@
+{
+  "schema": 10,
+  "slang": "2026.12",
+  "compiler": "redslangc 0.1.1",
+  "kind": "builtin",
+  "preludeSha256": "9c8a2d3c8a53cbe0512b3108be147e2379d227780ef306701fe3e07b93a69359",
+  "effects": [
+    {
+      "id": 0,
+      "name": "frost",
+      "struct": "Frost",
+      "doc": "blurred backdrop + crystalline grain + rim highlight",
+      "backdrop": true,
+      "content": false,
+      "history": false,
+      "hlsl": "frost.hlsl",
+      "wgsl": "frost.wgsl",
+      "metal": "frost.metal",
+      "source": "crates/sk-effects/shaders/frost.slang",
+      "sourceSha256": "3878d0fc85a790a8abcc1fbc6369c3ea64093adaeb4c20ec1fa443908052dada",
+      "generatedSha256": {
+        "hlsl": "4dac9c9a98d464a53fab42b1153d4079239852767a1c86329842b835d0f6b92c",
+        "wgsl": "e23db5bd4ebf4140f5973f0d18ebcce9e93fb2cc2617393a93e57fdd49fc66a5",
+        "metal": "6fccfc30d6c5905bd006ebfa62f230b866032600f91e8c5d615420a0402a8af3"
+      },
+      "signature": "frost(<number:strength>, <length:radius>?, <color:tint>?)",
+      "backdropRadiusParam": 1,
+      "bleedParam": null,
+      "animatedParam": null,
+      "pointerParam": null,
+      "pointerTimesParam": null,
+      "clockSlots": [],
+      "clockWindow": null,
+      "params": [
+        {
+          "name": "strength",
+          "kind": "number",
+          "slot": 0,
+          "required": true,
+          "default": [
+            0.5,
+            0,
+            0,
+            0
+          ],
+          "range": [
+            0,
+            1
+          ]
+        },
+        {
+          "name": "radius",
+          "kind": "length",
+          "slot": 1,
+          "required": false,
+          "default": [
+            12,
+            0,
+            0,
+            0
+          ],
+          "range": [
+            0,
+            25
+          ]
+        },
+        {
+          "name": "tint",
+          "kind": "color",
+          "slot": 4,
+          "required": false,
+          "default": [
+            1,
+            1,
+            1,
+            0.06
+          ],
+          "range": null
+        }
+      ],
+      "bindings": [
+        {
+          "name": "sk_effect_quads",
+          "kind": "shaderResource",
+          "index": 1
+        },
+        {
+          "name": "sk_backdrop_input",
+          "kind": "shaderResource",
+          "index": 0
+        },
+        {
+          "name": "sk_backdrop_original",
+          "kind": "shaderResource",
+          "index": 2
+        },
+        {
+          "name": "sk_clamp_sampler",
+          "kind": "samplerState",
+          "index": 1
+        },
+        {
+          "name": "sk_content",
+          "kind": "shaderResource",
+          "index": 7
+        },
+        {
+          "name": "sk_history",
+          "kind": "shaderResource",
+          "index": 8
+        },
+        {
+          "name": "sk_texture0",
+          "kind": "shaderResource",
+          "index": 3
+        },
+        {
+          "name": "sk_texture1",
+          "kind": "shaderResource",
+          "index": 4
+        },
+        {
+          "name": "sk_texture2",
+          "kind": "shaderResource",
+          "index": 5
+        },
+        {
+          "name": "sk_texture3",
+          "kind": "shaderResource",
+          "index": 6
+        },
+        {
+          "name": "sk_repeat_sampler",
+          "kind": "samplerState",
+          "index": 2
+        },
+        {
+          "name": "GlobalParams",
+          "kind": "constantBuffer",
+          "index": 0
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "name": "noise",
+      "struct": "Noise",
+      "doc": "film grain over the element",
+      "backdrop": false,
+      "content": false,
+      "history": false,
+      "hlsl": "noise.hlsl",
+      "wgsl": "noise.wgsl",
+      "metal": "noise.metal",
+      "source": "crates/sk-effects/shaders/noise.slang",
+      "sourceSha256": "aac4ac76e76e5b7df379ca8f6356d05d5eb7f84b754cef6ff0712c4edddcbecd",
+      "generatedSha256": {
+        "hlsl": "9dffe7d6e063193d0a4f7580775ed6abba693711d63eeb14bcdafc3a817b14aa",
+        "wgsl": "98c867d489612ccd0fc8d2be907c4ef95c74bd8cd26e41556b46dc0225548db4",
+        "metal": "d0f6e00aa0d02f951527ac07a8a0c26a84e3206c2d4eb85b590d5e2b980177aa"
+      },
+      "signature": "noise(<number:amount>, <length:scale>?, <number:speed>?)",
+      "backdropRadiusParam": null,
+      "bleedParam": null,
+      "animatedParam": 2,
+      "pointerParam": null,
+      "pointerTimesParam": null,
+      "clockSlots": [],
+      "clockWindow": null,
+      "params": [
+        {
+          "name": "amount",
+          "kind": "number",
+          "slot": 0,
+          "required": true,
+          "default": [
+            0.25,
+            0,
+            0,
+            0
+          ],
+          "range": [
+            0,
+            1
+          ]
+        },
+        {
+          "name": "scale",
+          "kind": "length",
+          "slot": 1,
+          "required": false,
+          "default": [
+            1.5,
+            0,
+            0,
+            0
+          ],
+          "range": [
+            0.05,
+            64
+          ]
+        },
+        {
+          "name": "speed",
+          "kind": "number",
+          "slot": 2,
+          "required": false,
+          "default": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "range": [
+            0,
+            120
+          ]
+        }
+      ],
+      "bindings": [
+        {
+          "name": "sk_effect_quads",
+          "kind": "shaderResource",
+          "index": 1
+        },
+        {
+          "name": "sk_backdrop_input",
+          "kind": "shaderResource",
+          "index": 0
+        },
+        {
+          "name": "sk_backdrop_original",
+          "kind": "shaderResource",
+          "index": 2
+        },
+        {
+          "name": "sk_clamp_sampler",
+          "kind": "samplerState",
+          "index": 1
+        },
+        {
+          "name": "sk_content",
+          "kind": "shaderResource",
+          "index": 7
+        },
+        {
+          "name": "sk_history",
+          "kind": "shaderResource",
+          "index": 8
+        },
+        {
+          "name": "sk_texture0",
+          "kind": "shaderResource",
+          "index": 3
+        },
+        {
+          "name": "sk_texture1",
+          "kind": "shaderResource",
+          "index": 4
+        },
+        {
+          "name": "sk_texture2",
+          "kind": "shaderResource",
+          "index": 5
+        },
+        {
+          "name": "sk_texture3",
+          "kind": "shaderResource",
+          "index": 6
+        },
+        {
+          "name": "sk_repeat_sampler",
+          "kind": "samplerState",
+          "index": 2
+        },
+        {
+          "name": "GlobalParams",
+          "kind": "constantBuffer",
+          "index": 0
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "name": "glow",
+      "struct": "Glow",
+      "doc": "soft halo centred on the element's rounded edge",
+      "backdrop": false,
+      "content": false,
+      "history": false,
+      "hlsl": "glow.hlsl",
+      "wgsl": "glow.wgsl",
+      "metal": "glow.metal",
+      "source": "crates/sk-effects/shaders/glow.slang",
+      "sourceSha256": "de1d06dddb28503e5a23a3494d73227436591594943428bd0ecec042d3926caa",
+      "generatedSha256": {
+        "hlsl": "bc411e36119827c18ee20f8366538f37f838afd2ea5f084476492f658fa2026a",
+        "wgsl": "2cbca49992336d78db2bb9690eb7753bd67df755c0065d6109488fc7f4871d28",
+        "metal": "fbb2d70e4170b8686278d88a5515e3bdf8980aa4f295da0b429f8574a005e281"
+      },
+      "signature": "glow(<color>?, <length:radius>, <number:strength>)",
+      "backdropRadiusParam": null,
+      "bleedParam": 0,
+      "animatedParam": null,
+      "pointerParam": null,
+      "pointerTimesParam": null,
+      "clockSlots": [],
+      "clockWindow": null,
+      "params": [
+        {
+          "name": "color",
+          "kind": "color",
+          "slot": 4,
+          "required": false,
+          "default": [
+            1,
+            1,
+            1,
+            1
+          ],
+          "range": null
+        },
+        {
+          "name": "radius",
+          "kind": "length",
+          "slot": 0,
+          "required": true,
+          "default": [
+            16,
+            0,
+            0,
+            0
+          ],
+          "range": [
+            0,
+            256
+          ]
+        },
+        {
+          "name": "strength",
+          "kind": "number",
+          "slot": 1,
+          "required": true,
+          "default": [
+            0.75,
+            0,
+            0,
+            0
+          ],
+          "range": [
+            0,
+            1
+          ]
+        }
+      ],
+      "bindings": [
+        {
+          "name": "sk_effect_quads",
+          "kind": "shaderResource",
+          "index": 1
+        },
+        {
+          "name": "sk_backdrop_input",
+          "kind": "shaderResource",
+          "index": 0
+        },
+        {
+          "name": "sk_backdrop_original",
+          "kind": "shaderResource",
+          "index": 2
+        },
+        {
+          "name": "sk_clamp_sampler",
+          "kind": "samplerState",
+          "index": 1
+        },
+        {
+          "name": "sk_content",
+          "kind": "shaderResource",
+          "index": 7
+        },
+        {
+          "name": "sk_history",
+          "kind": "shaderResource",
+          "index": 8
+        },
+        {
+          "name": "sk_texture0",
+          "kind": "shaderResource",
+          "index": 3
+        },
+        {
+          "name": "sk_texture1",
+          "kind": "shaderResource",
+          "index": 4
+        },
+        {
+          "name": "sk_texture2",
+          "kind": "shaderResource",
+          "index": 5
+        },
+        {
+          "name": "sk_texture3",
+          "kind": "shaderResource",
+          "index": 6
+        },
+        {
+          "name": "sk_repeat_sampler",
+          "kind": "samplerState",
+          "index": 2
+        },
+        {
+          "name": "GlobalParams",
+          "kind": "constantBuffer",
+          "index": 0
+        }
+      ]
+    }
+  ]
+}

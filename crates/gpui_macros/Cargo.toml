@@ -1,10 +1,12 @@
 [package]
-name = "gpui_macros"
-version = "0.1.0"
+name = "skathi-gpui-macros"
+version.workspace = true
+description = "Derive and attribute macros for skathi-gpui"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+include = ["src/**/*", "LICENSE-APACHE"]
 edition.workspace = true
-publish = false
-license = "Apache-2.0"
-description = "Macros used by gpui"
 
 [lints]
 workspace = true
@@ -14,6 +16,7 @@ inspector = []
 schemars = []
 
 [lib]
+name = "gpui_macros"
 path = "src/gpui_macros.rs"
 proc-macro = true
 doctest = true
@@ -26,4 +29,5 @@ quote.workspace = true
 syn = { workspace = true, default-features = true, features = ["full", "extra-traits", "visit-mut"] }
 
 [dev-dependencies]
-gpui = { workspace = true, features = ["inspector"] }
+# Path only, so packaging drops it: as a versioned dev-dependency it would be a publish cycle.
+gpui = { package = "skathi-gpui", path = "../gpui", default-features = false, features = ["inspector"] }

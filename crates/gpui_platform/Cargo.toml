@@ -1,14 +1,18 @@
 [package]
-name = "gpui_platform"
-version = "0.1.0"
+name = "skathi-gpui-platform"
+version.workspace = true
+description = "Picks the skathi-gpui platform crate for the target"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+include = ["src/**/*", "LICENSE-APACHE"]
 edition.workspace = true
-publish.workspace = true
-license = "Apache-2.0"
 
 [lints]
 workspace = true
 
 [lib]
+name = "gpui_platform"
 path = "src/gpui_platform.rs"
 doctest = false
 

@@ -1,14 +1,18 @@
 [package]
-name = "gpui_linux"
-version = "0.1.0"
+name = "skathi-gpui-linux"
+version.workspace = true
+description = "Linux and FreeBSD platform for skathi-gpui: Wayland and X11"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+include = ["src/**/*", "LICENSE-APACHE"]
 edition.workspace = true
-publish.workspace = true
-license = "Apache-2.0"
 
 [lints]
 workspace = true
 
 [lib]
+name = "gpui_linux"
 path = "src/gpui_linux.rs"
 doctest = false
 

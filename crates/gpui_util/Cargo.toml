@@ -1,11 +1,15 @@
 [package]
-name = "gpui_util"
-version = "0.1.0"
-publish.workspace = true
+name = "skathi-gpui-util"
+version.workspace = true
+description = "Small helpers shared by the skathi-gpui crates"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+include = ["src/**/*", "LICENSE-APACHE"]
 edition.workspace = true
-license = "Apache-2.0"
 
 [lib]
+name = "gpui_util"
 doctest = false
 
 [dependencies]

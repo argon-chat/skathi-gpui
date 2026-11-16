@@ -30,36 +30,40 @@ members = [
 ]
 
 [workspace.package]
-publish = false
+version = "0.2.0"
 edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/argon-chat/skathi-gpui"
+homepage = "https://skathi.land"
 
 [workspace.dependencies]
-bench_metrics = { path = "crates/bench_metrics" }
-collections = { path = "crates/collections", version = "0.1.0" }
-derive_refineable = { path = "crates/refineable/derive_refineable" }
-gpui = { path = "crates/gpui", default-features = false }
-gpui_apple = { path = "crates/gpui_apple" }
-gpui_ios = { path = "crates/gpui_ios" }
-gpui_linux = { path = "crates/gpui_linux", default-features = false }
-gpui_macos = { path = "crates/gpui_macos", default-features = false }
-gpui_macros = { path = "crates/gpui_macros" }
-gpui_platform = { path = "crates/gpui_platform", default-features = false }
-gpui_shared_string = { path = "crates/gpui_shared_string" }
-gpui_util = { path = "crates/gpui_util" }
-gpui_web = { path = "crates/gpui_web", default-features = false }
-gpui_wgpu = { path = "crates/gpui_wgpu" }
-gpui_windows = { path = "crates/gpui_windows", default-features = false }
-http_client = { path = "crates/http_client" }
+bench_metrics = { package = "skathi-gpui-bench-metrics", path = "crates/bench_metrics", version = "0.2.0" }
+collections = { package = "skathi-gpui-collections", path = "crates/collections", version = "0.2.0" }
+derive_refineable = { package = "skathi-gpui-derive-refineable", path = "crates/refineable/derive_refineable", version = "0.2.0" }
+gpui = { package = "skathi-gpui", path = "crates/gpui", version = "0.2.0", default-features = false }
+gpui_apple = { package = "skathi-gpui-apple", path = "crates/gpui_apple", version = "0.2.0" }
+gpui_ios = { package = "skathi-gpui-ios", path = "crates/gpui_ios", version = "0.2.0" }
+gpui_linux = { package = "skathi-gpui-linux", path = "crates/gpui_linux", version = "0.2.0", default-features = false }
+gpui_macos = { package = "skathi-gpui-macos", path = "crates/gpui_macos", version = "0.2.0", default-features = false }
+gpui_macros = { package = "skathi-gpui-macros", path = "crates/gpui_macros", version = "0.2.0" }
+gpui_platform = { package = "skathi-gpui-platform", path = "crates/gpui_platform", version = "0.2.0", default-features = false }
+gpui_shared_string = { package = "skathi-gpui-shared-string", path = "crates/gpui_shared_string", version = "0.2.0" }
+gpui_util = { package = "skathi-gpui-util", path = "crates/gpui_util", version = "0.2.0" }
+gpui_web = { package = "skathi-gpui-web", path = "crates/gpui_web", version = "0.2.0", default-features = false }
+gpui_wgpu = { package = "skathi-gpui-wgpu", path = "crates/gpui_wgpu", version = "0.2.0" }
+gpui_windows = { package = "skathi-gpui-windows", path = "crates/gpui_windows", version = "0.2.0", default-features = false }
+http_client = { package = "skathi-gpui-http-client", path = "crates/http_client", version = "0.2.0" }
+refineable = { package = "skathi-gpui-refineable", path = "crates/refineable", version = "0.2.0" }
+scheduler = { package = "skathi-gpui-scheduler", path = "crates/scheduler", version = "0.2.0" }
+sum_tree = { package = "skathi-gpui-sum-tree", path = "crates/sum_tree", version = "0.2.0" }
+zlog = { package = "skathi-gpui-zlog", path = "crates/zlog", version = "0.2.0" }
+ztracing = { package = "skathi-gpui-ztracing", path = "crates/ztracing", version = "0.2.0" }
+ztracing_macro = { package = "skathi-gpui-ztracing-macro", path = "crates/ztracing_macro", version = "0.2.0" }
+# Test and benchmark support, not published: no version, so packaging drops them as dev-dependencies.
 http_client_tls = { path = "crates/http_client_tls" }
 perf = { path = "tooling/perf", default-features = false }
-refineable = { path = "crates/refineable" }
 reqwest_client = { path = "crates/reqwest_client" }
-scheduler = { path = "crates/scheduler" }
-sum_tree = { path = "crates/sum_tree" }
 util_macros = { path = "crates/util_macros" }
-zlog = { path = "crates/zlog" }
-ztracing = { path = "crates/ztracing" }
-ztracing_macro = { path = "crates/ztracing_macro" }
 accesskit = { version = "0.24.0", features = ["enumn"] }
 accesskit_macos = "0.26.0"
 accesskit_unix = "0.22"
@@ -293,7 +297,7 @@ smol = "2.0"
 stacksafe = "1.0"
 swash = "0.2.6"
 syn = { version = "2.0", default-features = false, features = ["proc-macro"] }
-taffy = { version = "=0.15.0", default-features = false }
+taffy = { package = "skathi-taffy", version = "=0.15.0", default-features = false }
 tempfile = "3.20.0"
 thiserror = "2.0.12"
 tokio = "1"
@@ -313,7 +317,7 @@ wasm-bindgen-futures = "0.4"
 web-sys = "0.3"
 web-time = "1.1.0"
 webpki-roots = "1.0.10"
-wgpu = { git = "https://github.com/gfx-rs/wgpu", rev = "cddb2f5d80dc0009b2ef6767635140cacf90a007", default-features = false }
+wgpu = { version = "30.0.2", default-features = false }
 which = "8"
 windows-core = "0.62"
 windows-registry = "0.6.0"
@@ -328,6 +332,8 @@ calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee
 # Avoid panicking when a failed EGL call reports EGL_SUCCESS.
 # https://github.com/timothee-haudebourg/khronos-egl/pull/37
 khronos-egl = { git = "https://github.com/zed-industries/khronos-egl", rev = "42214b36347b108fd9630ca6254b96dde59e04fe" }
+# Skathi's vendor/taffy, beside this checkout: gpui is built and packaged from inside Skathi.
+skathi-taffy = { path = "../taffy" }
 
 [profile.dev]
 split-debuginfo = "unpacked"

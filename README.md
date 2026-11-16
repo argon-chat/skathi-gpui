@@ -29,6 +29,11 @@ cause to Zed.
 | `ztracing`, `ztracing_macro`, `zlog`                      | tracing and logging                     |
 | `bench_metrics`, `util_macros`, `tooling/perf`            | benchmarks and test support             |
 
+On crates.io each crate is named `skathi-gpui-*` after its directory (`gpui` is `skathi-gpui`,
+`gpui_windows` is `skathi-gpui-windows`, `refineable` is `skathi-gpui-refineable`), with its library
+name unchanged, so code still says `use gpui::…`. `http_client_tls`, `reqwest_client`, `util_macros`
+and `tooling/perf` are test support and not published.
+
 `assets/fonts` holds the two font families that gpui's tests and examples load. Apps do not embed
 them.
 
@@ -45,9 +50,9 @@ These changes come on top of upstream gpui. Each one is marked `vue-native fork`
 - a DirectX 12 path and DWM materials on Windows;
 - text and input fixes found by Skathi's end-to-end tests.
 
-The renderers' build scripts compile Skathi's built-in effects. They look for them two directories
-above this repo (`crates/sk-effects/generated` of a Skathi checkout that has this repo as
-`vendor/gpui`), or in `SK_EFFECTS_GENERATED_DIR`.
+The renderers embed Skathi's built-in effects from their own `effects/` directories, which Skathi's
+`bun run shaders` writes and `bun run shaders:check` keeps in step with the `.slang` sources.
+`SK_EFFECTS_GENERATED_DIR` points the build scripts at another directory.
 
 ## How it was made
 

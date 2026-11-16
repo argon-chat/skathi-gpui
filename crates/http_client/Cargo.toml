@@ -1,10 +1,12 @@
 [package]
-name = "http_client"
-version = "0.1.0"
+name = "skathi-gpui-http-client"
+version.workspace = true
+description = "The HTTP client interface skathi-gpui loads resources through"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+include = ["src/**/*", "LICENSE-APACHE"]
 edition.workspace = true
-publish = false
-license = "Apache-2.0"
-description = "A HTTP client library for Zed and GPUI"
 
 [lints]
 workspace = true
@@ -13,6 +15,7 @@ workspace = true
 test-support = ["dep:log"]
 
 [lib]
+name = "http_client"
 path = "src/http_client.rs"
 test = false
 doctest = false

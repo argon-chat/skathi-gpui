@@ -4,6 +4,13 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo::rustc-check-cfg=cfg(gles)");
 
+    // gpui_apple's build script generates its Metal header from these sources.
+    let manifest_dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    println!(
+        "cargo::metadata=src_dir={}",
+        manifest_dir.join("src").display()
+    );
+
     // Leak detection does bookkeeping on every entity handle, so `test-support`
     // does not enable it: that feature must stay cheap enough to compile into
     // every build. CI sets `GPUI_LEAK_DETECTION`; the `leak-detection` feature

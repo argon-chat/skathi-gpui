@@ -1,14 +1,18 @@
 [package]
-name = "gpui_wgpu"
-version = "0.1.0"
+name = "skathi-gpui-wgpu"
+version.workspace = true
+description = "wgpu renderer and cosmic-text text system for skathi-gpui"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+include = ["src/**/*", "build.rs", "effects/**/*", "LICENSE-APACHE"]
 edition.workspace = true
-publish.workspace = true
-license = "Apache-2.0"
 
 [lints]
 workspace = true
 
 [lib]
+name = "gpui_wgpu"
 path = "src/gpui_wgpu.rs"
 doctest = false
 
@@ -57,7 +61,7 @@ criterion.workspace = true
 gpui = { workspace = true, features = ["bench-support"] }
 image.workspace = true
 # Validate shaders with the same Naga revision that wgpu uses at runtime.
-naga = { git = "https://github.com/gfx-rs/wgpu", rev = "cddb2f5d80dc0009b2ef6767635140cacf90a007", features = ["wgsl-in"] }
+naga = { version = "30.0", features = ["wgsl-in"] }
 
 [[bench]]
 name = "layout_line"

@@ -1813,7 +1813,7 @@ fragment float4 blur_rect_fragment(
   return clamp_premultiplied(mix(untouched, tinted, float4(coverage)));
 }
 
-// The generated fragment stages (crates/sk-effects/generated/*.metal) read
+// The generated fragment stages (effects/*.metal) read
 // the quad's index as `[[flat]] uint [[user(TEXCOORD)]]`.
 struct EffectVertexOutput {
   float4 position [[position]];

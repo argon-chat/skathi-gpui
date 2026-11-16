@@ -147,7 +147,7 @@ struct DirectXRenderPipelines {
     /// One entry per built-in effect, indexed by `EffectQuad::effect_id`.
     ///
     /// `None` when that effect's pipeline could not be built — a missing or
-    /// broken `crates/sk-effects/generated/*.hlsl`, or a GPU below D3D feature
+    /// broken `effects/*.hlsl`, or a GPU below D3D feature
     /// level 11. A broken effect must degrade to "this element renders without
     /// its shading", never to a dead window, so this is fallible per entry and
     /// the whole renderer still comes up.
@@ -3302,7 +3302,7 @@ pub(crate) mod shader_resources {
         /// A `--shading` effect. Its two halves come from two different files:
         /// the shared engine vertex stage from `src/effects.hlsl`, the
         /// per-effect fragment stage from the checked-in slangc output under
-        /// `crates/sk-effects/generated/`.
+        /// `effects/`.
         Effect(EffectShader),
     }
 
@@ -3358,21 +3358,16 @@ pub(crate) mod shader_resources {
         assert!(gpui::effect_id::GLOW == 2);
     };
 
-    /// Where `bun shaders.ts` writes the compiled effect fragments.
-    ///
-    /// The generated HLSL is checked in NEXT TO its `.slang` sources (owner
-    /// decision 3 / docs/SHADERS.md §2.3), which is what gives an effect author
-    /// a real file to hot-reload and what keeps `cargo build` free of any
-    /// dependency on slangc. That puts it outside this crate, hence the walk
-    /// back up to the workspace root; `SK_EFFECTS_GENERATED_DIR` overrides it
-    /// for anyone consuming this gpui fork from a different layout.
+    /// Where Skathi's `bun run shaders` writes the compiled effect fragments
+    /// (checked in, so `cargo build` needs no slangc); a debug build reads them
+    /// from there at runtime, so a regenerated effect needs no rebuild.
+    /// `SK_EFFECTS_GENERATED_DIR` overrides it.
     #[cfg(debug_assertions)]
     pub(super) fn effects_generated_dir() -> std::path::PathBuf {
         if let Ok(dir) = std::env::var("SK_EFFECTS_GENERATED_DIR") {
             return std::path::PathBuf::from(dir);
         }
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../../crates/sk-effects/generated")
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("effects")
     }
 
     fn compile_flags() -> u32 {
@@ -3845,8 +3840,7 @@ mod app_effect_tests {
     /// stands in for an app's, since the compiler makes both the same way.
     #[test]
     fn app_effects_compile_from_memory_for_d3d11_and_d3d12() -> anyhow::Result<()> {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../../crates/sk-effects/generated");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("effects");
         let app = gpui::AppEffects::from_dir(&dir).map_err(anyhow::Error::msg)?;
         let effects = app.effects();
         let names: Vec<_> = effects.iter().map(|e| e.name.as_str()).collect();

@@ -30,10 +30,10 @@ mod apple_build {
     /// `gpui::effect_id` order; `metal_renderer::backdrop` asserts the count.
     const BUILTIN_EFFECTS: [&str; 3] = ["frost", "noise", "glow"];
 
-    /// Embeds the MSL fragment stages `bun scripts/shaders.ts` checks in beside
-    /// the `.slang` sources; the renderer compiles them at runtime. A layout
-    /// without them still builds: the effects are then unavailable at runtime,
-    /// with an advisory.
+    /// Embeds the MSL fragment stages Skathi's `bun run shaders` writes to
+    /// `effects/`; the renderer compiles them at runtime. A layout without them
+    /// still builds: the effects are then unavailable at runtime, with an
+    /// advisory.
     fn embed_builtin_effects() {
         use std::fmt::Write as _;
 
@@ -41,7 +41,7 @@ mod apple_build {
         let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
         let generated = match env::var("SK_EFFECTS_GENERATED_DIR") {
             Ok(directory) => manifest_dir.join(directory),
-            Err(_) => manifest_dir.join("../../../../crates/sk-effects/generated"),
+            Err(_) => manifest_dir.join("effects"),
         };
 
         let mut table = String::from(
@@ -80,7 +80,7 @@ mod apple_build {
     fn generate_shader_bindings() -> PathBuf {
         let output_path = PathBuf::from(env::var("OUT_DIR").unwrap()).join("scene.h");
 
-        let gpui_dir = find_gpui_crate_dir();
+        let gpui_src = gpui_src_dir();
 
         let mut config = Config {
             include_guard: Some("SCENE_H".into()),
@@ -132,11 +132,11 @@ mod apple_build {
 
         // Source files from gpui that define types used in shaders
         let gpui_src_paths = [
-            gpui_dir.join("src/scene.rs"),
-            gpui_dir.join("src/geometry.rs"),
-            gpui_dir.join("src/color.rs"),
-            gpui_dir.join("src/window.rs"),
-            gpui_dir.join("src/platform.rs"),
+            gpui_src.join("scene.rs"),
+            gpui_src.join("geometry.rs"),
+            gpui_src.join("color.rs"),
+            gpui_src.join("window.rs"),
+            gpui_src.join("platform.rs"),
         ];
 
         // Source files from this crate
@@ -156,11 +156,14 @@ mod apple_build {
         output_path
     }
 
-    /// Locate the gpui crate directory relative to this crate. Resolved at
-    /// build-script runtime against this crate's manifest dir, so no checkout
-    /// path is baked into a compiled artifact (which corgi rejects).
-    fn find_gpui_crate_dir() -> PathBuf {
-        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("../gpui")
+    /// gpui's `src/`, wherever Cargo unpacked it: its build script publishes the
+    /// path as `links` metadata, as no sibling directory exists in a registry
+    /// build.
+    fn gpui_src_dir() -> PathBuf {
+        PathBuf::from(
+            env::var("DEP_SKATHI_GPUI_SRC_DIR")
+                .expect("skathi-gpui's build script sets the `src_dir` metadata"),
+        )
     }
 
     /// To enable runtime compilation, we need to "stitch" the shaders file with the generated header

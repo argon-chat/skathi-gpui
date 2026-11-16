@@ -1,15 +1,18 @@
 [package]
-name = "sum_tree"
-version = "0.1.0"
+name = "skathi-gpui-sum-tree"
+version.workspace = true
+description = "A sum tree, a concurrency-friendly B-tree, for skathi-gpui"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+include = ["src/**/*", "LICENSE-APACHE"]
 edition.workspace = true
-publish = false
-license = "Apache-2.0"
-description = "A sum tree data structure, a concurrency-friendly B-tree"
 
 [lints]
 workspace = true
 
 [lib]
+name = "sum_tree"
 path = "src/sum_tree.rs"
 doctest = false
 

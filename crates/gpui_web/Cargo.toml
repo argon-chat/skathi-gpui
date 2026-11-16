@@ -1,9 +1,12 @@
 [package]
-name = "gpui_web"
-version = "0.1.0"
-publish.workspace = true
+name = "skathi-gpui-web"
+version.workspace = true
+description = "Browser platform for skathi-gpui, through wgpu"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+include = ["src/**/*", "LICENSE-APACHE"]
 edition.workspace = true
-license = "Apache-2.0"
 autoexamples = false
 
 [lints]
@@ -14,6 +17,7 @@ default = ["multithreaded"]
 multithreaded = ["dep:wasm_thread", "scheduler/wasm-threads"]
 
 [lib]
+name = "gpui_web"
 path = "src/gpui_web.rs"
 doctest = false
 

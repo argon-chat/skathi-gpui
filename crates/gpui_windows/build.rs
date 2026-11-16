@@ -40,7 +40,7 @@ fn effects_generated_dir() -> std::path::PathBuf {
     let manifest_dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let generated = match std::env::var("SK_EFFECTS_GENERATED_DIR") {
         Ok(directory) => std::path::PathBuf::from(directory),
-        Err(_) => manifest_dir.join("../../../../crates/sk-effects/generated"),
+        Err(_) => manifest_dir.join("effects"),
     };
     // include_str! resolves relative names beside its Rust source, whereas
     // fxc runs from CARGO_MANIFEST_DIR. Make the shared contract absolute.
@@ -112,8 +112,7 @@ mod shader_compilation {
     /// * their two halves come from two different files. The vertex stage is
     ///   engine-owned HLSL shared by every effect (`src/effects.hlsl`) —
     ///   `SV_ClipDistance` cannot be authored in Slang, see that file. The
-    ///   fragment stage is the checked-in slangc output living next to its
-    ///   `.slang` source under `crates/sk-effects/generated/`, which is what
+    ///   fragment stage is the checked-in slangc output in `effects/`, which
     ///   keeps `cargo build` free of any dependency on slangc.
     #[cfg(not(debug_assertions))]
     fn compile_effect_shaders(out_dir: &str, fxc_path: &str, rust_binding_path: &str) {

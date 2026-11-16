@@ -5,16 +5,16 @@ use std::{env, error::Error, fmt::Write as _, fs, path::PathBuf};
 /// `gpui::effect_id` order; `wgpu_renderer::backdrop` asserts the count.
 const BUILTIN_EFFECTS: [&str; 3] = ["frost", "noise", "glow"];
 
-/// Embeds the WGSL fragment stages `bun scripts/shaders.ts` checks in beside
-/// the `.slang` sources. A layout without them still builds: the effects are
-/// then unavailable at runtime, with an advisory.
+/// Embeds the WGSL fragment stages Skathi's `bun run shaders` writes to
+/// `effects/`. A layout without them still builds: the effects are then
+/// unavailable at runtime, with an advisory.
 fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=SK_EFFECTS_GENERATED_DIR");
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
     let generated = match env::var("SK_EFFECTS_GENERATED_DIR") {
         Ok(directory) => manifest_dir.join(directory),
-        Err(_) => manifest_dir.join("../../../../crates/sk-effects/generated"),
+        Err(_) => manifest_dir.join("effects"),
     };
 
     let mut table = String::from(
