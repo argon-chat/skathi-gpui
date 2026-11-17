@@ -1151,7 +1151,7 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
-        Some(Rc::new(crate::frame_pacing::wake_frames))
+        Some(Rc::new(crate::frame_pacing::window_wants_frame))
     }
 
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
