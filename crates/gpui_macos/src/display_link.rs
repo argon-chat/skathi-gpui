@@ -301,11 +301,18 @@ fn unsubscribe(display_id: CGDirectDisplayID, subscriber_id: SubscriberId) {
 /// nor asked for another frame, so an idle window acquires no drawables. GPUI
 /// decides when frames are needed (including presenting after high-rate
 /// input); this only stops the link between those decisions.
+///
+/// Some systems (seen on macOS VMs) never deliver an update to a woken link.
+/// A wake arms the `stall_watch` the window installs, which checks back later
+/// ([`MetalFrames::stalled_since`]) and moves the window to `CVDisplayLink`.
 #[derive(Default)]
 pub struct MetalFrames {
     source: RefCell<Option<MetalFrameSource>>,
     /// Whether GPUI asked for a frame since the current update began.
     woken: Cell<bool>,
+    updates: Cell<u64>,
+    watching: Cell<bool>,
+    stall_watch: RefCell<Option<Box<dyn Fn(u64)>>>,
 }
 
 impl MetalFrames {
@@ -317,14 +324,42 @@ impl MetalFrames {
         self.source.borrow().is_some()
     }
 
+    pub fn set_stall_watch(&self, watch: impl Fn(u64) + 'static) {
+        *self.stall_watch.borrow_mut() = Some(Box::new(watch));
+    }
+
     pub fn wake(&self) {
         self.woken.set(true);
         // A source being replaced starts unpaused, so skipping it is safe.
-        if let Ok(source) = self.source.try_borrow()
-            && let Some(source) = source.as_ref()
+        let Ok(source) = self.source.try_borrow() else {
+            return;
+        };
+        let Some(source) = source.as_ref() else {
+            return;
+        };
+        source.set_paused(false);
+        if !self.watching.replace(true)
+            && let Ok(watch) = self.stall_watch.try_borrow()
+            && let Some(watch) = watch.as_ref()
         {
-            source.set_paused(false);
+            watch(self.updates.get());
         }
+    }
+
+    /// Ends a stall watch armed when `updates` updates had arrived: whether
+    /// the link was woken and has delivered nothing since.
+    pub fn stalled_since(&self, updates: u64) -> bool {
+        self.watching.set(false);
+        let paused = self
+            .source
+            .try_borrow()
+            .ok()
+            .and_then(|source| source.as_ref().map(MetalFrameSource::is_paused));
+        paused == Some(false) && self.woken.get() && self.updates.get() == updates
+    }
+
+    pub fn note_update(&self) {
+        self.updates.set(self.updates.get() + 1);
     }
 
     pub fn begin_frame(&self) {
@@ -342,6 +377,7 @@ impl MetalFrames {
             "attached": self.is_attached(),
             "paused": paused,
             "woken": self.woken.get(),
+            "updates": self.updates.get(),
         })
     }
 

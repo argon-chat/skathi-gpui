@@ -1199,6 +1199,8 @@ impl MacWindow {
             assert!(!native_view.is_null());
 
             let metal_frames = MetalFrameSource::is_available().then(Rc::<MetalFrames>::default);
+            let (foreground, background) =
+                (foreground_executor.clone(), background_executor.clone());
             let state = Rc::new(Mutex::new(MacWindowState {
                 handle,
                 foreground_executor,
@@ -1262,6 +1264,21 @@ impl MacWindow {
                 accesskit_adapter: None,
                 sheet_parent: None,
             }));
+            if let Some(metal_frames) = &metal_frames {
+                let weak = Rc::downgrade(&state);
+                metal_frames.set_stall_watch(move |updates| {
+                    let timer = background.timer(METAL_LINK_STALL);
+                    let weak = weak.clone();
+                    foreground
+                        .spawn(async move {
+                            timer.await;
+                            if let Some(state) = weak.upgrade() {
+                                leave_stalled_metal_link(&state, updates);
+                            }
+                        })
+                        .detach();
+                });
+            }
             let mut window = Self(state, marker, metal_frames);
 
             (*native_window)
@@ -4018,6 +4035,25 @@ extern "C" fn step(view: *mut c_void) {
     }
 }
 
+const METAL_LINK_STALL: Duration = Duration::from_millis(500);
+
+fn leave_stalled_metal_link(window_state: &Rc<Mutex<MacWindowState>>, updates: u64) {
+    let mut lock = window_state.lock();
+    let FrameSource::Metal(metal_frames) = &lock.frame_source else {
+        return;
+    };
+    if !metal_frames.stalled_since(updates) {
+        return;
+    }
+    log::warn!(
+        "CAMetalDisplayLink delivered no frame {METAL_LINK_STALL:?} after a wake; this window now \
+         takes its frames from CVDisplayLink"
+    );
+    lock.stop_display_link();
+    lock.frame_source = FrameSource::DisplayLink(None);
+    lock.start_display_link(window_state);
+}
+
 fn metal_frame(
     window_state: &Rc<Mutex<MacWindowState>>,
     update: &objc2_quartz_core::CAMetalDisplayLinkUpdate,
@@ -4028,6 +4064,7 @@ fn metal_frame(
         return;
     };
     let metal_frames = metal_frames.clone();
+    metal_frames.note_update();
     let Some(mut callback) = lock.request_frame_callback.take() else {
         return;
     };
