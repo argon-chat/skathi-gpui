@@ -406,8 +406,16 @@ impl Textures {
         {
             return Ok(tile);
         }
-        let width = size.width.0.max(1024) as u32;
-        let height = size.height.0.max(1024) as u32;
+        // A kind's first page is a quarter of the others: a page is allocated
+        // whole on the GPU (1024² RGBA is 4 MiB), and most windows draw a few
+        // dozen glyphs.
+        let smallest = if self.list_mut(kind).textures.iter().flatten().next().is_none() {
+            512
+        } else {
+            1024
+        };
+        let width = size.width.0.max(smallest) as u32;
+        let height = size.height.0.max(smallest) as u32;
         let (format, bytes_per_pixel) = pixel_layout(kind);
         let resource = self.device.create_texture(
             width,

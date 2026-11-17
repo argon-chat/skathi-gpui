@@ -338,7 +338,28 @@ impl DirectXAtlasTextures {
             width: DevicePixels(16384),
             height: DevicePixels(16384),
         };
-        let size = min_size.min(&MAX_ATLAS_SIZE).max(&DEFAULT_ATLAS_SIZE);
+        // vue-native: a kind's first page is a quarter of the others. A page is
+        // allocated whole on the GPU (1024² RGBA is 4 MiB), and most windows
+        // draw a few dozen glyphs.
+        const FIRST_ATLAS_SIZE: Size<DevicePixels> = Size {
+            width: DevicePixels(512),
+            height: DevicePixels(512),
+        };
+        let pages = match kind {
+            AtlasTextureKind::Monochrome => &self.monochrome_textures,
+            AtlasTextureKind::Polychrome => &self.polychrome_textures,
+            AtlasTextureKind::Subpixel => &self.subpixel_textures,
+        }
+        .textures
+        .iter()
+        .flatten()
+        .count();
+        let smallest = if pages == 0 {
+            FIRST_ATLAS_SIZE
+        } else {
+            DEFAULT_ATLAS_SIZE
+        };
+        let size = min_size.min(&MAX_ATLAS_SIZE).max(&smallest);
         let pixel_format;
         let bind_flag;
         let bytes_per_pixel;
@@ -641,8 +662,8 @@ mod tests {
             height: DevicePixels(64),
         };
         let big = Size {
-            width: DevicePixels(700),
-            height: DevicePixels(700),
+            width: DevicePixels(400),
+            height: DevicePixels(400),
         };
 
         let keeper_key = make_image_key(1);
