@@ -673,6 +673,10 @@ struct MacWindowState {
     pointer_locked: bool,
     pointer_motion: Option<Point<Pixels>>,
     frame_source: FrameSource,
+    draws_while_occluded: bool,
+    // A `CAMetalDisplayLink` stops with its window covered: a covered window
+    // that keeps drawing is paced by the `CVDisplayLink` registry instead.
+    occluded_frames: Option<WindowFrameSource>,
     renderer: renderer::Renderer,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
@@ -886,16 +890,36 @@ impl MacWindowState {
 
     /// `window_state` is the handle this state lives in; a Metal link holds it
     /// weakly to deliver frames.
-    fn start_display_link(&mut self, window_state: &Rc<Mutex<MacWindowState>>) {
-        self.stop_display_link();
-        if !self
-            .native_window()
+    fn on_screen(&self) -> bool {
+        self.native_window()
             .occlusionState()
             .contains(NSWindowOcclusionState::Visible)
-        {
+    }
+
+    fn draws(&self) -> bool {
+        let window = self.native_window();
+        self.on_screen()
+            || (self.draws_while_occluded && window.isVisible() && !window.isMiniaturized())
+    }
+
+    fn start_display_link(&mut self, window_state: &Rc<Mutex<MacWindowState>>) {
+        self.stop_display_link();
+        if !self.draws() {
             return;
         }
+        let covered = !self.on_screen();
         match &mut self.frame_source {
+            FrameSource::Metal(_) if covered => {
+                let screen: *mut AnyObject = unsafe { msg_send![self.native_window, screen] };
+                let Some(display_id) = display_id_for_screen(screen) else {
+                    return;
+                };
+                let data = self.native_view.as_ptr() as *mut c_void;
+                self.occluded_frames
+                    .get_or_insert_with(|| WindowFrameSource::new(data, step))
+                    .start(display_id)
+                    .log_err();
+            }
             FrameSource::Metal(metal_frames) => {
                 let Some(layer) = self.renderer.layer() else {
                     return;
@@ -929,6 +953,9 @@ impl MacWindowState {
     }
 
     fn stop_display_link(&mut self) {
+        if let Some(frame_source) = &mut self.occluded_frames {
+            frame_source.stop();
+        }
         match &mut self.frame_source {
             FrameSource::Metal(metal_frames) => {
                 if metal_frames.is_attached() {
@@ -1189,6 +1216,8 @@ impl MacWindow {
                     Some(metal_frames) => FrameSource::Metal(metal_frames.clone()),
                     None => FrameSource::DisplayLink(None),
                 },
+                draws_while_occluded: false,
+                occluded_frames: None,
                 renderer,
                 request_frame_callback: None,
                 event_callback: None,
@@ -1483,6 +1512,7 @@ impl Drop for MacWindow {
             FrameSource::Metal(metal_frames) => metal_frames.replace(None),
             FrameSource::DisplayLink(frame_source) => drop(frame_source.take()),
         }
+        drop(this.occluded_frames.take());
         unsafe {
             let _: () = msg_send![this.native_window, setDelegate: ptr::null_mut::<AnyObject>()];
         }
@@ -2479,6 +2509,18 @@ impl PlatformWindow for MacWindow {
         self.0.lock().pointer_motion.take()
     }
 
+    fn set_draws_while_occluded(&self, on: bool) {
+        let mut state = self.0.lock();
+        if std::mem::replace(&mut state.draws_while_occluded, on) == on {
+            return;
+        }
+        if state.request_frame_callback.is_some() {
+            state.start_display_link(&self.0);
+        }
+        drop(state);
+        report_visibility(&self.0);
+    }
+
     fn debug_state(&self) -> serde_json::Value {
         let state = self.0.lock();
         let window = state.native_window();
@@ -3397,11 +3439,7 @@ fn release_pointer_lock(state: &mut MacWindowState) {
 }
 
 fn visibility(state: &MacWindowState) -> WindowVisibility {
-    let is_visible = state
-        .native_window()
-        .occlusionState()
-        .contains(NSWindowOcclusionState::Visible);
-    if is_visible {
+    if state.draws() {
         WindowVisibility::Visible
     } else {
         WindowVisibility::Hidden
@@ -3443,11 +3481,7 @@ fn report_visibility(window_state: &Rc<Mutex<MacWindowState>>) {
 extern "C" fn window_did_change_occlusion_state(this: &AnyObject, _: Sel, _: *mut AnyObject) {
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.lock();
-    if lock
-        .native_window()
-        .occlusionState()
-        .contains(NSWindowOcclusionState::Visible)
-    {
+    if lock.draws() {
         lock.move_traffic_light();
         lock.start_display_link(&window_state);
     } else {

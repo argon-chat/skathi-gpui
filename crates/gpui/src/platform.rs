@@ -1511,6 +1511,8 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn take_pointer_motion(&self) -> Option<Point<Pixels>> {
         None
     }
+    /// vue-native fork: [`crate::Window::set_draws_while_occluded`].
+    fn set_draws_while_occluded(&self, _on: bool) {}
 
     // Linux specific methods
     fn inner_window_bounds(&self) -> WindowBounds {

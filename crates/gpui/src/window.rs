@@ -4176,6 +4176,12 @@ impl Window {
         }
     }
 
+    /// vue-native fork: a window covered by others keeps drawing and reads as
+    /// visible (macOS stops it otherwise); minimised or hidden still stops.
+    pub fn set_draws_while_occluded(&self, on: bool) {
+        self.platform_window.set_draws_while_occluded(on);
+    }
+
     /// Returns whether this window is considered to be the window
     /// that currently owns the mouse cursor.
     /// On mac, this is equivalent to `is_window_active`.
