@@ -932,6 +932,16 @@ impl ToTaffy<taffy::style::Style> for Style {
                 .as_ref()
                 .map(|location| to_grid_line(&location.column))
                 .unwrap_or_default(),
+            contain: {
+                let mut contain = taffy::Contain::NONE;
+                if self.vn_contain_size & Style::CONTAIN_INLINE_SIZE != 0 {
+                    contain |= taffy::Contain::INLINE_SIZE;
+                }
+                if self.vn_contain_size & Style::CONTAIN_BLOCK_SIZE != 0 {
+                    contain |= taffy::Contain::BLOCK_SIZE;
+                }
+                contain
+            },
             ..Default::default()
         }
     }

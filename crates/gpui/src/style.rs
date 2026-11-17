@@ -813,6 +813,10 @@ pub struct Style {
     /// `plus-lighter` composite inside blends with the group only.
     pub vn_isolate: bool,
 
+    /// vue-native fork: size containment, [`Style::CONTAIN_INLINE_SIZE`] and
+    /// [`Style::CONTAIN_BLOCK_SIZE`]: the box is sized as if it were empty on that axis.
+    pub vn_contain_size: u8,
+
     /// CSS backgrounds painted through the descendant glyph alpha, not the box.
     pub vn_text_fill: Option<VnTextFill>,
 
@@ -1356,6 +1360,11 @@ fn representative_color(background: &Background) -> Hsla {
 }
 
 impl Style {
+    /// [`Style::vn_contain_size`]: the inline (horizontal) axis.
+    pub const CONTAIN_INLINE_SIZE: u8 = 1;
+    /// [`Style::vn_contain_size`]: the block (vertical) axis.
+    pub const CONTAIN_BLOCK_SIZE: u8 = 2;
+
     /// Returns true if the style is visible and the background is opaque.
     pub fn has_opaque_background(&self) -> bool {
         self.background
@@ -2201,6 +2210,7 @@ impl Default for Style {
             vn_color_matrix: None,
             vn_capture: None,
             vn_isolate: false,
+            vn_contain_size: 0,
             vn_text_fill: None,
             vn_mask: None,
             vn_corner_radii: Corners::default(),
