@@ -3846,6 +3846,55 @@ pub enum Length {
     Definite(DefiniteLength),
     /// An automatic length that is determined by the context in which it is used.
     Auto,
+    /// vue-native fork: CSS `calc-size()` in a sizing property, resolved by layout.
+    VnCalcSize(VnCalcSize),
+}
+
+/// vue-native fork: `calc-size(<basis>, size * scale + offset)`. The basis is laid out first and
+/// `size` is the length it took; only a linear function of `size` is representable.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VnCalcSize {
+    /// What `size` measures.
+    pub basis: VnSizeBasis,
+    /// The factor on `size`.
+    pub scale: f32,
+    /// Added after scaling; a percentage is of the containing block.
+    pub offset: DefiniteLength,
+}
+
+impl VnCalcSize {
+    /// `calc-size(<basis>, size)`, which lays out exactly as the basis keyword.
+    pub fn is_basis(&self) -> bool {
+        self.scale == 1. && self.offset.is_zero()
+    }
+}
+
+/// vue-native fork: the intrinsic sizing keyword a [`VnCalcSize`] is measured from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum VnSizeBasis {
+    /// `auto`.
+    Auto,
+    /// `min-content`.
+    MinContent,
+    /// `max-content`.
+    MaxContent,
+    /// `fit-content`.
+    FitContent,
+    /// `flex-basis: content`.
+    Content,
+}
+
+impl VnSizeBasis {
+    /// The CSS keyword.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::MinContent => "min-content",
+            Self::MaxContent => "max-content",
+            Self::FitContent => "fit-content",
+            Self::Content => "content",
+        }
+    }
 }
 
 impl Debug for Length {
@@ -3859,6 +3908,13 @@ impl Display for Length {
         match self {
             Length::Definite(definite_length) => write!(f, "{}", definite_length),
             Length::Auto => write!(f, "auto"),
+            Length::VnCalcSize(c) => write!(
+                f,
+                "calc-size({}, size * {} + {})",
+                c.basis.as_str(),
+                c.scale,
+                c.offset
+            ),
         }
     }
 }
@@ -4167,7 +4223,7 @@ impl IsZero for Length {
     fn is_zero(&self) -> bool {
         match self {
             Length::Definite(length) => length.is_zero(),
-            Length::Auto => false,
+            Length::Auto | Length::VnCalcSize(_) => false,
         }
     }
 }

@@ -44,6 +44,7 @@ pub struct TaffyLayoutEngine {
     layout_bounds_scratch_space: Vec<LayoutId>,
     /// This frame's nonzero `vn_order`s, by node.
     orders: FxHashMap<LayoutId, i32>,
+    calc_sizes: Vec<CalcSizeNode>,
 }
 
 const EXPECT_MESSAGE: &str = "we should avoid taffy layout errors by construction if possible";
@@ -60,6 +61,7 @@ impl TaffyLayoutEngine {
             computed_layouts: FxHashSet::default(),
             layout_bounds_scratch_space: Vec::new(),
             orders: FxHashMap::default(),
+            calc_sizes: Vec::new(),
         }
     }
 
@@ -73,6 +75,7 @@ impl TaffyLayoutEngine {
         self.absolute_outer_origins.clear();
         self.computed_layouts.clear();
         self.orders.clear();
+        self.calc_sizes.clear();
     }
 
     pub(crate) fn retention_enabled(&self) -> bool {
@@ -140,6 +143,9 @@ impl TaffyLayoutEngine {
     fn note_order(&mut self, id: LayoutId, style: &Style) {
         if style.vn_order != 0 {
             self.orders.insert(id, style.vn_order);
+        }
+        if let Some(node) = CalcSizeNode::of(id, style) {
+            self.calc_sizes.push(node);
         }
     }
 
@@ -356,6 +362,27 @@ impl TaffyLayoutEngine {
             retained::prepare_compute(self, scale_factor);
             retained::replay(self, window, cx);
         }
+        let calc_sizes = self.take_calc_sizes(id);
+        if !calc_sizes.is_empty() {
+            let requested = self.probe_calc_sizes(&calc_sizes);
+            self.run_taffy(id, available_space, scale_factor, window, cx);
+            let rem_size = window.rem_size();
+            self.resolve_calc_sizes(&calc_sizes, requested, rem_size, scale_factor);
+        }
+        self.run_taffy(id, available_space, scale_factor, window, cx);
+        if self.retention.enabled {
+            retained::settle(self, window, cx);
+        }
+    }
+
+    fn run_taffy(
+        &mut self,
+        id: LayoutId,
+        available_space: Size<AvailableSpace>,
+        scale_factor: f32,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         let retention = &mut self.retention;
         self.taffy
             .compute_layout_with_measure(
@@ -412,9 +439,157 @@ impl TaffyLayoutEngine {
                 },
             )
             .expect(EXPECT_MESSAGE);
-        if self.retention.enabled {
-            retained::settle(self, window, cx);
+    }
+
+    /// vue-native fork: the `calc-size()` nodes under `root`; the others wait for their own root.
+    fn take_calc_sizes(&mut self, root: LayoutId) -> Vec<CalcSizeNode> {
+        if self.calc_sizes.is_empty() {
+            return Vec::new();
         }
+        let taffy = &self.taffy;
+        let under = |mut node: NodeId| loop {
+            if node == root.0 {
+                return true;
+            }
+            match taffy.parent(node) {
+                Some(parent) => node = parent,
+                None => return false,
+            }
+        };
+        let (mine, rest) = std::mem::take(&mut self.calc_sizes)
+            .into_iter()
+            .partition(|n| under(n.id.0));
+        self.calc_sizes = rest;
+        mine
+    }
+
+    /// The first pass lays each `calc-size()` axis out at its basis keyword, unclamped and (for a
+    /// flex basis) unflexed, so the box's size there is the basis's `size`. Returns the styles
+    /// as requested.
+    fn probe_calc_sizes(&mut self, nodes: &[CalcSizeNode]) -> Vec<taffy::style::Style> {
+        nodes
+            .iter()
+            .map(|node| {
+                let requested = self.taffy.style(node.id.0).expect(EXPECT_MESSAGE).clone();
+                let mut probe = requested.clone();
+                for (axis, props) in [(0, &node.width), (1, &node.height)] {
+                    let Some(first) = props.iter().flatten().next() else {
+                        continue;
+                    };
+                    let size = basis_dimension(first.basis);
+                    let none = taffy::style::LengthPercentageAuto::auto();
+                    if axis == 0 {
+                        probe.size.width = size;
+                        probe.min_size.width = none;
+                        probe.max_size.width = none;
+                    } else {
+                        probe.size.height = size;
+                        probe.min_size.height = none;
+                        probe.max_size.height = none;
+                    }
+                }
+                if let (Some(basis), Some(_)) = (node.flex_basis, self.main_axis(node.id)) {
+                    probe.flex_basis = basis_dimension(basis.basis);
+                    probe.flex_grow = 0.;
+                    probe.flex_shrink = 0.;
+                }
+                if probe != requested {
+                    self.taffy.set_style(node.id.0, probe).expect(EXPECT_MESSAGE);
+                }
+                requested
+            })
+            .collect()
+    }
+
+    /// The second pass's styles: each `calc-size()` as the length its function gives for the
+    /// measured basis, in the box-sizing box.
+    fn resolve_calc_sizes(
+        &mut self,
+        nodes: &[CalcSizeNode],
+        requested: Vec<taffy::style::Style>,
+        rem_size: Pixels,
+        scale_factor: f32,
+    ) {
+        for (node, mut style) in nodes.iter().zip(requested) {
+            let layout = *self.taffy.layout(node.id.0).expect(EXPECT_MESSAGE);
+            let content_box = style.box_sizing == taffy::style::BoxSizing::ContentBox;
+            let inner = |outer: f32, a: f32, b: f32, c: f32, d: f32| {
+                if content_box {
+                    (outer - a - b - c - d).max(0.)
+                } else {
+                    outer
+                }
+            };
+            let measured = [
+                inner(
+                    layout.size.width,
+                    layout.padding.left,
+                    layout.padding.right,
+                    layout.border.left,
+                    layout.border.right,
+                ),
+                inner(
+                    layout.size.height,
+                    layout.padding.top,
+                    layout.padding.bottom,
+                    layout.border.top,
+                    layout.border.bottom,
+                ),
+            ];
+            let resolve = |c: &crate::VnCalcSize, axis: usize| {
+                calc_size_value(c, measured[axis] / scale_factor, rem_size, scale_factor)
+            };
+            let dimension = |v: Result<*const (), f32>| match v {
+                Ok(handle) => taffy::style::Dimension::calc(handle),
+                Err(length) => taffy::style::Dimension::length(length),
+            };
+            let bound = |v: Result<*const (), f32>| match v {
+                Ok(handle) => taffy::style::LengthPercentageAuto::calc(handle),
+                Err(length) => taffy::style::LengthPercentageAuto::length(length),
+            };
+            for axis in 0..2 {
+                let [size, min, max] = if axis == 0 { node.width } else { node.height };
+                let (s, lo, hi) = if axis == 0 {
+                    (
+                        &mut style.size.width,
+                        &mut style.min_size.width,
+                        &mut style.max_size.width,
+                    )
+                } else {
+                    (
+                        &mut style.size.height,
+                        &mut style.min_size.height,
+                        &mut style.max_size.height,
+                    )
+                };
+                if let Some(c) = size {
+                    *s = dimension(resolve(&c, axis));
+                }
+                if let Some(c) = min {
+                    *lo = bound(resolve(&c, axis));
+                }
+                if let Some(c) = max {
+                    *hi = bound(resolve(&c, axis));
+                }
+            }
+            if let (Some(c), Some(axis)) = (node.flex_basis, self.main_axis(node.id)) {
+                style.flex_basis = dimension(resolve(&c, axis));
+            }
+            if self.taffy.style(node.id.0).expect(EXPECT_MESSAGE) != &style {
+                self.taffy.set_style(node.id.0, style).expect(EXPECT_MESSAGE);
+            }
+        }
+    }
+
+    /// The flex container's main axis for `id`, 0 for rows and 1 for columns.
+    fn main_axis(&self, id: LayoutId) -> Option<usize> {
+        let parent = self.taffy.parent(id.0)?;
+        let style = self.taffy.style(parent).ok()?;
+        use taffy::style::FlexDirection as F;
+        (style.display == taffy::style::Display::Flex).then(|| match style.flex_direction {
+            F::Row | F::RowReverse => 0,
+            F::Column | F::ColumnReverse => 1,
+        })
     }
 
     // Pixel snapping
@@ -776,7 +951,7 @@ impl ToTaffy<taffy::style::LengthPercentageAuto> for Length {
     ) -> taffy::prelude::LengthPercentageAuto {
         match self {
             Length::Definite(length) => length.to_taffy(rem_size, scale_factor),
-            Length::Auto => taffy::prelude::LengthPercentageAuto::auto(),
+            Length::Auto | Length::VnCalcSize(_) => taffy::prelude::LengthPercentageAuto::auto(),
         }
     }
 }
@@ -786,7 +961,76 @@ impl ToTaffy<taffy::style::Dimension> for Length {
         match self {
             Length::Definite(length) => length.to_taffy(rem_size, scale_factor),
             Length::Auto => taffy::prelude::Dimension::auto(),
+            Length::VnCalcSize(c) => basis_dimension(c.basis),
         }
+    }
+}
+
+/// vue-native fork: a node whose sizing properties hold a `calc-size()` other than its basis
+/// alone, which [`TaffyLayoutEngine::compute_layout`] lays out twice. Per axis: size, min, max.
+struct CalcSizeNode {
+    id: LayoutId,
+    width: [Option<crate::VnCalcSize>; 3],
+    height: [Option<crate::VnCalcSize>; 3],
+    flex_basis: Option<crate::VnCalcSize>,
+}
+
+impl CalcSizeNode {
+    fn of(id: LayoutId, style: &Style) -> Option<Self> {
+        let calc = |l: &Length| match l {
+            Length::VnCalcSize(c) if !c.is_basis() => Some(*c),
+            _ => None,
+        };
+        let node = CalcSizeNode {
+            id,
+            width: [
+                calc(&style.size.width),
+                calc(&style.min_size.width),
+                calc(&style.max_size.width),
+            ],
+            height: [
+                calc(&style.size.height),
+                calc(&style.min_size.height),
+                calc(&style.max_size.height),
+            ],
+            flex_basis: calc(&style.flex_basis),
+        };
+        (node.width.iter().chain(&node.height).any(Option::is_some) || node.flex_basis.is_some())
+            .then_some(node)
+    }
+}
+
+/// `size * scale + offset` with `size` the measured basis in logical pixels, as [`calc_handle`]
+/// returns it: a percentage in the offset still resolves against the containing block.
+fn calc_size_value(
+    c: &crate::VnCalcSize,
+    size: f32,
+    rem_size: Pixels,
+    scale_factor: f32,
+) -> Result<*const (), f32> {
+    let scaled = c.scale * size;
+    let (fraction, pixels) = match c.offset {
+        DefiniteLength::Absolute(a) => (0., scaled + a.to_pixels(rem_size).0),
+        DefiniteLength::Fraction(f) => (f, scaled),
+        DefiniteLength::Calc { fraction, pixels } => (fraction, scaled + pixels.0),
+    };
+    if fraction == 0. {
+        return Err(round_to_device_pixel(pixels.max(0.), scale_factor));
+    }
+    calc_handle(fraction, Pixels(pixels), scale_factor)
+}
+
+/// vue-native fork: the keyword a `calc-size()` is measured from; also its whole layout when it
+/// is the identity (`calc-size(auto, size)`).
+fn basis_dimension(basis: crate::VnSizeBasis) -> taffy::style::Dimension {
+    use crate::VnSizeBasis as B;
+    use taffy::style::Dimension as D;
+    match basis {
+        B::Auto => D::auto(),
+        B::MinContent => D::min_content(),
+        B::MaxContent => D::max_content(),
+        B::FitContent => D::fit_content(),
+        B::Content => D::content(),
     }
 }
 

@@ -1628,7 +1628,7 @@ impl Style {
             VnClipBox::Margin => {
                 let margin = |l: &Length| match l {
                     Length::Definite(l) => -l.to_pixels(width, rem_size),
-                    Length::Auto => px(0.),
+                    Length::Auto | Length::VnCalcSize(_) => px(0.),
                 };
                 Edges {
                     top: margin(&self.margin.top),
