@@ -2018,13 +2018,16 @@ pub trait PlatformAtlas {
 
     /// vue-native fork: copies a straight-alpha `BGRA8Unorm` (or `_sRGB`)
     /// `id<MTLTexture>` on this atlas's device into the tile for `key`, on the
-    /// renderer's queue. The texture must already be written; `owner` is
-    /// retained until the copy completes.
+    /// renderer's queue. With `ready` (an `id<MTLSharedEvent>` and a value)
+    /// the copy waits on the GPU until the event reaches it; without, the
+    /// texture must already be written. `owner` is retained until the copy
+    /// completes.
     fn upload_from_metal(
         &self,
         _key: &AtlasKey,
         _size: Size<DevicePixels>,
         _texture: GpuTextureHandle,
+        _ready: Option<(*mut std::ffi::c_void, u64)>,
         _owner: std::sync::Arc<dyn std::any::Any + Send + Sync>,
     ) -> Result<Option<AtlasTile>> {
         Ok(None)

@@ -9,8 +9,8 @@ use gpui::{
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLDevice,
-    MTLOrigin, MTLPixelFormat, MTLRegion, MTLResource, MTLResourceOptions, MTLSize, MTLStorageMode,
-    MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
+    MTLOrigin, MTLPixelFormat, MTLRegion, MTLResource, MTLResourceOptions, MTLSharedEvent, MTLSize,
+    MTLStorageMode, MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
 };
 use parking_lot::Mutex;
 use std::{any::Any, borrow::Cow, ptr::NonNull, sync::Arc};
@@ -114,6 +114,7 @@ impl PlatformAtlas for MetalAtlas {
         key: &AtlasKey,
         size: Size<DevicePixels>,
         texture: GpuTextureHandle,
+        ready: Option<(*mut std::ffi::c_void, u64)>,
         owner: Arc<dyn Any + Send + Sync>,
     ) -> Result<Option<AtlasTile>> {
         if texture.is_null() || key.texture_kind() != AtlasTextureKind::Polychrome {
@@ -168,6 +169,18 @@ impl PlatformAtlas for MetalAtlas {
             .command_queue
             .commandBuffer()
             .context("creating atlas copy command buffer")?;
+        // SAFETY: the caller passes a live `id<MTLSharedEvent>`; retained until the copy completes.
+        let ready = match ready {
+            Some((event, value)) => Some((
+                unsafe { Retained::retain(event.cast::<ProtocolObject<dyn MTLSharedEvent>>()) }
+                    .context("a null ready event")?,
+                value,
+            )),
+            None => None,
+        };
+        if let Some((event, value)) = &ready {
+            command.encodeWaitForEvent_value(ProtocolObject::from_ref(&**event), *value);
+        }
         let encoder = command
             .blitCommandEncoder()
             .context("creating atlas copy blit encoder")?;
@@ -195,7 +208,7 @@ impl PlatformAtlas for MetalAtlas {
             );
         }
         encoder.endEncoding();
-        let owner = Mutex::new(Some(owner));
+        let owner = Mutex::new(Some((owner, ready)));
         let release = RcBlock::new(move |_: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
             owner.lock().take();
         });
@@ -930,7 +943,7 @@ mod tests {
         let owner: Arc<dyn Any + Send + Sync> = Arc::new(());
         let bgra = source(MTLPixelFormat::BGRA8Unorm);
         let tile = atlas
-            .upload_from_metal(&key, size, handle(&bgra), owner.clone())
+            .upload_from_metal(&key, size, handle(&bgra), None, owner.clone())
             .unwrap()
             .unwrap();
         let shot = snapshot(&atlas, tile);
@@ -946,7 +959,7 @@ mod tests {
         }
         assert_eq!(
             atlas
-                .upload_from_metal(&key, size, handle(&bgra), owner.clone())
+                .upload_from_metal(&key, size, handle(&bgra), None, owner.clone())
                 .unwrap(),
             Some(tile),
             "a second frame overwrites the tile in place"
@@ -954,7 +967,7 @@ mod tests {
         let rgba = source(MTLPixelFormat::RGBA8Unorm);
         assert!(
             atlas
-                .upload_from_metal(&make_image_key(701, 0), size, handle(&rgba), owner)
+                .upload_from_metal(&make_image_key(701, 0), size, handle(&rgba), None, owner)
                 .unwrap()
                 .is_none()
         );

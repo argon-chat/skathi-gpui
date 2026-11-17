@@ -7992,6 +7992,7 @@ impl Window {
         image: &RenderImage,
         frame_index: usize,
         texture: GpuTextureHandle,
+        ready: Option<(*mut std::ffi::c_void, u64)>,
         owner: std::sync::Arc<dyn std::any::Any + Send + Sync>,
     ) -> Result<TileWrite> {
         let key: AtlasKey = RenderImageParams {
@@ -8002,7 +8003,7 @@ impl Window {
         let before = self.sprite_atlas.tile(&key);
         let Some(after) =
             self.sprite_atlas
-                .upload_from_metal(&key, image.size(frame_index), texture, owner)?
+                .upload_from_metal(&key, image.size(frame_index), texture, ready, owner)?
         else {
             return Ok(TileWrite::Refused);
         };
