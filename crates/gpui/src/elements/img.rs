@@ -343,36 +343,35 @@ impl Element for Img {
 
                             let image_size = data.render_size(frame_index);
 
-                            if style.aspect_ratio.is_none() {
-                                style.aspect_ratio = Some(image_size.width / image_size.height);
-                            }
+                            // `auto` and `auto <ratio>` (zero and negative) take the natural ratio.
+                            let ratio = style
+                                .aspect_ratio
+                                .filter(|ratio| *ratio > 0.0)
+                                .unwrap_or(image_size.width / image_size.height);
+                            style.aspect_ratio = Some(ratio);
 
                             if let Length::Auto = style.size.width {
                                 style.size.width = match style.size.height {
-                                    Length::Definite(DefiniteLength::Absolute(abs_length)) => {
+                                    Length::Definite(DefiniteLength::Absolute(abs_length))
+                                        if ratio.is_finite() && ratio > 0.0 =>
+                                    {
                                         let height_px = abs_length.to_pixels(window.rem_size());
-                                        Length::Definite(
-                                            px(image_size.width.0 * height_px.0
-                                                / image_size.height.0)
-                                            .into(),
-                                        )
+                                        Length::Definite(px(height_px.0 * ratio).into())
                                     }
                                     _ => Length::Definite(image_size.width.into()),
                                 };
                             }
 
-                            if let Length::Auto = style.size.height {
-                                style.size.height = match style.size.width {
-                                    Length::Definite(DefiniteLength::Absolute(abs_length)) => {
-                                        let width_px = abs_length.to_pixels(window.rem_size());
-                                        Length::Definite(
-                                            px(image_size.height.0 * width_px.0
-                                                / image_size.width.0)
-                                            .into(),
-                                        )
-                                    }
-                                    _ => Length::Definite(image_size.height.into()),
-                                };
+                            // A relative width leaves the height to the ratio, as a browser does.
+                            if let (
+                                Length::Auto,
+                                Length::Definite(DefiniteLength::Absolute(abs_length)),
+                            ) = (style.size.height, style.size.width)
+                                && ratio.is_finite()
+                                && ratio > 0.0
+                            {
+                                let width_px = abs_length.to_pixels(window.rem_size());
+                                style.size.height = Length::Definite(px(width_px.0 / ratio).into());
                             }
 
                             if global_id.is_some()

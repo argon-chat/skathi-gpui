@@ -711,7 +711,10 @@ impl ToTaffy<taffy::style::Style> for Style {
             size: self.size.to_taffy(rem_size, scale_factor),
             min_size: self.min_size.to_taffy(rem_size, scale_factor),
             max_size: self.max_size.to_taffy(rem_size, scale_factor),
-            aspect_ratio: self.aspect_ratio,
+            aspect_ratio: self
+                .aspect_ratio
+                .map(f32::abs)
+                .filter(|ratio| ratio.is_finite() && *ratio > 0.0),
             margin: self.margin.to_taffy(rem_size, scale_factor),
             padding: self.padding.to_taffy(rem_size, scale_factor),
             border: border_widths_to_taffy(&self.border_widths, rem_size, scale_factor),

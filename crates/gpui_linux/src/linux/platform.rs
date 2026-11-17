@@ -1387,6 +1387,17 @@ pub(super) fn cursor_style_to_icon_names(style: CursorStyle) -> &'static [&'stat
         CursorStyle::DragLink => &["alias"],
         CursorStyle::DragCopy => &["copy"],
         CursorStyle::ContextualMenu => &["context-menu"],
+        CursorStyle::Help => &["help", "question_arrow"],
+        CursorStyle::Progress => &["progress", "left_ptr_watch", "watch"],
+        CursorStyle::Wait => &["wait", "watch"],
+        CursorStyle::Move => &["move", "fleur"],
+        CursorStyle::AllScroll => &["all-scroll", "fleur"],
+        CursorStyle::Cell => &["cell", "plus"],
+        CursorStyle::ZoomIn => &["zoom-in"],
+        CursorStyle::ZoomOut => &["zoom-out"],
+        CursorStyle::NoDrop => &["no-drop", "not-allowed", "crossed_circle"],
+        // Cursor themes have no blank cursor; `cursor: none` shows the arrow here.
+        CursorStyle::Hidden => &[DEFAULT_CURSOR_ICON_NAME],
     }
 }
 

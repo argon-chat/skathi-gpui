@@ -3538,11 +3538,43 @@ pub enum CursorStyle {
     /// A cursor indicating that the operation will result in a context menu
     /// corresponds to the CSS cursor value `context-menu`
     ContextualMenu,
+
+    /// corresponds to the CSS cursor value `help`
+    Help,
+
+    /// Busy, but the user can still interact
+    /// corresponds to the CSS cursor value `progress`
+    Progress,
+
+    /// corresponds to the CSS cursor value `wait`
+    Wait,
+
+    /// corresponds to the CSS cursor value `move`
+    Move,
+
+    /// corresponds to the CSS cursor value `all-scroll`
+    AllScroll,
+
+    /// corresponds to the CSS cursor value `cell`
+    Cell,
+
+    /// corresponds to the CSS cursor value `zoom-in`
+    ZoomIn,
+
+    /// corresponds to the CSS cursor value `zoom-out`
+    ZoomOut,
+
+    /// corresponds to the CSS cursor value `no-drop`
+    NoDrop,
+
+    /// No cursor is shown
+    /// corresponds to the CSS cursor value `none`
+    Hidden,
 }
 
 impl CursorStyle {
     /// Every style.
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 31] = [
         Self::Arrow,
         Self::IBeam,
         Self::Crosshair,
@@ -3564,6 +3596,16 @@ impl CursorStyle {
         Self::DragLink,
         Self::DragCopy,
         Self::ContextualMenu,
+        Self::Help,
+        Self::Progress,
+        Self::Wait,
+        Self::Move,
+        Self::AllScroll,
+        Self::Cell,
+        Self::ZoomIn,
+        Self::ZoomOut,
+        Self::NoDrop,
+        Self::Hidden,
     ];
 
     /// Iterates over [`Self::ALL`], in place of strum's `EnumIter`, which gpui does not depend on.

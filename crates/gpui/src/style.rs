@@ -561,6 +561,7 @@ pub struct Style {
     #[refineable]
     pub max_size: Size<Length>,
     /// Sets the preferred aspect ratio for the item. The ratio is calculated as width divided by height.
+    /// `0` is CSS `auto`, and a negative ratio is `auto <ratio>`: a replaced element's natural ratio wins.
     pub aspect_ratio: Option<f32>,
 
     // Spacing Properties

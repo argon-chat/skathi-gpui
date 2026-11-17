@@ -38,5 +38,15 @@ pub(super) fn to_shape(style: CursorStyle) -> Shape {
         CursorStyle::DragLink => Shape::Alias,
         CursorStyle::DragCopy => Shape::Copy,
         CursorStyle::ContextualMenu => Shape::ContextMenu,
+        CursorStyle::Help => Shape::Help,
+        CursorStyle::Progress => Shape::Progress,
+        CursorStyle::Wait => Shape::Wait,
+        CursorStyle::Move => Shape::Move,
+        CursorStyle::AllScroll => Shape::AllScroll,
+        CursorStyle::Cell => Shape::Cell,
+        CursorStyle::ZoomIn => Shape::ZoomIn,
+        CursorStyle::ZoomOut => Shape::ZoomOut,
+        CursorStyle::NoDrop => Shape::NoDrop,
+        CursorStyle::Hidden => Shape::Default,
     }
 }

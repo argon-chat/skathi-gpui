@@ -3007,6 +3007,17 @@ pub(crate) unsafe fn native_cursor(style: CursorStyle) -> *mut AnyObject {
             CursorStyle::DragLink => msg_send![class!(NSCursor), dragLinkCursor],
             CursorStyle::DragCopy => msg_send![class!(NSCursor), dragCopyCursor],
             CursorStyle::ContextualMenu => msg_send![class!(NSCursor), contextualMenuCursor],
+            CursorStyle::Cell => msg_send![class!(NSCursor), crosshairCursor],
+            CursorStyle::NoDrop => msg_send![class!(NSCursor), operationNotAllowedCursor],
+            // AppKit has no public cursor for these.
+            CursorStyle::Help
+            | CursorStyle::Progress
+            | CursorStyle::Wait
+            | CursorStyle::Move
+            | CursorStyle::AllScroll
+            | CursorStyle::ZoomIn
+            | CursorStyle::ZoomOut
+            | CursorStyle::Hidden => msg_send![class!(NSCursor), arrowCursor],
         }
     }
 }
