@@ -20,6 +20,7 @@ mod frame_pacing;
 mod keyboard;
 mod platform;
 mod pointer_lock;
+mod present_feedback;
 mod profiling;
 mod system_notifications;
 mod system_settings;

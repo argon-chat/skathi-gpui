@@ -403,7 +403,11 @@ impl DirectXRenderer {
             // Compositor busy mid-drag: drop this frame, keep the loop live.
             return Ok(());
         }
-        result.ok().context("Presenting swap chain failed")
+        result.ok().context("Presenting swap chain failed")?;
+        if let Some(resources) = &self.resources {
+            crate::present_feedback::presented(self.hwnd, &resources.swap_chain, None);
+        }
+        Ok(())
     }
 
     pub(crate) fn handle_device_lost(&mut self, directx_devices: &DirectXDevices) -> Result<()> {
@@ -415,6 +419,7 @@ impl DirectXRenderer {
 
     fn handle_device_lost_impl(&mut self, directx_devices: &DirectXDevices) -> Result<()> {
         let disable_direct_composition = self.direct_composition.is_none();
+        crate::present_feedback::forget(self.hwnd);
 
         unsafe {
             #[cfg(debug_assertions)]
@@ -2665,6 +2670,7 @@ struct BlurPassSprite {
 
 impl Drop for DirectXRenderer {
     fn drop(&mut self) {
+        crate::present_feedback::forget(self.hwnd);
         #[cfg(debug_assertions)]
         if let Some(devices) = &self.devices {
             report_live_objects(&devices.device).ok();

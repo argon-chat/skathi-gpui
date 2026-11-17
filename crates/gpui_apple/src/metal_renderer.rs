@@ -155,6 +155,8 @@ pub struct MetalRenderer {
     /// rendering headlessly without reading pixels back.
     #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
     headless_render_target: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
+    /// vue-native: presents made while present feedback was wanted.
+    presents: u64,
 }
 
 impl MetalRenderer {
@@ -443,6 +445,7 @@ impl MetalRenderer {
             sprite_gamma: SpriteGammaParams::from_env(),
             #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
             headless_render_target: None,
+            presents: 0,
         })
     }
 
@@ -578,6 +581,7 @@ impl MetalRenderer {
             }
         };
 
+        self.report_present(&layer, &drawable);
         if self.presents_with_transaction {
             command_buffer.commit();
             command_buffer.waitUntilScheduled();
@@ -586,6 +590,44 @@ impl MetalRenderer {
             command_buffer.presentDrawable(ProtocolObject::from_ref(&*drawable));
             command_buffer.commit();
         }
+    }
+
+    /// vue-native: tells `gpui::present_feedback` when the drawable reached the screen. The
+    /// layer is the window's view's backing layer, so it names the window.
+    fn report_present(
+        &mut self,
+        layer: &CAMetalLayer,
+        drawable: &ProtocolObject<dyn CAMetalDrawable>,
+    ) {
+        use gpui::present_feedback::{PresentOutcome, present_feedback_wanted, present_listener};
+        if !present_feedback_wanted() {
+            return;
+        }
+        let Some(listener) = present_listener() else {
+            return;
+        };
+        let window = ptr::from_ref(layer) as u64;
+        self.presents += 1;
+        let present = self.presents;
+        listener.queued(window, present);
+        type Shown = ptr::NonNull<ProtocolObject<dyn MTLDrawable>>;
+        let handler = RcBlock::new(move |shown: Shown| {
+            // SAFETY: Metal passes the drawable the handler was added to, alive for the call;
+            // `presentedTime` is a CFTimeInterval getter (macOS 10.15.4+).
+            let at: f64 = unsafe { objc2::msg_send![shown.as_ref(), presentedTime] };
+            let outcome = if at > 0.0 {
+                PresentOutcome::Displayed {
+                    at_ns: (at * 1e9) as u64,
+                    refresh_ns: 0,
+                    exact: true,
+                }
+            } else {
+                PresentOutcome::Discarded
+            };
+            listener.resolved(window, present, outcome);
+        });
+        // SAFETY: Metal copies the block and calls it once, after the drawable was shown or skipped.
+        unsafe { drawable.addPresentedHandler(RcBlock::as_ptr(&handler)) };
     }
 
     fn render_frame(

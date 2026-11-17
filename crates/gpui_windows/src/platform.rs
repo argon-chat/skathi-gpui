@@ -189,6 +189,7 @@ impl Drop for PowerRequest {
 
 impl WindowsPlatform {
     pub fn new(headless: bool) -> Result<Self> {
+        gpui::present_feedback::set_present_feedback_waker(crate::frame_pacing::kick);
         let disable_direct_composition = std::env::var(DISABLE_DIRECT_COMPOSITION)
             .is_ok_and(|value| value == "true" || value == "1");
         let early_devices = (!headless && is_window_station_visible())
@@ -505,6 +506,7 @@ impl WindowsPlatform {
                     let Some(all_windows) = all_windows.upgrade() else {
                         break;
                     };
+                    crate::present_feedback::poll();
                     // Idle windows wait for demand (src/frame_pacing.rs).
                     if !crate::frame_pacing::take_due(std::time::Instant::now()) {
                         continue;

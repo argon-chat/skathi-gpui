@@ -18,7 +18,8 @@
 //!
 //! While paced, the vsync thread does not wait on the compositor each refresh
 //! either: it sleeps ([`wait_while_paced`]) until demand, the deadline, or a
-//! new pacing, so an idle app has no thread waking at the display rate.
+//! new pacing, so an idle app has no thread waking at the display rate. While
+//! present feedback is wanted it keeps waking, to read the frame statistics.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
@@ -110,7 +111,11 @@ pub(crate) fn wait_while_paced() {
     loop {
         *kicked = false;
         let until = PACED_UNTIL.load(Ordering::Acquire);
-        if until == 0 || demanded() || GESTURE.load(Ordering::Acquire) {
+        if until == 0
+            || demanded()
+            || GESTURE.load(Ordering::Acquire)
+            || gpui::present_feedback::present_feedback_wanted()
+        {
             return;
         }
         kicked = if until == UNTIL_DEMAND {

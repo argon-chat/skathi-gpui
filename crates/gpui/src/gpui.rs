@@ -22,6 +22,7 @@ extern crate self as gpui;
 
 pub mod colors;
 pub mod prelude;
+pub mod present_feedback;
 pub mod profiler;
 
 #[macro_use]

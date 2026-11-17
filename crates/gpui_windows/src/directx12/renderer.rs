@@ -556,6 +556,14 @@ impl Drop for FrameLatency {
     }
 }
 
+impl Drop for DirectXRenderer {
+    fn drop(&mut self) {
+        if self.swap_chain.is_some() {
+            crate::present_feedback::forget(self.hwnd);
+        }
+    }
+}
+
 pub(crate) struct DirectXRenderer {
     hwnd: HWND,
     gpu: Arc<Device>,
@@ -743,6 +751,7 @@ impl DirectXRenderer {
         }
         // An HWND can own only one flip-model swap chain. Release the old
         // visual and chain before creating its replacement, including retries.
+        crate::present_feedback::forget(self.hwnd);
         self.composition.take();
         self.back_buffers.clear();
         self.latency.take();
@@ -937,7 +946,12 @@ impl DirectXRenderer {
         if present_busy {
             return Ok(());
         }
-        result.ok().context("Presenting native D3D12 swap chain")
+        result.ok().context("Presenting native D3D12 swap chain")?;
+        if let Some(swap_chain) = &self.swap_chain {
+            let (fence, _) = self.gpu.completion_point();
+            crate::present_feedback::presented(self.hwnd, swap_chain, Some((&fence, completed)));
+        }
+        Ok(())
     }
     fn render(
         &mut self,
