@@ -7985,6 +7985,33 @@ impl Window {
         })
     }
 
+    /// vue-native fork: [`Window::write_image_tile`] from a finished Metal
+    /// texture. See [`PlatformAtlas::upload_from_metal`].
+    pub fn write_image_tile_metal(
+        &mut self,
+        image: &RenderImage,
+        frame_index: usize,
+        texture: GpuTextureHandle,
+        owner: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Result<TileWrite> {
+        let key: AtlasKey = RenderImageParams {
+            image_id: image.id,
+            frame_index,
+        }
+        .into();
+        let before = self.sprite_atlas.tile(&key);
+        let Some(after) =
+            self.sprite_atlas
+                .upload_from_metal(&key, image.size(frame_index), texture, owner)?
+        else {
+            return Ok(TileWrite::Refused);
+        };
+        Ok(match before {
+            Some(tile) if tile == after => TileWrite::InPlace,
+            _ => TileWrite::Placed,
+        })
+    }
+
     /// vue-native fork: presents the frame already drawn once more, with no
     /// layout, prepaint or paint: the renderer encodes the same scene again, so
     /// an atlas tile overwritten in place since ([`Window::write_image_tile`],

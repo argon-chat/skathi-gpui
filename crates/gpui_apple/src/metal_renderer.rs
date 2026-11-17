@@ -379,6 +379,20 @@ impl MetalRenderer {
         )?;
 
         let command_queue = device.newCommandQueue().context("creating command queue")?;
+        if layer.is_some() {
+            struct Kept(
+                #[allow(dead_code)] Retained<ProtocolObject<dyn MTLDevice>>,
+                #[allow(dead_code)] Retained<ProtocolObject<dyn MTLCommandQueue>>,
+            );
+            // SAFETY: Metal devices and command queues are thread-safe.
+            unsafe impl Send for Kept {}
+            unsafe impl Sync for Kept {}
+            gpui::publish_renderer_metal_device(
+                Retained::as_ptr(&device).cast_mut().cast(),
+                Retained::as_ptr(&command_queue).cast_mut().cast(),
+                Arc::new(Kept(device.clone(), command_queue.clone())),
+            );
+        }
         let supports_shared_storage = cfg!(target_os = "ios") || is_apple_gpu;
         #[expect(
             clippy::arc_with_non_send_sync,

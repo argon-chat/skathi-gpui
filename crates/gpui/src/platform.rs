@@ -2016,6 +2016,20 @@ pub trait PlatformAtlas {
         Ok(None)
     }
 
+    /// vue-native fork: copies a straight-alpha `BGRA8Unorm` (or `_sRGB`)
+    /// `id<MTLTexture>` on this atlas's device into the tile for `key`, on the
+    /// renderer's queue. The texture must already be written; `owner` is
+    /// retained until the copy completes.
+    fn upload_from_metal(
+        &self,
+        _key: &AtlasKey,
+        _size: Size<DevicePixels>,
+        _texture: GpuTextureHandle,
+        _owner: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Result<Option<AtlasTile>> {
+        Ok(None)
+    }
+
     /// vue-native fork: the tile `key` maps to now, if any. `None` from a
     /// backend that does not say, which makes every
     /// [`crate::Window::write_image_tile`] report a moved tile: correct, only
@@ -2102,6 +2116,61 @@ pub struct D3D12TextureHandle {
     pub ready_fence: *mut std::ffi::c_void,
     /// Producer submission fence value.
     pub ready_value: u64,
+}
+
+/// vue-native fork: the Metal device and a command queue the renderer draws
+/// with (`id<MTLDevice>`, `id<MTLCommandQueue>`), retained by `keep_alive`.
+/// `generation` changes when a renderer comes up on another device.
+#[derive(Clone)]
+pub struct MetalDeviceLease {
+    /// `id<MTLDevice>`.
+    pub device: *mut std::ffi::c_void,
+    /// `id<MTLCommandQueue>` of the first renderer on that device.
+    pub queue: *mut std::ffi::c_void,
+    /// Starts at 1.
+    pub generation: u64,
+    /// Retains both objects.
+    pub keep_alive: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+}
+
+// SAFETY: Metal devices and command queues are thread-safe; `keep_alive` retains them.
+unsafe impl Send for MetalDeviceLease {}
+unsafe impl Sync for MetalDeviceLease {}
+
+static RENDERER_METAL_DEVICE: std::sync::Mutex<Option<MetalDeviceLease>> =
+    std::sync::Mutex::new(None);
+
+/// vue-native fork: the Metal device the newest renderer draws with, once a
+/// window has made one; `None` on other backends.
+pub fn renderer_metal_device() -> Option<MetalDeviceLease> {
+    RENDERER_METAL_DEVICE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+}
+
+/// vue-native fork: called by the Metal renderer when it is created. A
+/// renderer on the published device keeps the lease as it is.
+#[doc(hidden)]
+pub fn publish_renderer_metal_device(
+    device: *mut std::ffi::c_void,
+    queue: *mut std::ffi::c_void,
+    keep_alive: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+) {
+    let mut published = RENDERER_METAL_DEVICE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let generation = match published.as_ref() {
+        Some(lease) if lease.device == device => return,
+        Some(lease) => lease.generation + 1,
+        None => 1,
+    };
+    *published = Some(MetalDeviceLease {
+        device,
+        queue,
+        generation,
+        keep_alive,
+    });
 }
 
 /// vue-native fork: where [`crate::Window::write_image_tile`] takes a frame's

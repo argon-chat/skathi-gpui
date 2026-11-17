@@ -1,17 +1,19 @@
 use anyhow::{Context as _, Result, ensure};
+use block2::RcBlock;
 use etagere::BucketedAtlasAllocator;
 use gpui::{
     AtlasBackend, AtlasKey, AtlasState, AtlasStats, AtlasTextureId, AtlasTextureKind,
-    AtlasTextureList, AtlasTile, Bounds, DevicePixels, PlatformAtlas, Point, Size,
+    AtlasTextureList, AtlasTile, Bounds, DevicePixels, GpuTextureHandle, PlatformAtlas, Point,
+    Size,
 };
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLDevice,
-    MTLOrigin, MTLPixelFormat, MTLRegion, MTLResourceOptions, MTLSize, MTLStorageMode, MTLTexture,
-    MTLTextureDescriptor, MTLTextureUsage,
+    MTLOrigin, MTLPixelFormat, MTLRegion, MTLResource, MTLResourceOptions, MTLSize, MTLStorageMode,
+    MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
 };
 use parking_lot::Mutex;
-use std::{borrow::Cow, ptr::NonNull};
+use std::{any::Any, borrow::Cow, ptr::NonNull, sync::Arc};
 
 pub struct MetalAtlas(Mutex<AtlasState<MetalAtlasTextures>>);
 
@@ -104,6 +106,102 @@ impl PlatformAtlas for MetalAtlas {
             bytes,
             layout,
         )?;
+        Ok(Some(tile))
+    }
+
+    fn upload_from_metal(
+        &self,
+        key: &AtlasKey,
+        size: Size<DevicePixels>,
+        texture: GpuTextureHandle,
+        owner: Arc<dyn Any + Send + Sync>,
+    ) -> Result<Option<AtlasTile>> {
+        if texture.is_null() || key.texture_kind() != AtlasTextureKind::Polychrome {
+            return Ok(None);
+        }
+        // SAFETY: the caller passes a live `id<MTLTexture>`; retaining it keeps it alive here.
+        let Some(source) =
+            (unsafe { Retained::retain(texture.0.cast::<ProtocolObject<dyn MTLTexture>>()) })
+        else {
+            return Ok(None);
+        };
+        let mut state = self.0.lock();
+        let device: *const ProtocolObject<dyn MTLDevice> = &*state.backend.device;
+        let source = match source.pixelFormat() {
+            MTLPixelFormat::BGRA8Unorm => source,
+            MTLPixelFormat::BGRA8Unorm_sRGB => {
+                match source.newTextureViewWithPixelFormat(MTLPixelFormat::BGRA8Unorm) {
+                    Some(view) => view,
+                    None => return Ok(None),
+                }
+            }
+            _ => return Ok(None),
+        };
+        if !std::ptr::eq(Retained::as_ptr(&source.device()), device)
+            || size.width.0 <= 0
+            || size.height.0 <= 0
+            || source.width() < size.width.0 as usize
+            || source.height() < size.height.0 as usize
+            || source.sampleCount() != 1
+        {
+            return Ok(None);
+        }
+        let existing = state.tile(key);
+        let tile = match existing {
+            Some(tile) if tile.bounds.size == size => tile,
+            _ => {
+                if existing.is_some() {
+                    state.remove(key);
+                }
+                let tile = state.backend.allocate(size, key.texture_kind())?;
+                state.insert_tile(key.clone(), tile);
+                tile
+            }
+        };
+        let Some(target) = state.backend.texture(tile.texture_id) else {
+            return Ok(None);
+        };
+        // The renderer's own queue, as in `write_bytes`: earlier reads of this tile, then the
+        // copy, then the next draw.
+        let command = state
+            .backend
+            .command_queue
+            .commandBuffer()
+            .context("creating atlas copy command buffer")?;
+        let encoder = command
+            .blitCommandEncoder()
+            .context("creating atlas copy blit encoder")?;
+        // SAFETY: both textures are BGRA8Unorm on this device, the region lies inside the source,
+        // and `tile.bounds` is a tile allocated inside the target.
+        unsafe {
+            encoder.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin(
+                &source,
+                0,
+                0,
+                MTLOrigin { x: 0, y: 0, z: 0 },
+                MTLSize {
+                    width: size.width.0 as usize,
+                    height: size.height.0 as usize,
+                    depth: 1,
+                },
+                &target.metal_texture,
+                0,
+                0,
+                MTLOrigin {
+                    x: tile.bounds.origin.x.0 as usize,
+                    y: tile.bounds.origin.y.0 as usize,
+                    z: 0,
+                },
+            );
+        }
+        encoder.endEncoding();
+        let owner = Mutex::new(Some(owner));
+        let release = RcBlock::new(move |_: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
+            owner.lock().take();
+        });
+        // SAFETY: Metal retains the block until it has run.
+        unsafe { command.addCompletedHandler(RcBlock::as_ptr(&release)) };
+        command.commit();
         Ok(Some(tile))
     }
 
@@ -781,6 +879,86 @@ mod tests {
             assert!(atlas.tile(&key).is_none());
             assert!(atlas.metal_texture(first.texture_id).is_none());
         }
+    }
+
+    #[test]
+    fn metal_textures_land_in_their_tile_and_are_released_after_the_copy() {
+        let Some(atlas) = create_atlas() else { return };
+        let size = Size {
+            width: DevicePixels(3),
+            height: DevicePixels(2),
+        };
+        let source = |format| {
+            let state = atlas.0.lock();
+            let desc = MTLTextureDescriptor::new();
+            desc.setPixelFormat(format);
+            unsafe {
+                desc.setWidth(3);
+                desc.setHeight(2);
+            }
+            desc.setStorageMode(if state.backend.supports_shared_storage {
+                MTLStorageMode::Shared
+            } else {
+                MTLStorageMode::Managed
+            });
+            let texture = state
+                .backend
+                .device
+                .newTextureWithDescriptor(&desc)
+                .unwrap();
+            unsafe {
+                texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
+                    MTLRegion {
+                        origin: MTLOrigin { x: 0, y: 0, z: 0 },
+                        size: MTLSize {
+                            width: 3,
+                            height: 2,
+                            depth: 1,
+                        },
+                    },
+                    0,
+                    NonNull::from([7u8; 24].as_slice()).cast(),
+                    12,
+                );
+            }
+            texture
+        };
+        let handle = |texture: &Retained<ProtocolObject<dyn MTLTexture>>| {
+            GpuTextureHandle(Retained::as_ptr(texture).cast_mut().cast())
+        };
+        let key = make_image_key(700, 0);
+        let owner: Arc<dyn Any + Send + Sync> = Arc::new(());
+        let bgra = source(MTLPixelFormat::BGRA8Unorm);
+        let tile = atlas
+            .upload_from_metal(&key, size, handle(&bgra), owner.clone())
+            .unwrap()
+            .unwrap();
+        let shot = snapshot(&atlas, tile);
+        finish_uploads(&atlas);
+        assert_snapshot(&shot, AtlasTextureKind::Polychrome, size, 7);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while Arc::strong_count(&owner) > 1 {
+            assert!(
+                std::time::Instant::now() < until,
+                "the owner outlived the copy"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(
+            atlas
+                .upload_from_metal(&key, size, handle(&bgra), owner.clone())
+                .unwrap(),
+            Some(tile),
+            "a second frame overwrites the tile in place"
+        );
+        let rgba = source(MTLPixelFormat::RGBA8Unorm);
+        assert!(
+            atlas
+                .upload_from_metal(&make_image_key(701, 0), size, handle(&rgba), owner)
+                .unwrap()
+                .is_none()
+        );
+        finish_uploads(&atlas);
     }
 
     #[test]
