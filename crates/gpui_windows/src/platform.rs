@@ -57,6 +57,11 @@ pub struct WindowsPlatform {
     initial_windowing: RefCell<Option<WindowingRequest>>,
     /// Set to stop the current `VSyncProvider` thread, which runs while windowed.
     vsync_stop: RefCell<Option<Arc<AtomicBool>>>,
+    /// vue-native: the first `DirectXDevices`, created on a thread from `new` so the driver
+    /// loads while the rest of startup runs. Taken by the first `attach_gpu`.
+    early_devices: RefCell<Option<std::thread::JoinHandle<Result<PreparedDevices>>>>,
+    /// vue-native: `connect_initially` chose to be windowed; the devices attach when first used.
+    attach_pending: Cell<bool>,
     // The below members will never change throughout the entire lifecycle of the app.
     /// Created with `headless()`: never windowed, and without a real text system.
     headless: bool,
@@ -184,6 +189,16 @@ impl Drop for PowerRequest {
 
 impl WindowsPlatform {
     pub fn new(headless: bool) -> Result<Self> {
+        let disable_direct_composition = std::env::var(DISABLE_DIRECT_COMPOSITION)
+            .is_ok_and(|value| value == "true" || value == "1");
+        let early_devices = (!headless && is_window_station_visible())
+            .then(|| {
+                std::thread::Builder::new()
+                    .name("DirectXDevices".to_owned())
+                    .spawn(move || prepare_devices(!disable_direct_composition))
+                    .ok()
+            })
+            .flatten();
         unsafe {
             OleInitialize(None).context("unable to initialize Windows OLE")?;
         }
@@ -250,8 +265,6 @@ impl WindowsPlatform {
             .context("CreateWindowExW did not run correctly")?;
         let handle = result?;
 
-        let disable_direct_composition = std::env::var(DISABLE_DIRECT_COMPOSITION)
-            .is_ok_and(|value| value == "true" || value == "1");
         let background_executor = BackgroundExecutor::new(dispatcher.clone());
         let foreground_executor = ForegroundExecutor::new(dispatcher);
 
@@ -275,6 +288,8 @@ impl WindowsPlatform {
             raw_window_handles,
             initial_windowing: RefCell::new(None),
             vsync_stop: RefCell::new(None),
+            early_devices: RefCell::new(early_devices),
+            attach_pending: Cell::new(false),
             headless,
             icon,
             background_executor,
@@ -384,15 +399,12 @@ impl WindowsPlatform {
     }
 
     fn is_windowed(&self) -> bool {
-        self.inner.state.directx_devices.borrow().is_some()
+        self.attach_pending.get() || self.inner.state.directx_devices.borrow().is_some()
     }
 
-    /// Connects in the initial windowing mode, before the app finishes launching.
-    ///
-    /// # Panics
-    ///
-    /// Panics if DirectX can't be initialized, since the app can't start. Starts headless if this
-    /// process can't show windows, for example when started over SSH.
+    /// Connects in the initial windowing mode, before the app finishes launching. The devices
+    /// attach at the first window (`ensure_attached`), so their creation overlaps the app's own
+    /// startup. Starts headless if this process can't show windows, for example over SSH.
     fn connect_initially(&self) {
         let request = self
             .initial_windowing
@@ -404,36 +416,48 @@ impl WindowsPlatform {
         };
         if let Err(error) = check_can_show_windows(&environment) {
             log::info!("starting headless: {error:#}");
+            self.early_devices.borrow_mut().take();
             return;
         }
-        self.attach_gpu()
-            .unwrap_or_else(|error| panic!("failed to initialize DirectX: {error:#}"));
+        self.attach_pending.set(true);
+    }
+
+    /// Attaches the devices `connect_initially` deferred.
+    ///
+    /// # Panics
+    ///
+    /// Panics if DirectX can't be initialized, since the app can't start.
+    fn ensure_attached(&self) {
+        if self.attach_pending.replace(false) {
+            self.attach_gpu()
+                .unwrap_or_else(|error| panic!("failed to initialize DirectX: {error:#}"));
+        }
     }
 
     /// Creates the DirectX devices that windows draw with, and starts vsync.
     fn attach_gpu(&self) -> Result<()> {
-        let devices = DirectXDevices::new().context("Creating DirectX devices")?;
-        // vue-native: a paravirtualized GPU (Windows Sandbox's GPU-P adapters)
-        // refuses composition swap chains with E_INVALIDARG, so no window
-        // could open. Asked once, before any window: the choice also decides
-        // the windows' WS_EX_NOREDIRECTIONBITMAP. The D3D11 renderer's swap
-        // chain only: the D3D12 one (`native-dx12`) is made on its queue.
-        #[cfg(not(feature = "native-dx12"))]
-        if !self.disable_direct_composition.get()
-            && let Err(error) = crate::directx_renderer::probe_composition_swap_chain(&devices)
-        {
+        let early = self.early_devices.borrow_mut().take();
+        let prepared = match early {
+            Some(thread) => thread
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+            None => prepare_devices(!self.disable_direct_composition.get()),
+        }?;
+        if let Some(Err(error)) = prepared.composition {
             log::warn!(
                 "DirectComposition is unavailable on this GPU ({error:#}); presenting to windows directly"
             );
             self.disable_direct_composition.set(true);
         }
-        *self.inner.state.directx_devices.borrow_mut() = Some(devices);
+        *self.inner.state.directx_devices.borrow_mut() = Some(prepared.devices);
         self.begin_vsync_thread();
         Ok(())
     }
 
     /// Stops vsync and releases the DirectX devices. No window may be open.
     fn detach_gpu(&self) {
+        self.attach_pending.set(false);
+        self.early_devices.borrow_mut().take();
         if let Some(stop) = self.vsync_stop.borrow_mut().take() {
             // Not joined: the thread can be sending this thread a message. It exits after its
             // next vsync, and drops its reference to the devices then.
@@ -767,6 +791,7 @@ impl Platform for WindowsPlatform {
         if !self.is_windowed() {
             return Err(anyhow!("cannot open windows while headless"));
         }
+        self.ensure_attached();
         let window = WindowsWindow::new(handle, options, self.generate_creation_info())?;
         let handle = window.get_raw_handle();
         self.raw_window_handles.write().push(TrackedWindow {
@@ -1740,6 +1765,34 @@ fn check_device_lost(device: &RendererDevice) -> bool {
             true
         }
     }
+}
+
+struct PreparedDevices {
+    devices: DirectXDevices,
+    /// Whether the devices can make a DirectComposition swap chain; `None` when not asked.
+    composition: Option<Result<()>>,
+}
+
+/// Creates the devices windows draw with. Runs on any thread: nothing here has thread affinity.
+fn prepare_devices(probe_composition: bool) -> Result<PreparedDevices> {
+    let devices = DirectXDevices::new().context("Creating DirectX devices")?;
+    // vue-native: a paravirtualized GPU (Windows Sandbox's GPU-P adapters)
+    // refuses composition swap chains with E_INVALIDARG, so no window
+    // could open. Asked once, before any window: the choice also decides
+    // the windows' WS_EX_NOREDIRECTIONBITMAP. The D3D11 renderer's swap
+    // chain only: the D3D12 one (`native-dx12`) is made on its queue.
+    #[cfg(not(feature = "native-dx12"))]
+    let composition =
+        probe_composition.then(|| crate::directx_renderer::probe_composition_swap_chain(&devices));
+    #[cfg(feature = "native-dx12")]
+    let composition = {
+        let _ = probe_composition;
+        None
+    };
+    Ok(PreparedDevices {
+        devices,
+        composition,
+    })
 }
 
 /// Checks that this process can show windows in the session `environment` names.

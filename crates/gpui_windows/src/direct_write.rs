@@ -148,7 +148,10 @@ impl DirectWriteTextSystem {
             let mut result = None;
             components
                 .factory
-                .GetSystemFontCollection(false, &mut result, true)?;
+                // vue-native: no update check. It re-scans the installed fonts, tens of ms at
+                // startup; a font missing from the cached collection is asked for again with the
+                // check (`select_and_cache_font`).
+                .GetSystemFontCollection(false, &mut result, false)?;
             result.context("Failed to get system font collection")?
         };
         let custom_font_set = unsafe { components.builder.CreateFontSet()? };
