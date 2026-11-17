@@ -107,6 +107,29 @@ cd upstream-zed && git filter-repo --paths-from-file ../paths.txt
 cd ../skathi-gpui && git fetch ../upstream-zed main && git merge FETCH_HEAD
 ```
 
+## Releases
+
+The crates are published from this repository, on their own version line, not Skathi's. Every
+published crate shares the workspace version, and a release publishes all of them. The version is
+semver for this code: a breaking change to a public item of any crate bumps the minor version (0.4 to
+0.5), anything else the patch version. Skathi requires a compatible version (`version = "0.4.0"`) next
+to its path dependency on this checkout, and its release stops while that version is not on
+crates.io, or while its checkout has changes made since that version was published.
+
+To release:
+
+1. Set `version` in `[workspace.package]` and every `version` in `[workspace.dependencies]` that
+   points into `crates/`, and commit.
+2. `bun scripts/publish-crates.ts --tag v<version> --dry-run` packages and verifies every crate.
+3. Push the tag `v<version>`: `.github/workflows/release.yml` publishes the crates in dependency
+   order and waits out crates.io's rate limit. A re-run goes on where the last one stopped.
+4. In Skathi, raise the `version` of every `skathi-gpui*` dependency to this one.
+
+`skathi-taffy` comes from crates.io at the version `taffy` names, published from
+[argon-chat/taffy](https://github.com/argon-chat/taffy) (`cargo publish` on its `vue-native` branch)
+before a release that needs a new one. A change to Skathi's built-in effects regenerates the
+renderers' `effects/` directories here, so it needs a release of these crates too.
+
 ## License
 
 Apache-2.0, as gpui is upstream ([LICENSE-APACHE](LICENSE-APACHE)). Only Zed's Apache-2.0 crates are
