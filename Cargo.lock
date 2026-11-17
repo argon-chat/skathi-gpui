@@ -5758,9 +5758,9 @@ version = "0.4.0"
 
 [[package]]
 name = "skathi-taffy"
-version = "0.15.0"
+version = "0.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3868fe72c3208c3ab7aedcf77c2cee88102de143333a2c6eb33aece590a19e67"
+checksum = "f51f82ddf79319433b55d4e4cbcd2959e25e9d3d3687742d829c2cd7e6b26fde"
 dependencies = [
  "serde",
  "slotmap",
