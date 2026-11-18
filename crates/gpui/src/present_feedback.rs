@@ -6,8 +6,8 @@
 //! present order per window. Times are the platform's monotonic clock in nanoseconds: QPC on
 //! Windows, `mach_absolute_time` on macOS.
 
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 /// What became of a window present.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,4 +71,26 @@ pub fn present_feedback_wanted() -> bool {
 /// For a platform: called when feedback becomes wanted, to wake a sleeping vsync thread.
 pub fn set_present_feedback_waker(wake: fn()) {
     let _ = WAKER.set(wake);
+}
+
+/// The refresh grid of the display the platform's vsync thread waits on, measured from its waits:
+/// a vblank and the period, in the platform's monotonic clock in nanoseconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VBlankClock {
+    /// A vblank, not necessarily the latest.
+    pub vblank_ns: u64,
+    /// The measured distance between vblanks.
+    pub period_ns: u64,
+}
+
+static CLOCK: Mutex<Option<VBlankClock>> = Mutex::new(None);
+
+/// For a platform: the vsync thread's latest measure of its display's vblanks.
+pub fn set_vblank_clock(clock: Option<VBlankClock>) {
+    *CLOCK.lock().unwrap_or_else(|e| e.into_inner()) = clock;
+}
+
+/// The vsync thread's display's vblanks, where the platform measures them (Windows).
+pub fn vblank_clock() -> Option<VBlankClock> {
+    *CLOCK.lock().unwrap_or_else(|e| e.into_inner())
 }

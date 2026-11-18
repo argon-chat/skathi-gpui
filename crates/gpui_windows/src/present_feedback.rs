@@ -5,8 +5,9 @@
 //! (`PresentRefreshCount`), against a refresh and its QPC time (`SyncRefreshCount`,
 //! `SyncQPCTime`). The vsync thread reads them every refresh while feedback is wanted. DWM
 //! discards a present superseded before its refresh, so a present older than one shown that never
-//! showed itself was discarded. A swap chain whose statistics stay empty has its presents estimated
-//! instead: shown one refresh after the first vblank following their GPU work.
+//! showed itself was discarded. A present the statistics do not show in time is estimated: shown
+//! as many refreshes after the first vblank following its GPU work as the last presents shown
+//! exactly were (one where none were: DWM composes it on that vblank and shows it on the next).
 
 use std::collections::VecDeque;
 use std::sync::{LazyLock, Mutex};
@@ -22,6 +23,7 @@ use windows::core::Interface;
 /// Refreshes a present may wait for statistics before the swap chain is taken to have none.
 const PROBE_REFRESHES: i64 = 8;
 const KEPT_VBLANKS: usize = 16;
+const KEPT_DELAYS: usize = 8;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Pending {
@@ -71,6 +73,9 @@ pub(crate) struct Decoder {
     /// Refreshes the statistics were sampled on, with their QPC times.
     vblanks: VecDeque<(u32, i64)>,
     last_poll: Option<i64>,
+    /// For the last presents shown exactly, how many refreshes after the first vblank following
+    /// their GPU work: 1 where DWM composes them, 0 where they flip straight to the display.
+    delays: VecDeque<i64>,
 }
 
 fn newer(a: u32, b: u32) -> bool {
@@ -134,6 +139,15 @@ impl Decoder {
         out
     }
 
+    /// The refreshes after the first vblank following its GPU work a present is estimated to show:
+    /// the most common among the last shown exactly, the larger on a tie.
+    fn delay(&self) -> i64 {
+        (0..=2)
+            .max_by_key(|d| self.delays.iter().filter(|x| *x == d).count())
+            .filter(|_| !self.delays.is_empty())
+            .unwrap_or(1)
+    }
+
     fn time_of(&self, refresh: u32, anchor: (u32, i64), period: i64) -> (i64, bool) {
         match self.vblanks.iter().find(|(r, _)| *r == refresh) {
             Some(&(_, at)) => (at, true),
@@ -158,12 +172,27 @@ impl Decoder {
         }
         let floor = self.shown.map(|(_, r)| r);
         let resolved: Vec<Pending> = pending.drain(..upto).collect();
-        // A present missed between two polls: shown, if at all, on the refresh after the first
-        // vblank following it, unless a later one took that refresh too.
-        let slot = |p: &Pending| {
+        let first = |p: &Pending| {
             let since = anchor.1 - p.ready.unwrap_or(p.queued).max(p.queued);
-            let first = anchor.0.wrapping_add((1 - ceil_div(since, period)) as u32);
-            let slot = first.wrapping_add(1);
+            anchor.0.wrapping_add((1 - ceil_div(since, period)) as u32)
+        };
+        if let Some(p) = resolved
+            .last()
+            .filter(|p| p.count == s.present_count && p.ready.is_some())
+        {
+            let delay = offset(s.present_refresh, first(p));
+            if (0..=2).contains(&delay) {
+                self.delays.push_back(delay);
+                if self.delays.len() > KEPT_DELAYS {
+                    self.delays.pop_front();
+                }
+            }
+        }
+        let delay = self.delay();
+        // A present missed between two polls: shown, if at all, as long after the first vblank
+        // following it as presents are, unless a later one took that refresh too.
+        let slot = |p: &Pending| {
+            let slot = first(p).wrapping_add(delay as u32);
             match floor {
                 Some(floor) if !newer(slot, floor) => floor.wrapping_add(1),
                 _ => slot,
@@ -223,11 +252,12 @@ impl Decoder {
         out: &mut Vec<(u64, Outcome)>,
     ) {
         let period = poll.period.max(1);
+        let delay = self.delay();
         let slot = |ready: i64| poll.vblank + ceil_div(ready + 1 - poll.vblank, period) * period;
         while let Some(front) = pending.front() {
             let Some(ready) = front.ready else { break };
             let mine = slot(ready);
-            let at = mine + period;
+            let at = mine + delay * period;
             if at + grace > poll.now {
                 break;
             }
@@ -553,18 +583,49 @@ mod tests {
     #[test]
     fn a_present_the_statistics_lag_behind_is_estimated_a_refresh_after_its_own() {
         let mut d = Decoder::default();
+        // Composed by DWM on the first vblank after it, shown on the next.
         let mut q = VecDeque::from([pending(1, 1, 99 * P + 100)]);
-        d.decode(&mut q, poll(100, 1, 100), |_| true);
-        q.push_back(pending(2, 2, 100 * P + 300));
+        d.decode(&mut q, poll(101, 1, 101), |_| true);
+        q.push_back(pending(2, 2, 101 * P + 300));
         let stale = |now: i64| Poll {
             now,
             vblank: now - now % P,
-            ..poll(100, 1, 100)
+            ..poll(101, 1, 101)
         };
-        assert!(d.decode(&mut q, stale(102 * P + 10), |_| true).is_empty());
+        assert!(d.decode(&mut q, stale(103 * P + 10), |_| true).is_empty());
         assert_eq!(
-            d.decode(&mut q, stale(103 * P + 10), |_| true),
-            [(2, shown(102, false))]
+            d.decode(&mut q, stale(104 * P + 10), |_| true),
+            [(2, shown(103, false))]
+        );
+    }
+
+    #[test]
+    fn presents_are_estimated_as_late_as_the_last_ones_shown_exactly() {
+        let mut d = Decoder::default();
+        // Flipped straight to the display: shown on the first vblank after their GPU work.
+        let mut q = VecDeque::new();
+        for k in 0..4u32 {
+            let r = 100 + k;
+            q.push_back(pending(
+                u64::from(k) + 1,
+                k + 1,
+                (i64::from(r) - 1) * P + 500,
+            ));
+            assert_eq!(
+                d.decode(&mut q, poll(r, k + 1, r), |_| true),
+                [(u64::from(k) + 1, shown(i64::from(r), true))]
+            );
+        }
+        q.push_back(pending(5, 5, 103 * P + 500));
+        let stale = |now: i64| Poll {
+            now,
+            vblank: now - now % P,
+            ..poll(103, 4, 103)
+        };
+        assert!(d.decode(&mut q, stale(104 * P + 10), |_| true).is_empty());
+        assert_eq!(
+            d.decode(&mut q, stale(105 * P + 10), |_| true),
+            [(5, shown(104, false))]
         );
     }
 
