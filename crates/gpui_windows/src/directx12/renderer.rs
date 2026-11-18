@@ -3315,7 +3315,7 @@ mod tests {
             reload_app_effects(
                 AppEffects::new(
                     "test",
-                    r#"{"schema": 10, "effects": [
+                    r#"{"schema": 11, "effects": [
                         {"name": "tint", "backdrop": false, "hlsl": "tint.hlsl"}
                     ]}"#,
                     [("tint.hlsl".to_string(), hlsl.to_string())],
@@ -3705,6 +3705,35 @@ mod tests {
         pool.begin(0, 0)?;
         pool.write(&renderer.gpu, &retained, &[0u8; 64])?;
         assert_eq!(pool.buffer.as_ref().unwrap().capacity, MIN_UPLOAD_CAPACITY);
+        Ok(())
+    }
+
+    #[::core::prelude::v1::test]
+    #[ignore = "requires a native D3D12 hardware adapter; run explicitly for renderer qualification"]
+    fn native_corner_shapes_match_the_wgpu_renderer() -> Result<()> {
+        use gpui::corner_shape_fixture::{SIZE, expectations, scene};
+        let scene = scene();
+        let native = offscreen(SIZE.0, SIZE.1)?
+            .render_to_image(&scene, WindowBackgroundAppearance::Transparent)?;
+        let wgpu = gpui_wgpu::WgpuHeadlessRenderer::new()?.render_scene_to_image(
+            &scene,
+            size(DevicePixels(SIZE.0 as i32), DevicePixels(SIZE.1 as i32)),
+        )?;
+        for (x, y, expected, what) in expectations() {
+            let actual = native.get_pixel(x, y).0;
+            assert!(
+                actual.iter().zip(expected).all(|(a, e)| a.abs_diff(e) <= 2),
+                "{what}: ({x}, {y}) is {actual:?}, expected {expected:?}"
+            );
+        }
+        let largest = native
+            .as_raw()
+            .iter()
+            .zip(wgpu.as_raw())
+            .map(|(native, wgpu)| native.abs_diff(*wgpu))
+            .max()
+            .unwrap_or_default();
+        assert!(largest <= 1, "wgpu must match D3D12 within 1/255, largest {largest}");
         Ok(())
     }
 }

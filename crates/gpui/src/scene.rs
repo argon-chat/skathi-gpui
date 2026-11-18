@@ -6,7 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, Hsla, Path,
+    AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, CornerShapes, Corners, Edges, Hsla, Path,
     PathTiles, Pixels, Point, Radians, ScaledPixels, Size, TimedTransformation,
     bounds_tree::BoundsTree, point, px,
 };
@@ -229,7 +229,7 @@ pub struct VnTextBackground {
 /// capture's device space, where the snapshot covers `source_rect`.
 ///
 /// Keep in sync with `struct VnLayer` in `gpui_windows/src/shaders.hlsl`
-/// (56 words); the renderer uploads this vector as it is.
+/// (60 words); the renderer uploads this vector as it is.
 #[derive(Default, Debug, Copy, Clone)]
 #[repr(C)]
 #[allow(missing_docs)]
@@ -1996,6 +1996,8 @@ pub struct Quad {
     /// widths and the dash phase stay correct under rotation without any of
     /// them learning about the matrix.
     pub transformation: TransformationMatrix,
+    /// vue-native fork: CSS `corner-shape` of `corner_radii`.
+    pub corner_shapes: CornerShapes,
 }
 
 impl From<Quad> for Primitive {
@@ -2029,6 +2031,7 @@ pub struct BackdropBlurRect {
     pub blur_radius: ScaledPixels,
     pub opacity: f32,
     pub tint: Hsla,
+    pub corner_shapes: CornerShapes,
 }
 
 impl Default for BackdropBlurRect {
@@ -2042,6 +2045,7 @@ impl Default for BackdropBlurRect {
             blur_radius: Default::default(),
             opacity: 1.,
             tint: Default::default(),
+            corner_shapes: Default::default(),
         }
     }
 }
@@ -2510,7 +2514,7 @@ pub struct EffectCrossFade {
 /// Keep the field order in sync with `struct EffectQuad` in
 /// `gpui_windows/src/effects.hlsl` and with `struct VnEffectQuad` in the
 /// generated wrapper (`scripts/shaders.ts`).
-/// 56 words / 224 bytes.
+/// 64 words / 256 bytes.
 #[derive(Debug, Copy, Clone, Default)]
 #[repr(C)]
 #[expect(missing_docs)]
@@ -2537,6 +2541,8 @@ pub struct EffectQuad {
     /// Device pixels per logical pixel.
     pub scale: f32,
     pub flags: u32,
+    /// The element's CSS `corner-shape`.
+    pub corner_shapes: CornerShapes,
 }
 
 impl EffectQuad {
@@ -2600,7 +2606,7 @@ impl From<EffectQuad> for Primitive {
     }
 }
 
-const _: () = assert!(std::mem::size_of::<EffectQuad>() == 224);
+const _: () = assert!(std::mem::size_of::<EffectQuad>() == 256);
 const _: () = assert!(EFFECT_PARAM_SLOTS == 32);
 
 // The four primitives that carry a CSS `transform`. Their Rust layout IS the
@@ -2611,19 +2617,20 @@ const _: () = assert!(EFFECT_PARAM_SLOTS == 32);
 // bytes and produces garbage rather than an error, so the sizes are asserted
 // here where a mismatch is a compile failure.
 //
-// Word counts, for the shader side: 89 / 42 / 26 / 38. (vue-native fork: each
-// grew by four, the content mask's corner radii; `PolychromeSprite` by four
-// more, its `tint`, and `Shadow` by four more, its `element_bounds`.)
+// Word counts, for the shader side: 97 / 50 / 30 / 46. (vue-native fork: each
+// grew by four, the content mask's corner radii, and four more, its corner shapes;
+// `PolychromeSprite` by four more, its `tint`, `Shadow` by four more, its
+// `element_bounds`, and all but `Underline` by four more, their own corner shapes.)
 //
 // `Quad` carries a `Background`, which is 57 words since it grew from a
 // two-stop linear ramp to an eight-stop linear / radial / conic one with
 // repeat and tiling (`color.rs`). `PathRasterizationVertex` carries one too
 // and is asserted next to the WebGL word strides in `gpui_wgpu`.
-const _: () = assert!(std::mem::size_of::<Quad>() == 89 * 4);
+const _: () = assert!(std::mem::size_of::<Quad>() == 97 * 4);
 const _: () = assert!(std::mem::size_of::<Background>() == 57 * 4);
-const _: () = assert!(std::mem::size_of::<Shadow>() == 42 * 4);
-const _: () = assert!(std::mem::size_of::<Underline>() == 26 * 4);
-const _: () = assert!(std::mem::size_of::<PolychromeSprite>() == 38 * 4);
+const _: () = assert!(std::mem::size_of::<Shadow>() == 50 * 4);
+const _: () = assert!(std::mem::size_of::<Underline>() == 30 * 4);
+const _: () = assert!(std::mem::size_of::<PolychromeSprite>() == 46 * 4);
 const _: () = assert!(std::mem::size_of::<TransformationMatrix>() == 6 * 4);
 
 static EFFECT_CLOCK_ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
@@ -2693,6 +2700,9 @@ pub struct Shadow {
     /// vue-native fork: the element's border box, with `corner_radii`. An
     /// outer shadow is cut out of it; an inset one is clipped to it.
     pub element_bounds: Bounds<ScaledPixels>,
+    /// vue-native fork: CSS `corner-shape` of the element and of the shape, whose insets
+    /// are the shape's alone.
+    pub corner_shapes: CornerShapes,
 }
 
 impl From<Shadow> for Primitive {
@@ -3109,6 +3119,8 @@ pub struct PolychromeSprite {
     /// keeping their own alpha (`Window::with_image_tint`); transparent for
     /// none. After `transformation`, so every shader mirrors it last.
     pub tint: Hsla,
+    /// vue-native fork: CSS `corner-shape` of `corner_radii`.
+    pub corner_shapes: CornerShapes,
 }
 
 impl From<PolychromeSprite> for Primitive {
@@ -3432,7 +3444,7 @@ mod vn_color_group_tests {
         assert_eq!(scene.vn_groups[1].vn_layers.len(), 1);
         assert_eq!(scene.vn_layers[0].pad[0], 1);
         assert_eq!(scene.vn_groups[1].vn_layers[0].pad[2], 2);
-        assert_eq!(std::mem::size_of::<VnLayer>(), 224, "keep the HLSL layer ABI");
+        assert_eq!(std::mem::size_of::<VnLayer>(), 240, "keep the HLSL layer ABI");
         assert_eq!(std::mem::size_of::<VnTextBackground>(), 276, "match the HLSL structured buffer stride");
         assert_eq!(std::mem::offset_of!(VnTextBackground, bounds), 228);
         assert_eq!(std::mem::offset_of!(VnTextBackground, inverse), 244);

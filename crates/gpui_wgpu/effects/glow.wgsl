@@ -5,7 +5,7 @@
 //   source:     crates/sk-effects/shaders/glow.slang+wrapper
 //   signature:  glow(<color>?, <length:radius>, <number:strength>)
 //   slang:      2026.12
-//   schema:     10
+//   schema:     11
 //   src-sha256: de1d06dddb28503e5a23a3494d73227436591594943428bd0ecec042d3926caa
 //   output:     premultiplied RGBA, blended One, OneMinusSrcAlpha
 //
@@ -26,6 +26,14 @@ struct SkCorners_std430_0
     @align(4) bottom_left_0 : f32,
 };
 
+struct SkCornerShapes_std430_0
+{
+    @align(4) top_left_1 : u32,
+    @align(4) top_right_1 : u32,
+    @align(4) bottom_right_1 : u32,
+    @align(4) bottom_left_1 : u32,
+};
+
 struct SkEffectQuad_std430_0
 {
     @align(8) order_0 : u32,
@@ -33,6 +41,7 @@ struct SkEffectQuad_std430_0
     @align(8) bounds_0 : SkBounds_std430_0,
     @align(8) content_mask_0 : SkBounds_std430_0,
     @align(8) content_mask_radii_0 : SkCorners_std430_0,
+    @align(8) content_mask_shapes_0 : SkCornerShapes_std430_0,
     @align(8) corner_radii_0 : SkCorners_std430_0,
     @align(8) params_0 : array<f32, i32(32)>,
     @align(8) opacity_0 : f32,
@@ -41,6 +50,7 @@ struct SkEffectQuad_std430_0
     @align(4) backdrop_blur_radius_0 : f32,
     @align(8) scale_0 : f32,
     @align(4) flags_0 : u32,
+    @align(8) corner_shapes_0 : SkCornerShapes_std430_0,
 };
 
 @binding(0) @group(1) var<storage, read> sk_effect_quads_0 : array<SkEffectQuad_std430_0>;
@@ -193,58 +203,382 @@ fn sk_pick_corner_radius_0( center_to_point_0 : vec2<f32>,  radii_0 : ptr<functi
     return top_0;
 }
 
-fn sk_quad_sdf_0( point_0 : vec2<f32>,  bounds_1 : ptr<function, SkBounds_std430_0>,  radii_1 : ptr<function, SkCorners_std430_0>) -> f32
+struct SkCorners_0
+{
+     top_left_0 : f32,
+     top_right_0 : f32,
+     bottom_right_0 : f32,
+     bottom_left_0 : f32,
+};
+
+fn sk_pick_corner_radius_1( center_to_point_1 : vec2<f32>,  radii_1 : SkCorners_0) -> f32
+{
+    var _S4 : bool = (center_to_point_1.x) < 0.0f;
+    var top_1 : f32;
+    if(_S4)
+    {
+        top_1 = radii_1.top_left_0;
+    }
+    else
+    {
+        top_1 = radii_1.top_right_0;
+    }
+    var bottom_1 : f32;
+    if(_S4)
+    {
+        bottom_1 = radii_1.bottom_left_0;
+    }
+    else
+    {
+        bottom_1 = radii_1.bottom_right_0;
+    }
+    if((center_to_point_1.y) < 0.0f)
+    {
+    }
+    else
+    {
+        top_1 = bottom_1;
+    }
+    return top_1;
+}
+
+fn sk_quad_sdf_0( point_0 : vec2<f32>,  bounds_1 : ptr<function, SkBounds_std430_0>,  radii_2 : ptr<function, SkCorners_std430_0>) -> f32
 {
     var half_size_0 : vec2<f32> = (*bounds_1).size_0 / vec2<f32>(2.0f);
-    var center_to_point_1 : vec2<f32> = point_0 - ((*bounds_1).origin_0 + half_size_0);
-    var _S4 : f32 = sk_pick_corner_radius_0(center_to_point_1, &((*radii_1)));
-    var corner_center_to_point_0 : vec2<f32> = abs(center_to_point_1) - half_size_0 + vec2<f32>(_S4);
-    if(_S4 == 0.0f)
+    var center_to_point_2 : vec2<f32> = point_0 - ((*bounds_1).origin_0 + half_size_0);
+    var _S5 : f32 = sk_pick_corner_radius_0(center_to_point_2, &((*radii_2)));
+    var corner_center_to_point_0 : vec2<f32> = abs(center_to_point_2) - half_size_0 + vec2<f32>(_S5);
+    if(_S5 == 0.0f)
     {
         return max(corner_center_to_point_0.x, corner_center_to_point_0.y);
     }
-    return length(max(vec2<f32>(0.0f, 0.0f), corner_center_to_point_0)) + min(0.0f, max(corner_center_to_point_0.x, corner_center_to_point_0.y)) - _S4;
+    return length(max(vec2<f32>(0.0f, 0.0f), corner_center_to_point_0)) + min(0.0f, max(corner_center_to_point_0.x, corner_center_to_point_0.y)) - _S5;
 }
 
-fn sk_quad_sdf_1( point_1 : vec2<f32>,  bounds_2 : ptr<function, SkBounds_std430_0>,  radii_2 : ptr<function, SkCorners_std430_0>) -> f32
+fn sk_quad_sdf_1( point_1 : vec2<f32>,  bounds_2 : ptr<function, SkBounds_std430_0>,  radii_3 : ptr<function, SkCorners_std430_0>) -> f32
 {
     var half_size_1 : vec2<f32> = (*bounds_2).size_0 / vec2<f32>(2.0f);
-    var center_to_point_2 : vec2<f32> = point_1 - ((*bounds_2).origin_0 + half_size_1);
-    var _S5 : f32 = sk_pick_corner_radius_0(center_to_point_2, &((*radii_2)));
-    var corner_center_to_point_1 : vec2<f32> = abs(center_to_point_2) - half_size_1 + vec2<f32>(_S5);
-    if(_S5 == 0.0f)
+    var center_to_point_3 : vec2<f32> = point_1 - ((*bounds_2).origin_0 + half_size_1);
+    var _S6 : f32 = sk_pick_corner_radius_0(center_to_point_3, &((*radii_3)));
+    var corner_center_to_point_1 : vec2<f32> = abs(center_to_point_3) - half_size_1 + vec2<f32>(_S6);
+    if(_S6 == 0.0f)
     {
         return max(corner_center_to_point_1.x, corner_center_to_point_1.y);
     }
-    return length(max(vec2<f32>(0.0f, 0.0f), corner_center_to_point_1)) + min(0.0f, max(corner_center_to_point_1.x, corner_center_to_point_1.y)) - _S5;
+    return length(max(vec2<f32>(0.0f, 0.0f), corner_center_to_point_1)) + min(0.0f, max(corner_center_to_point_1.x, corner_center_to_point_1.y)) - _S6;
 }
 
-fn EffectInput_backdropAt_0( this_2 : EffectInput_0,  uv_1 : vec2<f32>) -> vec4<f32>
+struct SkBounds_0
 {
-    var _S6 : vec4<f32>;
+     origin_0 : vec2<f32>,
+     size_0 : vec2<f32>,
+};
+
+fn sk_quad_sdf_2( point_2 : vec2<f32>,  bounds_3 : SkBounds_0,  radii_4 : SkCorners_0) -> f32
+{
+    var half_size_2 : vec2<f32> = bounds_3.size_0 / vec2<f32>(2.0f);
+    var center_to_point_4 : vec2<f32> = point_2 - (bounds_3.origin_0 + half_size_2);
+    var radius_1 : f32 = sk_pick_corner_radius_1(center_to_point_4, radii_4);
+    var corner_center_to_point_2 : vec2<f32> = abs(center_to_point_4) - half_size_2 + vec2<f32>(radius_1);
+    if(radius_1 == 0.0f)
+    {
+        return max(corner_center_to_point_2.x, corner_center_to_point_2.y);
+    }
+    return length(max(vec2<f32>(0.0f, 0.0f), corner_center_to_point_2)) + min(0.0f, max(corner_center_to_point_2.x, corner_center_to_point_2.y)) - radius_1;
+}
+
+fn sk_pick_corner_shape_0( center_to_point_5 : vec2<f32>,  shapes_0 : ptr<function, SkCornerShapes_std430_0>) -> u32
+{
+    var _S7 : bool = (center_to_point_5.x) < 0.0f;
+    var top_2 : u32;
+    if(_S7)
+    {
+        top_2 = (*shapes_0).top_left_1;
+    }
+    else
+    {
+        top_2 = (*shapes_0).top_right_1;
+    }
+    var bottom_2 : u32;
+    if(_S7)
+    {
+        bottom_2 = (*shapes_0).bottom_left_1;
+    }
+    else
+    {
+        bottom_2 = (*shapes_0).bottom_right_1;
+    }
+    if((center_to_point_5.y) < 0.0f)
+    {
+    }
+    else
+    {
+        top_2 = bottom_2;
+    }
+    return top_2;
+}
+
+fn sk_pick_corner_shape_1( center_to_point_6 : vec2<f32>,  shapes_1 : ptr<function, SkCornerShapes_std430_0>) -> u32
+{
+    var _S8 : bool = (center_to_point_6.x) < 0.0f;
+    var top_3 : u32;
+    if(_S8)
+    {
+        top_3 = (*shapes_1).top_left_1;
+    }
+    else
+    {
+        top_3 = (*shapes_1).top_right_1;
+    }
+    var bottom_3 : u32;
+    if(_S8)
+    {
+        bottom_3 = (*shapes_1).bottom_left_1;
+    }
+    else
+    {
+        bottom_3 = (*shapes_1).bottom_right_1;
+    }
+    if((center_to_point_6.y) < 0.0f)
+    {
+    }
+    else
+    {
+        top_3 = bottom_3;
+    }
+    return top_3;
+}
+
+fn sk_shape_pow_0( x_0 : f32,  e_0 : f32) -> f32
+{
+    var _S9 : f32;
+    if(x_0 <= 0.0f)
+    {
+        _S9 = 0.0f;
+    }
+    else
+    {
+        _S9 = exp2(e_0 * log2(x_0));
+    }
+    return _S9;
+}
+
+fn sk_shaped_corner_piece_0( q_0 : vec2<f32>,  r_0 : f32,  word_0 : u32,  inset_0 : vec2<f32>) -> f32
+{
+    var code_0 : u32 = (word_0 & (u32(4095)));
+    var _S10 : bool;
+    if(code_0 == u32(0))
+    {
+        _S10 = true;
+    }
+    else
+    {
+        _S10 = code_0 == u32(4095);
+    }
+    if(_S10)
+    {
+        _S10 = true;
+    }
+    else
+    {
+        _S10 = r_0 <= 0.0f;
+    }
+    if(_S10)
+    {
+        return -3.00000000549775576e+38f;
+    }
+    var h_0 : f32 = f32(code_0 - u32(1)) / 4094.0f;
+    var convex_0 : bool = h_0 >= 0.5f;
+    var a_1 : vec2<f32> = vec2<f32>(r_0, 0.0f);
+    var b_0 : vec2<f32> = vec2<f32>(0.0f, r_0);
+    var _S11 : f32 = inset_0.x;
+    if(_S11 > 0.0f)
+    {
+        _S10 = true;
+    }
+    else
+    {
+        _S10 = (inset_0.y) > 0.0f;
+    }
+    var start_0 : f32;
+    var a_2 : vec2<f32>;
+    var b_1 : vec2<f32>;
+    if(_S10)
+    {
+        var cp_0 : f32 = saturate(2.41421365737915039f * h_0 - 0.70710676908493042f);
+        var _S12 : f32 = inset_0.y;
+        var d_0 : f32 = clamp(_S11 - _S12, - r_0, r_0);
+        if(h_0 <= 0.5f)
+        {
+            _S10 = (abs(d_0)) >= r_0;
+        }
+        else
+        {
+            _S10 = false;
+        }
+        if(_S10)
+        {
+            return -3.00000000549775576e+38f;
+        }
+        if(d_0 != 0.0f)
+        {
+            var s_0 : f32 = sqrt(2.0f * r_0 * r_0 - d_0 * d_0);
+            var bevel_0 : f32 = (s_0 - d_0) / (2.0f * s_0);
+            if(convex_0)
+            {
+                start_0 = 1.0f - (1.0f - bevel_0) * 2.0f * (1.0f - cp_0);
+            }
+            else
+            {
+                start_0 = bevel_0 * 2.0f * cp_0;
+            }
+        }
+        else
+        {
+            start_0 = cp_0;
+        }
+        var end_0 : f32 = 2.0f * cp_0 - start_0;
+        var _S13 : vec2<f32> = b_0 + normalize(vec2<f32>(end_0, 1.0f - end_0)) * vec2<f32>(_S11);
+        a_2 = a_1 + normalize(vec2<f32>(1.0f - start_0, start_0)) * vec2<f32>(_S12);
+        b_1 = _S13;
+    }
+    else
+    {
+        a_2 = a_1;
+        b_1 = b_0;
+    }
+    var _S14 : f32 = a_2.x;
+    var _S15 : f32 = b_1.x;
+    var _S16 : f32 = _S14 - _S15;
+    var _S17 : f32 = b_1.y;
+    var _S18 : f32 = a_2.y;
+    var _S19 : f32 = _S17 - _S18;
+    var axes_0 : vec2<f32> = vec2<f32>(_S16, _S19);
+    if(_S16 <= 0.0f)
+    {
+        _S10 = true;
+    }
+    else
+    {
+        _S10 = _S19 <= 0.0f;
+    }
+    if(_S10)
+    {
+        return -3.00000000549775576e+38f;
+    }
+    if(convex_0)
+    {
+        start_0 = h_0;
+    }
+    else
+    {
+        start_0 = 1.0f - h_0;
+    }
+    var n_0 : f32 = -0.69314718246459961f / min(log(start_0), -0.00009999999747379f);
+    if(convex_0)
+    {
+        a_2 = (vec2<f32>(_S14, _S17) - q_0) / axes_0;
+    }
+    else
+    {
+        a_2 = (q_0 - vec2<f32>(_S15, _S18)) / axes_0;
+    }
+    var uv_1 : vec2<f32> = max(a_2, vec2<f32>(0.0f, 0.0f));
+    var _S20 : f32 = uv_1.x;
+    var _S21 : f32 = uv_1.y;
+    var _S22 : f32 = max(_S20, _S21);
+    if(_S22 <= 0.0f)
+    {
+        var _S23 : f32 = min(_S16, _S19);
+        if(convex_0)
+        {
+            start_0 = - _S23;
+        }
+        else
+        {
+            start_0 = _S23;
+        }
+        return start_0;
+    }
+    var l_0 : f32 = _S22 * sk_shape_pow_0(sk_shape_pow_0(_S20 / _S22, n_0) + sk_shape_pow_0(_S21 / _S22, n_0), 1.0f / n_0);
+    var slope_0 : vec2<f32>;
+    if(n_0 > 1.00010001659393311f)
+    {
+        var _S24 : f32 = n_0 - 1.0f;
+        slope_0 = vec2<f32>(sk_shape_pow_0(_S20 / l_0, _S24), sk_shape_pow_0(_S21 / l_0, _S24));
+    }
+    else
+    {
+        slope_0 = vec2<f32>(1.0f, 1.0f);
+    }
+    var distance_0 : f32 = (l_0 - 1.0f) / max(length(slope_0 / axes_0), 9.99999997475242708e-07f);
+    if(convex_0)
+    {
+        start_0 = distance_0;
+    }
+    else
+    {
+        start_0 = - distance_0;
+    }
+    return start_0;
+}
+
+fn sk_shaped_quad_sdf_0( point_3 : vec2<f32>,  bounds_4 : SkBounds_0,  radii_5 : SkCorners_0,  shapes_2 : ptr<function, SkCornerShapes_std430_0>) -> f32
+{
+    var half_size_3 : vec2<f32> = bounds_4.size_0 / vec2<f32>(2.0f);
+    var center_to_point_7 : vec2<f32> = point_3 - (bounds_4.origin_0 + half_size_3);
+    var _S25 : u32 = sk_pick_corner_shape_1(center_to_point_7, &((*shapes_2)));
+    if(((_S25 & (u32(4095)))) == u32(0))
+    {
+        return sk_quad_sdf_2(point_3, bounds_4, radii_5);
+    }
+    var corner_to_point_0 : vec2<f32> = abs(center_to_point_7) - half_size_3;
+    var inset_1 : vec2<f32> = vec2<f32>(f32((((_S25 >> (u32(12)))) & (u32(1023)))), f32((_S25 >> (u32(22))))) * vec2<f32>(0.25f);
+    return max(max(corner_to_point_0.x, corner_to_point_0.y), sk_shaped_corner_piece_0(inset_1 - corner_to_point_0, sk_pick_corner_radius_1(center_to_point_7, radii_5), _S25, inset_1));
+}
+
+fn sk_shaped_quad_sdf_1( point_4 : vec2<f32>,  bounds_5 : ptr<function, SkBounds_std430_0>,  radii_6 : ptr<function, SkCorners_std430_0>,  shapes_3 : ptr<function, SkCornerShapes_std430_0>) -> f32
+{
+    var half_size_4 : vec2<f32> = (*bounds_5).size_0 / vec2<f32>(2.0f);
+    var center_to_point_8 : vec2<f32> = point_4 - ((*bounds_5).origin_0 + half_size_4);
+    var _S26 : u32 = sk_pick_corner_shape_0(center_to_point_8, &((*shapes_3)));
+    if(((_S26 & (u32(4095)))) == u32(0))
+    {
+        var _S27 : f32 = sk_quad_sdf_1(point_4, &((*bounds_5)), &((*radii_6)));
+        return _S27;
+    }
+    var _S28 : f32 = sk_pick_corner_radius_0(center_to_point_8, &((*radii_6)));
+    var corner_to_point_1 : vec2<f32> = abs(center_to_point_8) - half_size_4;
+    var inset_2 : vec2<f32> = vec2<f32>(f32((((_S26 >> (u32(12)))) & (u32(1023)))), f32((_S26 >> (u32(22))))) * vec2<f32>(0.25f);
+    return max(max(corner_to_point_1.x, corner_to_point_1.y), sk_shaped_corner_piece_0(inset_2 - corner_to_point_1, _S28, _S26, inset_2));
+}
+
+fn EffectInput_backdropAt_0( this_2 : EffectInput_0,  uv_2 : vec2<f32>) -> vec4<f32>
+{
+    var _S29 : vec4<f32>;
     if(this_2.hasBackdrop_0)
     {
-        _S6 = (textureSampleLevel((sk_backdrop_input_0), (sk_clamp_sampler_0), (uv_1), (0.0f)));
+        _S29 = (textureSampleLevel((sk_backdrop_input_0), (sk_clamp_sampler_0), (uv_2), (0.0f)));
     }
     else
     {
-        _S6 = vec4<f32>(0.0f, 0.0f, 0.0f, 0.0f);
+        _S29 = vec4<f32>(0.0f, 0.0f, 0.0f, 0.0f);
     }
-    return _S6;
+    return _S29;
 }
 
-fn EffectInput_contentAt_0( this_3 : EffectInput_0,  uv_2 : vec2<f32>) -> vec4<f32>
+fn EffectInput_contentAt_0( this_3 : EffectInput_0,  uv_3 : vec2<f32>) -> vec4<f32>
 {
-    var _S7 : vec4<f32>;
+    var _S30 : vec4<f32>;
     if(this_3.hasContent_0)
     {
-        _S7 = (textureSampleLevel((sk_content_0), (sk_clamp_sampler_0), (uv_2), (0.0f)));
+        _S30 = (textureSampleLevel((sk_content_0), (sk_clamp_sampler_0), (uv_3), (0.0f)));
     }
     else
     {
-        _S7 = vec4<f32>(0.0f, 0.0f, 0.0f, 0.0f);
+        _S30 = vec4<f32>(0.0f, 0.0f, 0.0f, 0.0f);
     }
-    return _S7;
+    return _S30;
 }
 
 fn EffectInput_historySize_0( this_4 : EffectInput_0) -> vec2<f32>
@@ -255,56 +589,56 @@ fn EffectInput_historySize_0( this_4 : EffectInput_0) -> vec2<f32>
 fn EffectInput_historyAtPx_0( this_5 : EffectInput_0,  px_1 : vec2<f32>) -> vec4<f32>
 {
     var size_2 : vec2<f32> = EffectInput_historySize_0(this_5);
-    var _S8 : vec4<f32>;
+    var _S31 : vec4<f32>;
     if(this_5.hasHistory_0)
     {
-        _S8 = (textureSampleLevel((sk_history_0), (sk_clamp_sampler_0), ((px_1 + vec2<f32>(this_5.bleed_1)) / size_2), (0.0f)));
+        _S31 = (textureSampleLevel((sk_history_0), (sk_clamp_sampler_0), ((px_1 + vec2<f32>(this_5.bleed_1)) / size_2), (0.0f)));
     }
     else
     {
-        _S8 = vec4<f32>(0.0f, 0.0f, 0.0f, 0.0f);
+        _S31 = vec4<f32>(0.0f, 0.0f, 0.0f, 0.0f);
     }
-    return _S8;
+    return _S31;
 }
 
-fn sk_content_mask_coverage_0( position_0 : vec2<f32>,  mask_0 : ptr<function, SkBounds_std430_0>,  radii_3 : ptr<function, SkCorners_std430_0>) -> f32
+fn sk_content_mask_coverage_0( position_0 : vec2<f32>,  mask_0 : ptr<function, SkBounds_std430_0>,  radii_7 : ptr<function, SkCorners_std430_0>,  shapes_4 : ptr<function, SkCornerShapes_std430_0>) -> f32
 {
-    var _S9 : bool;
-    if(((*radii_3).top_left_0) == 0.0f)
+    var _S32 : bool;
+    if(((*radii_7).top_left_0) == 0.0f)
     {
-        _S9 = ((*radii_3).top_right_0) == 0.0f;
+        _S32 = ((*radii_7).top_right_0) == 0.0f;
     }
     else
     {
-        _S9 = false;
+        _S32 = false;
     }
-    if(_S9)
+    if(_S32)
     {
-        _S9 = ((*radii_3).bottom_right_0) == 0.0f;
+        _S32 = ((*radii_7).bottom_right_0) == 0.0f;
     }
     else
     {
-        _S9 = false;
+        _S32 = false;
     }
-    if(_S9)
+    if(_S32)
     {
-        _S9 = ((*radii_3).bottom_left_0) == 0.0f;
+        _S32 = ((*radii_7).bottom_left_0) == 0.0f;
     }
     else
     {
-        _S9 = false;
+        _S32 = false;
     }
-    if(_S9)
+    if(_S32)
     {
         return 1.0f;
     }
-    var _S10 : f32 = sk_quad_sdf_1(position_0, &((*mask_0)), &((*radii_3)));
-    return saturate(0.5f - _S10);
+    var _S33 : f32 = sk_shaped_quad_sdf_1(position_0, &((*mask_0)), &((*radii_7)), &((*shapes_4)));
+    return saturate(0.5f - _S33);
 }
 
 fn sk_begin_0( id_0 : u32,  frag_position_0 : vec4<f32>) -> EffectInput_0
 {
-    var _S11 : u32 = sk_effect_quads_0[id_0].flags_0;
+    var _S34 : u32 = sk_effect_quads_0[id_0].flags_0;
     var history_pass_0 : bool = (((sk_effect_quads_0[id_0].flags_0) & (u32(8)))) != u32(0);
     var position_1 : vec2<f32>;
     if(history_pass_0)
@@ -315,38 +649,59 @@ fn sk_begin_0( id_0 : u32,  frag_position_0 : vec4<f32>) -> EffectInput_0
     {
         position_1 = frag_position_0.xy;
     }
-    var uv_3 : vec2<f32> = position_1 / GlobalParams_0.sk_viewport_size_0;
-    var _S12 : SkBounds_std430_0 = sk_effect_quads_0[id_0].bounds_0;
-    var _S13 : SkCorners_std430_0 = sk_effect_quads_0[id_0].corner_radii_0;
-    var _S14 : f32 = sk_quad_sdf_0(position_1, &(_S12), &(_S13));
-    var sd_element_0 : f32 = _S14 + sk_effect_quads_0[id_0].bleed_0;
-    var element_origin_0 : vec2<f32> = _S12.origin_0 + vec2<f32>(sk_effect_quads_0[id_0].bleed_0);
-    var element_size_0 : vec2<f32> = max(_S12.size_0 - vec2<f32>((2.0f * sk_effect_quads_0[id_0].bleed_0)), vec2<f32>(1.0f, 1.0f));
-    var has_backdrop_0 : bool = ((_S11 & (u32(1)))) != u32(0);
+    var uv_4 : vec2<f32> = position_1 / GlobalParams_0.sk_viewport_size_0;
+    var _S35 : SkBounds_std430_0 = sk_effect_quads_0[id_0].bounds_0;
+    var _S36 : SkCorners_std430_0 = sk_effect_quads_0[id_0].corner_radii_0;
+    var _S37 : f32 = sk_quad_sdf_0(position_1, &(_S35), &(_S36));
+    var _S38 : f32 = sk_effect_quads_0[id_0].bleed_0;
+    var _S39 : f32 = _S37 + sk_effect_quads_0[id_0].bleed_0;
+    var element_origin_0 : vec2<f32> = _S35.origin_0 + vec2<f32>(sk_effect_quads_0[id_0].bleed_0);
+    var element_size_0 : vec2<f32> = max(_S35.size_0 - vec2<f32>((2.0f * sk_effect_quads_0[id_0].bleed_0)), vec2<f32>(1.0f, 1.0f));
+    var _S40 : SkCornerShapes_std430_0 = sk_effect_quads_0[id_0].corner_shapes_0;
+    var sd_element_0 : f32;
+    if((((((((((_S40.top_left_1) | ((_S40.top_right_1)))) | ((_S40.bottom_right_1)))) | ((_S40.bottom_left_1)))) & (u32(4095)))) != u32(0))
+    {
+        var element_0 : SkBounds_0;
+        element_0.origin_0 = element_origin_0;
+        element_0.size_0 = element_size_0;
+        var radii_8 : SkCorners_0;
+        radii_8.top_left_0 = max(_S36.top_left_0 - _S38, 0.0f);
+        radii_8.top_right_0 = max(_S36.top_right_0 - _S38, 0.0f);
+        radii_8.bottom_right_0 = max(_S36.bottom_right_0 - _S38, 0.0f);
+        radii_8.bottom_left_0 = max(_S36.bottom_left_0 - _S38, 0.0f);
+        var _S41 : f32 = sk_shaped_quad_sdf_0(position_1, element_0, radii_8, &(_S40));
+        sd_element_0 = _S41;
+    }
+    else
+    {
+        sd_element_0 = _S39;
+    }
+    var has_backdrop_0 : bool = ((_S34 & (u32(1)))) != u32(0);
     var i_1 : EffectInput_0;
-    i_1.uv_0 = uv_3;
-    var _S15 : vec2<f32> = position_1 - element_origin_0;
-    i_1.px_0 = _S15;
+    i_1.uv_0 = uv_4;
+    var _S42 : vec2<f32> = position_1 - element_origin_0;
+    i_1.px_0 = _S42;
     i_1.size_1 = element_size_0;
-    i_1.local_0 = _S15 / element_size_0;
+    i_1.local_0 = _S42 / element_size_0;
     i_1.hasBackdrop_0 = has_backdrop_0;
-    i_1.hasContent_0 = ((_S11 & (u32(2)))) != u32(0);
-    i_1.hasHistory_0 = ((_S11 & (u32(4)))) != u32(0);
+    i_1.hasContent_0 = ((_S34 & (u32(2)))) != u32(0);
+    i_1.hasHistory_0 = ((_S34 & (u32(4)))) != u32(0);
     i_1.historyPass_0 = history_pass_0;
     i_1.quad_0 = id_0;
-    i_1.bleed_1 = sk_effect_quads_0[id_0].bleed_0;
-    i_1.backdrop_0 = EffectInput_backdropAt_0(i_1, uv_3);
-    i_1.content_0 = EffectInput_contentAt_0(i_1, uv_3);
-    i_1.history_0 = EffectInput_historyAtPx_0(i_1, _S15);
+    i_1.bleed_1 = _S38;
+    i_1.backdrop_0 = EffectInput_backdropAt_0(i_1, uv_4);
+    i_1.content_0 = EffectInput_contentAt_0(i_1, uv_4);
+    i_1.history_0 = EffectInput_historyAtPx_0(i_1, _S42);
     i_1.sd_0 = sd_element_0;
     i_1.coverage_0 = saturate(0.5f - sd_element_0);
     i_1.time_1 = sk_effect_quads_0[id_0].time_0;
     i_1.scale_1 = sk_effect_quads_0[id_0].scale_0;
     i_1.opacity_1 = sk_effect_quads_0[id_0].opacity_0;
-    var _S16 : SkBounds_std430_0 = sk_effect_quads_0[id_0].content_mask_0;
-    var _S17 : SkCorners_std430_0 = sk_effect_quads_0[id_0].content_mask_radii_0;
-    var _S18 : f32 = sk_content_mask_coverage_0(position_1, &(_S16), &(_S17));
-    i_1.clip_0 = _S18;
+    var _S43 : SkBounds_std430_0 = sk_effect_quads_0[id_0].content_mask_0;
+    var _S44 : SkCorners_std430_0 = sk_effect_quads_0[id_0].content_mask_radii_0;
+    var _S45 : SkCornerShapes_std430_0 = sk_effect_quads_0[id_0].content_mask_shapes_0;
+    var _S46 : f32 = sk_content_mask_coverage_0(position_1, &(_S43), &(_S44), &(_S45));
+    i_1.clip_0 = _S46;
     return i_1;
 }
 
@@ -366,14 +721,14 @@ struct pixelInput_0
 };
 
 @fragment
-fn effect_fragment( _S19 : pixelInput_0, @builtin(position) sk_position_0 : vec4<f32>) -> pixelOutput_0
+fn effect_fragment( _S47 : pixelInput_0, @builtin(position) sk_position_0 : vec4<f32>) -> pixelOutput_0
 {
-    var sk_in_0 : EffectInput_0 = sk_begin_0(_S19.sk_id_0, sk_position_0);
+    var sk_in_0 : EffectInput_0 = sk_begin_0(_S47.sk_id_0, sk_position_0);
     var sk_material_0 : Glow_0;
     sk_material_0.color_0 = vec4<f32>(EffectInput_param_0(sk_in_0, u32(4)), EffectInput_param_0(sk_in_0, u32(5)), EffectInput_param_0(sk_in_0, u32(6)), EffectInput_param_0(sk_in_0, u32(7)));
     sk_material_0.radius_0 = EffectInput_param_0(sk_in_0, u32(0));
     sk_material_0.strength_0 = EffectInput_param_0(sk_in_0, u32(1));
-    var _S20 : pixelOutput_0 = pixelOutput_0( sk_finish_0(sk_material_0, sk_in_0) );
-    return _S20;
+    var _S48 : pixelOutput_0 = pixelOutput_0( sk_finish_0(sk_material_0, sk_in_0) );
+    return _S48;
 }
 

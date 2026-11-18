@@ -260,7 +260,7 @@ mod tests {
     /// `count` shows the red of its history, and each step adds 0.25 to it.
     const EFFECTS_WGSL: &str = r#"
         @group(0) @binding(0) var<uniform> globals: array<vec4<f32>, 3>;
-        @group(1) @binding(0) var<storage, read> quads: array<array<f32, 56>>;
+        @group(1) @binding(0) var<storage, read> quads: array<array<f32, 64>>;
         @group(2) @binding(1) var clamp_sampler: sampler;
         @group(2) @binding(3) var image: texture_2d<f32>;
         @group(2) @binding(7) var content: texture_2d<f32>;
@@ -274,7 +274,7 @@ mod tests {
         @fragment
         fn effect_fragment(input: Varying) -> @location(0) vec4<f32> {
             let quad = quads[input.id];
-            let flags = bitcast<u32>(quad[55]);
+            let flags = bitcast<u32>(quad[59]);
             let origin = vec2<f32>(quad[2], quad[3]);
             let step = (flags & 8u) != 0u;
             let position = select(input.position.xy, origin + input.position.xy, step);
@@ -286,13 +286,13 @@ mod tests {
                 return last + vec4<f32>(0.25, 0.0, 0.0, 0.0);
             }
             if (flags & 4u) != 0u {
-                return vec4<f32>(last.r, 0.0, 0.0, 1.0) * quad[50];
+                return vec4<f32>(last.r, 0.0, 0.0, 1.0) * quad[54];
             }
             let shown = textureSampleLevel(content, clamp_sampler, position / globals[1].xy, 0.0);
-            if quad[18] > 0.5 {
-                return textureLoad(image, vec2<i32>(0, 0), 0) * shown.a * quad[50];
+            if quad[22] > 0.5 {
+                return textureLoad(image, vec2<i32>(0, 0), 0) * shown.a * quad[54];
             }
-            return vec4<f32>(shown.b, shown.r, shown.g, shown.a) * quad[50];
+            return vec4<f32>(shown.b, shown.r, shown.g, shown.a) * quad[54];
         }
     "#;
 
@@ -303,7 +303,7 @@ mod tests {
         gpui::reload_app_effects(
             gpui::AppEffects::new(
                 "test",
-                r#"{"schema": 10, "effects": [
+                r#"{"schema": 11, "effects": [
                     {"name": "swap", "backdrop": false, "wgsl": "fx.wgsl"},
                     {"name": "count", "backdrop": false, "history": true, "wgsl": "fx.wgsl"}
                 ]}"#,

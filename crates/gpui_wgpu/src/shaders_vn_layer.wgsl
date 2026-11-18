@@ -3,7 +3,7 @@
 // a clip shape, a color matrix and a text background stack. A port of
 // `vn_layer_*` in gpui_windows' shaders.hlsl.
 //
-// The instance buffer holds the frame's layers (56 words each), then every
+// The instance buffer holds the frame's layers (60 words each), then every
 // clip segment (4 words), then every text background (69 words). The renderer
 // rewrites `segment_start` and `text_start` to the word where each run begins.
 // Group 2 binding 0 (`t_sprite`) is the layer's target, or the snapshot a
@@ -24,6 +24,7 @@ struct VnLayer {
     bounds: Bounds,
     content_mask: Bounds,
     content_mask_radii: Corners,
+    content_mask_shapes: CornerShapes,
     flags: u32,
     opacity: f32,
     source_rect: vec4<f32>,
@@ -37,7 +38,7 @@ fn read_vec4_f32(cursor: ptr<function, InstanceCursor>) -> vec4<f32> {
 
 fn load_vn_layer(layer_id: u32) -> VnLayer {
     // `order` and `group` are the scene's, not the shader's.
-    var cursor = instance_cursor(layer_id * 56u + 2u);
+    var cursor = instance_cursor(layer_id * 60u + 2u);
     let segment_start = read_word(&cursor);
     let segment_count = read_word(&cursor);
     let fill_rule = read_word(&cursor);
@@ -52,6 +53,7 @@ fn load_vn_layer(layer_id: u32) -> VnLayer {
     let bounds = read_bounds(&cursor);
     let content_mask = read_bounds(&cursor);
     let content_mask_radii = read_corners(&cursor);
+    let content_mask_shapes = read_corner_shapes(&cursor);
     // The snapshot id is the renderer's.
     _ = read_word(&cursor);
     _ = read_word(&cursor);
@@ -72,6 +74,7 @@ fn load_vn_layer(layer_id: u32) -> VnLayer {
         bounds,
         content_mask,
         content_mask_radii,
+        content_mask_shapes,
         flags,
         opacity,
         source_rect,
@@ -149,7 +152,7 @@ fn vn_snapshot_color(layer: VnLayer, position: vec2<f32>) -> vec4<f32> {
     let edge = min(min(local.x, local.y),
         min(layer.source_rect.z - local.x, layer.source_rect.w - local.y));
     let coverage = saturate(edge + 0.5)
-        * content_mask_coverage(position, layer.content_mask, layer.content_mask_radii);
+        * content_mask_coverage(position, layer.content_mask, layer.content_mask_radii, layer.content_mask_shapes);
     let color = textureSampleLevel(t_sprite, s_sprite, local / layer.source_rect.zw, 0.0);
     return color * (coverage * layer.opacity);
 }
@@ -162,7 +165,7 @@ fn fs_vn_layer(input: VnLayerVarying) -> @location(0) vec4<f32> {
         return vn_snapshot_color(layer, position);
     }
     let coverage = vn_clip_coverage(position, layer.segment_start, layer.segment_count, layer.fill_rule & 1u)
-        * content_mask_coverage(position, layer.content_mask, layer.content_mask_radii);
+        * content_mask_coverage(position, layer.content_mask, layer.content_mask_radii, layer.content_mask_shapes);
     var color = textureLoad(t_sprite, vec2<i32>(position), 0);
     if (layer.text_count != 0u) {
         var fill = vec4<f32>(0.0);

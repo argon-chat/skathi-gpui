@@ -112,6 +112,7 @@ struct EffectQuad {
     Bounds bounds;
     Bounds content_mask;
     Corners content_mask_radii;
+    uint4 content_mask_shapes;
     Corners corner_radii;
     float params[32];
     float opacity;
@@ -120,6 +121,7 @@ struct EffectQuad {
     float backdrop_blur_radius;
     float scale;
     uint flags;
+    uint4 corner_shapes;
 };
 StructuredBuffer<EffectQuad> effect_quads: register(t1);
 

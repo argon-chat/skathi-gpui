@@ -1,9 +1,9 @@
 {
-  "schema": 10,
+  "schema": 11,
   "slang": "2026.12",
   "compiler": "redslangc 0.1.1",
   "kind": "builtin",
-  "preludeSha256": "9c8a2d3c8a53cbe0512b3108be147e2379d227780ef306701fe3e07b93a69359",
+  "preludeSha256": "d42a878b904f014ebb0be013c868cf8b65aabec838b5984ac25a02ca2395c73c",
   "effects": [
     {
       "id": 0,
@@ -19,9 +19,9 @@
       "source": "crates/sk-effects/shaders/frost.slang",
       "sourceSha256": "3878d0fc85a790a8abcc1fbc6369c3ea64093adaeb4c20ec1fa443908052dada",
       "generatedSha256": {
-        "hlsl": "4dac9c9a98d464a53fab42b1153d4079239852767a1c86329842b835d0f6b92c",
-        "wgsl": "e23db5bd4ebf4140f5973f0d18ebcce9e93fb2cc2617393a93e57fdd49fc66a5",
-        "metal": "6fccfc30d6c5905bd006ebfa62f230b866032600f91e8c5d615420a0402a8af3"
+        "hlsl": "accfcd967f415626c21a13b2c429fdc20c95462074c1d216d4a785065498ea9d",
+        "wgsl": "f707ac0a5bc315936e38996cb419f4a8b0acb5a6842f21f5cb59ed6a5bd40cea",
+        "metal": "2640ed90cd1dcc875271ded3438030edc6f7b710176cce9b6954fdd619b72c41"
       },
       "signature": "frost(<number:strength>, <length:radius>?, <color:tint>?)",
       "backdropRadiusParam": 1,
@@ -155,9 +155,9 @@
       "source": "crates/sk-effects/shaders/noise.slang",
       "sourceSha256": "aac4ac76e76e5b7df379ca8f6356d05d5eb7f84b754cef6ff0712c4edddcbecd",
       "generatedSha256": {
-        "hlsl": "9dffe7d6e063193d0a4f7580775ed6abba693711d63eeb14bcdafc3a817b14aa",
-        "wgsl": "98c867d489612ccd0fc8d2be907c4ef95c74bd8cd26e41556b46dc0225548db4",
-        "metal": "d0f6e00aa0d02f951527ac07a8a0c26a84e3206c2d4eb85b590d5e2b980177aa"
+        "hlsl": "87315b61978d20acf1b1d8dcda147b4132794907e0f1bbaa850749fb2e2931f0",
+        "wgsl": "7addc2fdfc00bae2fbca1731bc7e1da5a03de1f87a4c7e985142d936ff46a2c0",
+        "metal": "f53445b742d63d27b06267920d441242a8be2adef778203f46a7b6013ed68964"
       },
       "signature": "noise(<number:amount>, <length:scale>?, <number:speed>?)",
       "backdropRadiusParam": null,
@@ -294,9 +294,9 @@
       "source": "crates/sk-effects/shaders/glow.slang",
       "sourceSha256": "de1d06dddb28503e5a23a3494d73227436591594943428bd0ecec042d3926caa",
       "generatedSha256": {
-        "hlsl": "bc411e36119827c18ee20f8366538f37f838afd2ea5f084476492f658fa2026a",
-        "wgsl": "2cbca49992336d78db2bb9690eb7753bd67df755c0065d6109488fc7f4871d28",
-        "metal": "fbb2d70e4170b8686278d88a5515e3bdf8980aa4f295da0b429f8574a005e281"
+        "hlsl": "ac00705dd177e0943f68b1a3f565b02820bbd7b86e06cdc96d8d0e01740cab0e",
+        "wgsl": "74df038bda06c7624946e2938568a286df43b5746e611bb062063abbd2859868",
+        "metal": "126dcfa6642759b247aae4863d58cff845598785efc5cd6353f0abce55c74e2f"
       },
       "signature": "glow(<color>?, <length:radius>, <number:strength>)",
       "backdropRadiusParam": null,

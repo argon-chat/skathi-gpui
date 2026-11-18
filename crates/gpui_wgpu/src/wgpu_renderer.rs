@@ -2592,9 +2592,9 @@ impl RenderingParameters {
 mod tests {
     use super::*;
     use gpui::{
-        Background, BorderStyle, ColorSpace, ContentMask, Corners, Edges, Hsla, MonochromeSprite,
-        PathCurve, PathPaint, PathTile, Point, PolychromeSprite, Quad, Shadow, Size,
-        SubpixelSprite, Underline, linear_color_stop, linear_gradient,
+        Background, BorderStyle, ColorSpace, ContentMask, CornerShapes, Corners, Edges, Hsla,
+        MonochromeSprite, PathCurve, PathPaint, PathTile, Point, PolychromeSprite, Quad, Shadow,
+        Size, SubpixelSprite, Underline, linear_color_stop, linear_gradient,
     };
     #[cfg(target_os = "linux")]
     use gpui::{DevicePixels, PlatformHeadlessRenderer, Scene};
@@ -2629,6 +2629,7 @@ mod tests {
             corner_radii: Corners::default(),
             border_widths: Edges::default(),
             transformation: Default::default(),
+            corner_shapes: Default::default(),
         }
     }
 
@@ -2860,18 +2861,18 @@ mod tests {
         // shadows grew a blurred shape, and its sprites an animation id; the
         // shadow also carries the element's own box here.
         assert_eq!(std::mem::size_of::<Background>(), 57 * 4);
-        assert_eq!(std::mem::size_of::<Quad>(), 89 * 4);
-        assert_eq!(std::mem::size_of::<Shadow>(), 42 * 4);
+        assert_eq!(std::mem::size_of::<Quad>(), 97 * 4);
+        assert_eq!(std::mem::size_of::<Shadow>(), 50 * 4);
         assert_eq!(std::mem::size_of::<PathTile>(), 14 * 4);
         assert_eq!(std::mem::size_of::<PathCurve>(), 10 * 4);
-        assert_eq!(std::mem::size_of::<PathPaint>(), 71 * 4);
-        assert_eq!(std::mem::size_of::<Underline>(), 26 * 4);
-        assert_eq!(std::mem::size_of::<MonochromeSprite>(), 34 * 4);
-        assert_eq!(std::mem::size_of::<SubpixelSprite>(), 32 * 4);
-        assert_eq!(std::mem::size_of::<PolychromeSprite>(), 38 * 4);
+        assert_eq!(std::mem::size_of::<PathPaint>(), 75 * 4);
+        assert_eq!(std::mem::size_of::<Underline>(), 30 * 4);
+        assert_eq!(std::mem::size_of::<MonochromeSprite>(), 38 * 4);
+        assert_eq!(std::mem::size_of::<SubpixelSprite>(), 36 * 4);
+        assert_eq!(std::mem::size_of::<PolychromeSprite>(), 46 * 4);
     }
 
-    /// vue-native fork: the 89 words `shaders_decode.wgsl`'s `load_quad`
+    /// vue-native fork: the 97 words `shaders_decode.wgsl`'s `load_quad`
     /// reads, in its order.
     #[test]
     fn quad_words_match_the_shader_decoder() {
@@ -2898,6 +2899,12 @@ mod tests {
             content_mask: ContentMask {
                 bounds: bounds(5.0),
                 corner_radii: Corners::all(9.0.into()),
+                corner_shapes: CornerShapes {
+                    top_left: 10,
+                    top_right: 11,
+                    bottom_right: 12,
+                    bottom_left: 13,
+                },
             },
             background: linear_gradient(
                 11.0,
@@ -2909,22 +2916,34 @@ mod tests {
             corner_radii: Corners::all(26.0.into()),
             border_widths: Edges::all(30.0.into()),
             transformation: Default::default(),
+            corner_shapes: CornerShapes {
+                top_left: 31,
+                top_right: 32,
+                bottom_right: 33,
+                bottom_left: 34,
+            },
         };
 
         let bytes = unsafe { WgpuRendererCore::instance_bytes(std::slice::from_ref(&quad)) };
         let words: &[u32] = bytemuck::cast_slice(bytes);
         let f = |values: &[f32]| values.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
         let mut expected = vec![41, 1];
-        expected.extend(f(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 9.0, 9.0, 9.0]));
+        expected.extend(f(&[
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 9.0, 9.0, 9.0,
+        ]));
+        expected.extend([10, 11, 12, 13]);
         // Background: tag, colour space, solid, angle, 8 stops, count, flags,
         // params, tile.
         expected.extend([1, 1, 0, 0, 0, 0]);
-        expected.extend(f(&[11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0, 21.0]));
+        expected.extend(f(&[
+            11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0, 21.0,
+        ]));
         expected.extend([0; 6 * 5]);
         expected.extend([2, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         expected.extend(f(&[22.0, 23.0, 24.0, 25.0, 26.0, 26.0, 26.0, 26.0]));
         expected.extend(f(&[30.0, 30.0, 30.0, 30.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0]));
-        assert_eq!(expected.len(), 89);
+        expected.extend([31, 32, 33, 34]);
+        assert_eq!(expected.len(), 97);
         assert_eq!(words, expected.as_slice());
     }
 }
@@ -2996,6 +3015,29 @@ mod text_shadow_tests {
                     "({x}, {y}): {actual:?}, expected {expected}"
                 );
             }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "windows")))]
+mod corner_shape_tests {
+    use super::*;
+    use gpui::corner_shape_fixture::{SIZE, expectations, scene};
+    use gpui::PlatformHeadlessRenderer;
+
+    #[test]
+    fn corner_shapes_cut_and_fill_where_their_curves_say() -> Result<()> {
+        let image = WgpuHeadlessRenderer::new()?.render_scene_to_image(
+            &scene(),
+            gpui::size(DevicePixels(SIZE.0 as i32), DevicePixels(SIZE.1 as i32)),
+        )?;
+        for (x, y, expected, what) in expectations() {
+            let actual = image.get_pixel(x, y).0;
+            assert!(
+                actual.iter().zip(expected).all(|(a, e)| a.abs_diff(e) <= 2),
+                "{what}: ({x}, {y}) is {actual:?}, expected {expected:?}"
+            );
         }
         Ok(())
     }

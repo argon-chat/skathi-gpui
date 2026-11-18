@@ -21,7 +21,7 @@ const TARGET_RELEASE_FRAMES: u32 = 90;
 /// Renders a snapshot no frame captured or painted may sit before release.
 const SNAPSHOT_IDLE_RENDERS: u32 = 4;
 
-const LAYER_WORDS: usize = 56;
+const LAYER_WORDS: usize = 60;
 const SEGMENT_WORDS: usize = 4;
 const TEXT_BACKGROUND_WORDS: usize = 69;
 

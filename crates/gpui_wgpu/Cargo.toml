@@ -58,7 +58,7 @@ wgpu = { workspace = true, features = ["webgl"] }
 
 [dev-dependencies]
 criterion.workspace = true
-gpui = { workspace = true, features = ["bench-support"] }
+gpui = { workspace = true, features = ["bench-support", "test-support"] }
 image.workspace = true
 # Validate shaders with the same Naga revision that wgpu uses at runtime.
 naga = { version = "30.0", features = ["wgsl-in"] }

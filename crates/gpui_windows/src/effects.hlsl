@@ -64,9 +64,16 @@ struct Corners {
     float bottom_left;
 };
 
+struct CornerShapes {
+    uint top_left;
+    uint top_right;
+    uint bottom_right;
+    uint bottom_left;
+};
+
 // Keep in sync with Rust `EffectQuad` (crates/gpui/src/scene.rs) and with
 // `struct VnEffectQuad` in the generated fragment wrapper
-// (scripts/shaders.ts). 56 words / 224 bytes.
+// (scripts/shaders.ts). 64 words / 256 bytes.
 //
 // The whole struct is declared even though the vertex stage reads only three
 // fields: D3D11 validates a StructuredBuffer's declared stride against the
@@ -78,6 +85,7 @@ struct EffectQuad {
     Bounds content_mask;
     // vue-native fork: the content mask's rounded corners; see `content_mask_coverage`.
     Corners content_mask_radii;
+    CornerShapes content_mask_shapes;
     Corners corner_radii;
     float params[32];
     float opacity;
@@ -86,6 +94,7 @@ struct EffectQuad {
     float backdrop_blur_radius;
     float scale;
     uint flags;
+    CornerShapes corner_shapes;
 };
 
 StructuredBuffer<EffectQuad> effect_quads: register(t1);

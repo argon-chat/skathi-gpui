@@ -14,25 +14,29 @@ struct BlurRect {
     bounds: Bounds,
     content_mask: Bounds,
     content_mask_radii: Corners,
+    content_mask_shapes: CornerShapes,
     corner_radii: Corners,
     blur_radius: f32,
     opacity: f32,
     tint: Hsla,
+    corner_shapes: CornerShapes,
 }
 
-// 24 words, in `gpui::BackdropBlurRect` order.
+// 32 words, in `gpui::BackdropBlurRect` order.
 fn load_blur_rect(instance_id: u32) -> BlurRect {
-    var cursor = instance_cursor(instance_id * 24u);
+    var cursor = instance_cursor(instance_id * 32u);
     return BlurRect(
         read_word(&cursor),
         read_word(&cursor),
         read_bounds(&cursor),
         read_bounds(&cursor),
         read_corners(&cursor),
+        read_corner_shapes(&cursor),
         read_corners(&cursor),
         read_f32(&cursor),
         read_f32(&cursor),
         read_hsla(&cursor),
+        read_corner_shapes(&cursor),
     );
 }
 
@@ -80,7 +84,7 @@ fn fs_blur_rect(input: BlurRectVarying) -> @location(0) vec4<f32> {
     let position = input.position.xy;
     let texture_position = position / globals.viewport_size;
 
-    let sdf = quad_sdf(position, blur_rect.bounds, blur_rect.corner_radii);
+    let sdf = shaped_quad_sdf(position, blur_rect.bounds, blur_rect.corner_radii, blur_rect.corner_shapes);
     let shape_alpha = saturate(0.5 - sdf);
 
     let original = textureSampleLevel(t_backdrop_original, s_sprite, texture_position, 0.0);
@@ -88,6 +92,6 @@ fn fs_blur_rect(input: BlurRectVarying) -> @location(0) vec4<f32> {
     let tint = hsla_to_rgba(blur_rect.tint);
     let tinted = select(blurred, over_straight_on_premultiplied(blurred, tint), tint.a > 0.0);
     let coverage = shape_alpha * saturate(blur_rect.opacity) *
-        content_mask_coverage(position, blur_rect.content_mask, blur_rect.content_mask_radii);
+        content_mask_coverage(position, blur_rect.content_mask, blur_rect.content_mask_radii, blur_rect.content_mask_shapes);
     return clamp_premultiplied(mix(original, tinted, vec4<f32>(coverage)));
 }

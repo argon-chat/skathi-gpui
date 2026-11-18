@@ -313,8 +313,8 @@ mod tests {
             texture2d<float> content [[texture(7)]],
             texture2d<float> history [[texture(8)]],
             sampler clamp_sampler [[sampler(1)]]) {
-            constant float *quad = quads + input.id * 56;
-            uint flags = as_type<uint>(quad[55]);
+            constant float *quad = quads + input.id * 64;
+            uint flags = as_type<uint>(quad[59]);
             float2 origin = float2(quad[2], quad[3]);
             bool step = (flags & 8u) != 0u;
             float2 position = step ? origin + input.position.xy : input.position.xy;
@@ -326,13 +326,13 @@ mod tests {
                 return last + float4(0.25, 0., 0., 0.);
             }
             if ((flags & 4u) != 0u) {
-                return float4(last.r, 0., 0., 1.) * quad[50];
+                return float4(last.r, 0., 0., 1.) * quad[54];
             }
             float4 shown = content.sample(clamp_sampler, position / globals[1].xy, level(0.));
-            if (quad[18] > 0.5) {
-                return image.read(uint2(0, 0)) * shown.a * quad[50];
+            if (quad[22] > 0.5) {
+                return image.read(uint2(0, 0)) * shown.a * quad[54];
             }
-            return float4(shown.b, shown.r, shown.g, shown.a) * quad[50];
+            return float4(shown.b, shown.r, shown.g, shown.a) * quad[54];
         }
     "#;
 
@@ -343,7 +343,7 @@ mod tests {
         gpui::reload_app_effects(
             gpui::AppEffects::new(
                 "test",
-                r#"{"schema": 10, "effects": [
+                r#"{"schema": 11, "effects": [
                     {"name": "swap", "backdrop": false, "metal": "fx.metal"},
                     {"name": "count", "backdrop": false, "history": true, "metal": "fx.metal"}
                 ]}"#,

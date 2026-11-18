@@ -1500,6 +1500,7 @@ pub(super) mod tests {
             offset_of!(EffectQuad, bounds),
             content_mask,
             content_mask + offset_of!(ContentMask<ScaledPixels>, corner_radii),
+            content_mask + offset_of!(ContentMask<ScaledPixels>, corner_shapes),
             offset_of!(EffectQuad, corner_radii),
             offset_of!(EffectQuad, params),
             offset_of!(EffectQuad, opacity),
@@ -1508,6 +1509,7 @@ pub(super) mod tests {
             offset_of!(EffectQuad, backdrop_blur_radius),
             offset_of!(EffectQuad, scale),
             offset_of!(EffectQuad, flags),
+            offset_of!(EffectQuad, corner_shapes),
         ]
         .into_iter()
         .map(|offset| offset as u32)
@@ -1601,7 +1603,7 @@ pub(super) mod tests {
 
     #[test]
     fn blur_rects_are_the_words_the_shader_loads() {
-        assert_eq!(std::mem::size_of::<BackdropBlurRect>(), 24 * 4);
+        assert_eq!(std::mem::size_of::<BackdropBlurRect>(), 32 * 4);
     }
 
     fn bounds(x: f32, y: f32, width: f32, height: f32) -> Bounds<ScaledPixels> {
@@ -2311,7 +2313,7 @@ pub(super) mod tests {
             gpui::reload_app_effects(
                 gpui::AppEffects::new(
                     "test",
-                    r#"{"schema": 10, "effects": [
+                    r#"{"schema": 11, "effects": [
                         {"name": "tint", "backdrop": false, "wgsl": "tint.wgsl"}
                     ]}"#,
                     [("tint.wgsl".to_string(), wgsl.to_string())],

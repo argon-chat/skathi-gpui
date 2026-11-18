@@ -91,6 +91,7 @@ mod apple_build {
         config.export.include.extend([
             "Bounds".into(),
             "Corners".into(),
+            "CornerShapes".into(),
             "Edges".into(),
             "Size".into(),
             "Pixels".into(),
@@ -137,6 +138,7 @@ mod apple_build {
             gpui_src.join("color.rs"),
             gpui_src.join("window.rs"),
             gpui_src.join("platform.rs"),
+            gpui_src.join("corner_shape.rs"),
         ];
 
         // Source files from this crate

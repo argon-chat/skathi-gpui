@@ -5,7 +5,7 @@
 // vue-native fork: the records are read word by word on both transports,
 // because WGSL cannot declare them. A `vec2` or `mat2x2` member is 8-byte
 // aligned in WGSL and the Rust `#[repr(C)]` records are 4-byte aligned, so
-// `Quad` (89 words) and `PathPaint` (71) have no WGSL struct
+// `Quad` (97 words) and `PathPaint` (75) have no WGSL struct
 // with their stride and field offsets. `array<Quad>` read every quad past
 // the first from the wrong bytes, and wgpu refused a buffer of one quad.
 
@@ -45,6 +45,19 @@ fn read_corners(cursor: ptr<function, InstanceCursor>) -> Corners {
         read_f32(cursor),
         read_f32(cursor),
     );
+}
+
+fn read_corner_shapes(cursor: ptr<function, InstanceCursor>) -> CornerShapes {
+    return CornerShapes(
+        read_word(cursor),
+        read_word(cursor),
+        read_word(cursor),
+        read_word(cursor),
+    );
+}
+
+fn skip_words(cursor: ptr<function, InstanceCursor>, count: u32) {
+    (*cursor).word_index += count;
 }
 
 fn read_edges(cursor: ptr<function, InstanceCursor>) -> Edges {
@@ -122,21 +135,22 @@ fn read_transformation(cursor: ptr<function, InstanceCursor>) -> TransformationM
 }
 
 fn load_quad(instance_id: u32) -> Quad {
-    // 89 words: 26 + the 57 of `Background` + the 6 of the vue-native
-    // `transformation` field. (vue-native fork: the 26 include the content
-    // mask's corner radii.)
+    // 97 words: 30 + the 57 of `Background` + the 6 of the vue-native
+    // `transformation` field + its 4 corner shapes. (vue-native fork: the 30
+    // include the content mask's corner radii and shapes.) Both corner shapes
+    // are left to `load_quad_*_shapes`, so a round quad's pixels never read them.
     //
     // vue-native fork: upstream (zed#64337) replaced this with a fixed
     // 10-texel decoder for ITS 40-word quad. Our quad is 85 words with an
     // 8-stop `Background`, so the cursor stays; gpui_web is not in our build.
-    var cursor = instance_cursor(instance_id * 89u);
+    var cursor = instance_cursor(instance_id * 97u);
     return Quad(
         read_word(&cursor),
         read_word(&cursor),
         read_bounds(&cursor),
         read_bounds(&cursor),
         read_corners(&cursor),
-        read_background(&cursor),
+        read_background_past_mask_shapes(&cursor),
         read_hsla(&cursor),
         read_corners(&cursor),
         read_edges(&cursor),
@@ -144,8 +158,23 @@ fn load_quad(instance_id: u32) -> Quad {
     );
 }
 
+fn read_background_past_mask_shapes(cursor: ptr<function, InstanceCursor>) -> Background {
+    skip_words(cursor, 4u);
+    return read_background(cursor);
+}
+
+fn load_quad_mask_shapes(instance_id: u32) -> CornerShapes {
+    var cursor = instance_cursor(instance_id * 97u + 14u);
+    return read_corner_shapes(&cursor);
+}
+
+fn load_quad_corner_shapes(instance_id: u32) -> CornerShapes {
+    var cursor = instance_cursor(instance_id * 97u + 93u);
+    return read_corner_shapes(&cursor);
+}
+
 fn load_shadow(instance_id: u32) -> Shadow {
-    var cursor = instance_cursor(instance_id * 42u);
+    var cursor = instance_cursor(instance_id * 50u);
     return Shadow(
         read_word(&cursor),
         read_f32(&cursor),
@@ -153,6 +182,7 @@ fn load_shadow(instance_id: u32) -> Shadow {
         read_corners(&cursor),
         read_bounds(&cursor),
         read_corners(&cursor),
+        read_corner_shapes(&cursor),
         read_hsla(&cursor),
         read_bounds(&cursor),
         read_corners(&cursor),
@@ -160,6 +190,7 @@ fn load_shadow(instance_id: u32) -> Shadow {
         read_word(&cursor),
         read_transformation(&cursor),
         read_bounds(&cursor),
+        read_corner_shapes(&cursor),
     );
 }
 
@@ -193,12 +224,13 @@ fn load_path_curve(index: u32) -> PathCurve {
 }
 
 fn load_path_paint(index: u32) -> PathPaint {
-    // 71 words: 12 + the 57 of `Background` + 2.
-    var cursor = instance_cursor(globals.path_paint_base + index * 71u);
+    // 75 words: 16 + the 57 of `Background` + 2.
+    var cursor = instance_cursor(globals.path_paint_base + index * 75u);
     return PathPaint(
         read_bounds(&cursor),
         read_bounds(&cursor),
         read_corners(&cursor),
+        read_corner_shapes(&cursor),
         read_background(&cursor),
         read_word(&cursor),
         read_word(&cursor),
@@ -206,13 +238,14 @@ fn load_path_paint(index: u32) -> PathPaint {
 }
 
 fn load_underline(instance_id: u32) -> Underline {
-    var cursor = instance_cursor(instance_id * 26u);
+    var cursor = instance_cursor(instance_id * 30u);
     return Underline(
         read_word(&cursor),
         read_word(&cursor),
         read_bounds(&cursor),
         read_bounds(&cursor),
         read_corners(&cursor),
+        read_corner_shapes(&cursor),
         read_hsla(&cursor),
         read_f32(&cursor),
         read_word(&cursor),
@@ -221,8 +254,8 @@ fn load_underline(instance_id: u32) -> Underline {
 }
 
 fn load_mono_sprite(instance_id: u32) -> MonochromeSprite {
-    // 34 words: the last two are upstream's animation id and padding, unread.
-    var cursor = instance_cursor(instance_id * 34u);
+    // 38 words: the last two are upstream's animation id and padding, unread.
+    var cursor = instance_cursor(instance_id * 38u);
     return MonochromeSprite(
         read_word(&cursor),
         read_word(&cursor),
@@ -230,13 +263,14 @@ fn load_mono_sprite(instance_id: u32) -> MonochromeSprite {
         read_bounds(&cursor),
         read_bounds(&cursor),
         read_corners(&cursor),
+        read_corner_shapes(&cursor),
         read_hsla(&cursor),
         read_transformation(&cursor),
     );
 }
 
 fn load_poly_sprite(instance_id: u32) -> PolychromeSprite {
-    var cursor = instance_cursor(instance_id * 38u);
+    var cursor = instance_cursor(instance_id * 46u);
     return PolychromeSprite(
         read_word(&cursor),
         read_word(&cursor),
@@ -246,8 +280,10 @@ fn load_poly_sprite(instance_id: u32) -> PolychromeSprite {
         read_bounds(&cursor),
         read_bounds(&cursor),
         read_corners(&cursor),
+        read_corner_shapes(&cursor),
         read_corners(&cursor),
         read_transformation(&cursor),
         read_hsla(&cursor),
+        read_corner_shapes(&cursor),
     );
 }

@@ -6,7 +6,8 @@ use std::{
 };
 
 use crate::{
-    AbsoluteLength, App, Background, BackgroundTag, BorderStyle, Bounds, ContentMask, Corners,
+    AbsoluteLength, App, Background, BackgroundTag, BorderStyle, Bounds, ContentMask, CornerShape,
+    CornerShapes, Corners,
     CornersRefinement, CursorStyle, DefiniteLength, DevicePixels, Edges, EdgesRefinement,
     EffectCrossFade, EffectSpec, Font,
     FontFallbacks, FontFeatures, FontStyle, FontWeight, GridLocation, Hsla, Length, Pixels, Point,
@@ -645,6 +646,10 @@ pub struct Style {
     /// corner it maps, so the later declaration wins whichever it used.
     #[refineable]
     pub vn_corner_radii: Corners<Option<VnCornerRadius>>,
+
+    /// vue-native fork: CSS `corner-shape`, the shape each corner's radius is drawn with.
+    #[refineable]
+    pub vn_corner_shapes: Corners<CornerShape>,
 
     /// Box shadow of the element
     pub box_shadow: Vec<BoxShadow>,
@@ -1477,11 +1482,47 @@ impl Style {
                 }
                 .clamp_radii_for_quad_size(bounds.size);
 
-                Some(ContentMask {
-                    bounds,
-                    corner_radii,
-                })
+                Some(self.vn_shaped_mask(border_box, bounds, corner_radii, rem_size))
             }
+        }
+    }
+
+    /// vue-native fork: the content mask for `rect` inside the border box `border_box`, whose
+    /// round corners are `round_radii`. A corner with a CSS `corner-shape` is the inner edge of
+    /// a border as wide as `rect`'s inset from the border box there (css-borders-4 §3.9.4).
+    fn vn_shaped_mask(
+        &self,
+        border_box: Bounds<Pixels>,
+        rect: Bounds<Pixels>,
+        round_radii: Corners<Pixels>,
+        rem_size: Pixels,
+    ) -> ContentMask<Pixels> {
+        let shapes = &self.vn_corner_shapes;
+        if *shapes == Corners::default() {
+            return ContentMask { bounds: rect, corner_radii: round_radii, corner_shapes: CornerShapes::default() };
+        }
+        let outer = self.corner_radii_for(border_box.size, rem_size);
+        let pick = |round: Pixels, outer: Pixels, shape: CornerShape| if shape.is_round() { round } else { outer };
+        let corner_radii = Corners {
+            top_left: pick(round_radii.top_left, outer.top_left, shapes.top_left),
+            top_right: pick(round_radii.top_right, outer.top_right, shapes.top_right),
+            bottom_right: pick(round_radii.bottom_right, outer.bottom_right, shapes.bottom_right),
+            bottom_left: pick(round_radii.bottom_left, outer.bottom_left, shapes.bottom_left),
+        };
+        let inset = |a: Pixels, b: Pixels| f32::from(a - b).max(0.);
+        let (left, top) = (inset(rect.left(), border_box.left()), inset(rect.top(), border_box.top()));
+        let (right, bottom) =
+            (inset(border_box.right(), rect.right()), inset(border_box.bottom(), rect.bottom()));
+        let insets = Corners {
+            top_left: (left, top),
+            top_right: (right, top),
+            bottom_right: (right, bottom),
+            bottom_left: (left, bottom),
+        };
+        ContentMask {
+            bounds: rect,
+            corner_radii,
+            corner_shapes: CornerShapes::new(shapes).with_insets(insets),
         }
     }
 
@@ -1510,7 +1551,8 @@ impl Style {
         let resolve = |length: &DefiniteLength, base: Pixels| length.to_pixels(AbsoluteLength::Pixels(base), rem_size);
         Some(match clip {
             VnClipPath::None | VnClipPath::Polygon { .. } | VnClipPath::Path { .. } => return None,
-            VnClipPath::Box(_) => ContentMask { bounds: rect, corner_radii: rounded },
+            VnClipPath::Box(VnClipBox::Margin) => ContentMask { bounds: rect, corner_radii: rounded, ..Default::default() },
+            VnClipPath::Box(_) => self.vn_shaped_mask(bounds, rect, rounded, rem_size),
             VnClipPath::Inset { insets, radii, .. } => {
                 // Chromium's `BasicShapeInset::GetPath`: the insets come off
                 // the reference box, an empty side stays empty, and the radii
@@ -1543,7 +1585,7 @@ impl Style {
                     bottom_left: circle(bl),
                 }
                 .clamp_radii_for_quad_size(shape.size);
-                ContentMask { bounds: shape, corner_radii }
+                ContentMask { bounds: shape, corner_radii, ..Default::default() }
             }
             VnClipPath::Ellipse { center, radius, circle, .. } => {
                 let (c, rx, ry) = vn_clip_ellipse(rect, center, radius, *circle, rem_size);
@@ -1551,7 +1593,7 @@ impl Style {
                 // A circle is the rounded mask; an ellipse is its box here,
                 // and its outline in an isolated layer.
                 let corner_radii = if rx == ry { Corners::all(rx) } else { Corners::default() };
-                ContentMask { bounds: shape, corner_radii }
+                ContentMask { bounds: shape, corner_radii, ..Default::default() }
             }
         })
     }
@@ -1849,7 +1891,8 @@ impl Style {
                 (*spec, *weight, textures)
             })
             .collect();
-        window.vn_with_effect_content(bounds, corner_radii, &shaded, element, cx, |window, cx| {
+        let shapes = self.vn_corner_shapes;
+        window.vn_with_effect_content(bounds, corner_radii, shapes, &shaded, element, cx, |window, cx| {
             self.paint_untransformed(bounds, window, cx, continuation, &effects, element, true)
         })
     }
@@ -1885,13 +1928,14 @@ impl Style {
             && radius > crate::px(0.)
             && !self.vn_mask_ring
         {
-            window.paint_backdrop_blur_rect(
+            window.vn_paint_backdrop_blur_rect(
                 bounds,
                 corner_radii,
+                self.vn_corner_shapes,
                 crate::BackdropBlurEffect::new(radius),
             );
         }
-        Self::paint_effects(bounds, corner_radii, window, cx, effects, element, true);
+        self.paint_effects(bounds, corner_radii, window, cx, effects, element, true);
     }
 
     /// The effects of one kind that do not read the element's content: the
@@ -1899,7 +1943,9 @@ impl Style {
     /// over the background but under the content — the only slot where film
     /// grain is visible on an opaque panel and where a glow's inner rim
     /// survives.
+    #[allow(clippy::too_many_arguments)]
     fn paint_effects(
+        &self,
         bounds: Bounds<Pixels>,
         corner_radii: Corners<Pixels>,
         window: &mut Window,
@@ -1913,7 +1959,14 @@ impl Style {
                 && (spec.flags & crate::EFFECT_FLAG_NEEDS_BACKDROP != 0) == backdrop
             {
                 window.with_element_opacity((*weight < 1.).then_some(*weight), |window| {
-                    window.vn_paint_textured_effect(bounds, corner_radii, *spec, element, cx)
+                    window.vn_paint_textured_effect(
+                        bounds,
+                        corner_radii,
+                        self.vn_corner_shapes,
+                        *spec,
+                        element,
+                        cx,
+                    )
                 });
             }
         }
@@ -1961,11 +2014,13 @@ impl Style {
         let ring = ring_widths.is_some();
 
         if !ring {
-            if self.vn_shadow_under_box {
-                window.paint_drop_shadows_under_box(bounds, corner_radii, &self.box_shadow);
-            } else {
-                window.paint_drop_shadows(bounds, corner_radii, &self.box_shadow);
-            }
+            window.vn_paint_drop_shadows(
+                bounds,
+                corner_radii,
+                self.vn_corner_shapes,
+                &self.box_shadow,
+                self.vn_shadow_under_box,
+            );
         }
 
         if !in_content {
@@ -1990,7 +2045,7 @@ impl Style {
                 widths,
                 border_color,
                 self.border_style,
-            ));
+            ).corner_shapes(self.vn_corner_shapes));
         }
 
         // The `background-image` stack, bottom layer first, each one its own
@@ -2012,14 +2067,14 @@ impl Style {
                 widths,
                 border_color,
                 self.border_style,
-            ));
+            ).corner_shapes(self.vn_corner_shapes));
         }
 
         if !ring {
-            window.paint_inset_shadows(bounds, corner_radii, &self.box_shadow);
+            window.vn_paint_inset_shadows(bounds, corner_radii, self.vn_corner_shapes, &self.box_shadow);
         }
 
-        Self::paint_effects(bounds, corner_radii, window, cx, effects, element, false);
+        self.paint_effects(bounds, corner_radii, window, cx, effects, element, false);
 
         continuation(window, cx);
 
@@ -2030,7 +2085,7 @@ impl Style {
                 window.paint_quad(quad(
                     bounds, corner_radii, Hsla::transparent_black(), border_widths,
                     colors.top, self.border_style,
-                ));
+                ).corner_shapes(self.vn_corner_shapes));
             } else {
                 // Reuse the rounded/dashed border shader, partitioned along
                 // the joins between outer and inner corners. Rectangular
@@ -2048,7 +2103,7 @@ impl Style {
                     let outline = VnClipOutline { fill_rule: VnFillRule::NonZero, verbs };
                     window.vn_with_clip_shape(Some(&outline), |window| {
                         window.paint_quad(quad(bounds, corner_radii, Hsla::transparent_black(),
-                            border_widths, color, self.border_style));
+                            border_widths, color, self.border_style).corner_shapes(self.vn_corner_shapes));
                     });
                 }
             }
@@ -2085,7 +2140,7 @@ impl Style {
                 Edges::all(outline.width),
                 outline.color,
                 outline.style,
-            ));
+            ).corner_shapes(self.vn_corner_shapes));
         }
 
         #[cfg(debug_assertions)]
@@ -2214,6 +2269,7 @@ impl Default for Style {
             vn_text_fill: None,
             vn_mask: None,
             vn_corner_radii: Corners::default(),
+            vn_corner_shapes: Corners::default(),
 
             #[cfg(debug_assertions)]
             debug: false,

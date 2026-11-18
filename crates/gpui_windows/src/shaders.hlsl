@@ -39,6 +39,14 @@ struct Corners {
     float bottom_left;
 };
 
+// vue-native fork: `gpui::CornerShapes`, CSS `corner-shape`; see `shaped_corner_piece`.
+struct CornerShapes {
+    uint top_left;
+    uint top_right;
+    uint bottom_right;
+    uint bottom_left;
+};
+
 struct Edges {
     float top;
     float right;
@@ -346,6 +354,110 @@ float quad_sdf(float2 pt, Bounds bounds, Corners corner_radii) {
     return quad_sdf_impl(corner_center_to_point, corner_radius);
 }
 
+// vue-native fork: CSS `corner-shape`. Each corner's word holds its normalized
+// superellipse half corner (css-borders-4 §3.9.6) in the low 12 bits, 0 for
+// round, then two 10-bit insets in quarter pixels. Mirrors `gpui::corner_shape`.
+uint pick_corner_shape(float2 center_to_point, CornerShapes shapes) {
+    if (center_to_point.x < 0.) {
+        return center_to_point.y < 0. ? shapes.top_left : shapes.bottom_left;
+    }
+    return center_to_point.y < 0. ? shapes.top_right : shapes.bottom_right;
+}
+
+float2 corner_shape_insets(uint word) {
+    return float2(float((word >> 12) & 0x3ffu), float(word >> 22)) * 0.25;
+}
+
+float shape_pow(float x, float e) {
+    return x <= 0. ? 0. : exp2(e * log2(x));
+}
+
+// How far `q` is outside the curve of a shaped corner of radius `r`, negative
+// inside. `q` runs inward from the box's corner along both edges; `inset` is
+// the border on the edge each end of the curve lies on (x: the left or right
+// one). The curve is the superellipse `|u|^n + |v|^n = 1`, mirrored about the
+// corner when concave, through the ends css-borders-4 §3.9.4 moves along their
+// normals by the border; its distance is the implicit function over its
+// gradient, as exact as the round corner's within the antialiased pixel.
+float shaped_corner_piece(float2 q, float r, uint word, float2 inset) {
+    uint code = word & 0xfffu;
+    if (code == 0u || code == 0xfffu || r <= 0.) {
+        return -3.0e38;
+    }
+    float h = float(code - 1u) / 4094.;
+    bool convex = h >= 0.5;
+    float2 a = float2(r, 0.);
+    float2 b = float2(0., r);
+    if (inset.x > 0. || inset.y > 0.) {
+        float cp = saturate(2.41421356 * h - 0.70710678);
+        float d = clamp(inset.x - inset.y, -r, r);
+        if (h <= 0.5 && abs(d) >= r) {
+            return -3.0e38;
+        }
+        float start = cp;
+        if (d != 0.) {
+            float s = sqrt(2. * r * r - d * d);
+            float bevel = (s - d) / (2. * s);
+            start = convex ? 1. - (1. - bevel) * 2. * (1. - cp) : bevel * 2. * cp;
+        }
+        float end = 2. * cp - start;
+        a += normalize(float2(1. - start, start)) * inset.y;
+        b += normalize(float2(end, 1. - end)) * inset.x;
+    }
+    float2 axes = float2(a.x - b.x, b.y - a.y);
+    if (axes.x <= 0. || axes.y <= 0.) {
+        return -3.0e38;
+    }
+    float n = -0.69314718 / min(log(convex ? h : 1. - h), -1e-4);
+    float2 uv = max(convex ? (float2(a.x, b.y) - q) / axes : (q - float2(b.x, a.y)) / axes, 0.);
+    float m = max(uv.x, uv.y);
+    if (m <= 0.) {
+        float depth = min(axes.x, axes.y);
+        return convex ? -depth : depth;
+    }
+    float l = m * shape_pow(shape_pow(uv.x / m, n) + shape_pow(uv.y / m, n), 1. / n);
+    float2 slope = n > 1.0001
+        ? float2(shape_pow(uv.x / l, n - 1.), shape_pow(uv.y / l, n - 1.))
+        : float2(1., 1.);
+    float distance = (l - 1.) / max(length(slope / axes), 1e-6);
+    return convex ? distance : -distance;
+}
+
+// `quad_sdf` with CSS `corner-shape`; a round corner is `quad_sdf`'s. A shaped
+// corner with insets is the inner edge of a border that wide around `bounds`.
+float shaped_quad_sdf(float2 pt, Bounds bounds, Corners corner_radii, CornerShapes shapes) {
+    float2 half_size = bounds.size / 2.;
+    float2 center_to_point = pt - (bounds.origin + half_size);
+    float corner_radius = pick_corner_radius(center_to_point, corner_radii);
+    float2 corner_to_point = abs(center_to_point) - half_size;
+    uint word = pick_corner_shape(center_to_point, shapes);
+    if ((word & 0xfffu) == 0u) {
+        return quad_sdf_impl(corner_to_point + corner_radius, corner_radius);
+    }
+    float2 inset = corner_shape_insets(word);
+    return max(max(corner_to_point.x, corner_to_point.y),
+        shaped_corner_piece(inset - corner_to_point, corner_radius, word, inset));
+}
+
+CornerShapes corner_shapes_without_insets(CornerShapes shapes) {
+    CornerShapes plain = {
+        shapes.top_left & 0xfffu, shapes.top_right & 0xfffu,
+        shapes.bottom_right & 0xfffu, shapes.bottom_left & 0xfffu
+    };
+    return plain;
+}
+
+bool corner_shapes_round(CornerShapes shapes) {
+    return ((shapes.top_left | shapes.top_right | shapes.bottom_right | shapes.bottom_left) & 0xfffu) == 0u;
+}
+
+// The length of a shaped corner of radius `r`, for laying out dashes around it:
+// the polyline through its ends and its half corner.
+float shaped_corner_length(float r, uint word) {
+    float h = float((word & 0xfffu) - 1u) / 4094.;
+    return 2. * r * sqrt(h * h + (1. - h) * (1. - h));
+}
+
 // vue-native fork: the coverage of a ROUNDED content mask at `position`, the
 // fragment's SV_Position (its pixel centre, in the device pixels the mask is
 // in). The hardware clip distances already cut the mask's rectangle, so
@@ -353,12 +465,12 @@ float quad_sdf(float2 pt, Bounds bounds, Corners corner_radii) {
 // branch per fragment. A rounded mask is the antialiased SDF the polychrome
 // sprite's own corners use. The mask's straight edges sit on device pixels
 // (`snapped_content_mask`), so they stay at full coverage.
-float content_mask_coverage(float2 position, Bounds mask, Corners radii) {
+float content_mask_coverage(float2 position, Bounds mask, Corners radii, CornerShapes shapes) {
     if (radii.top_left == 0. && radii.top_right == 0. &&
         radii.bottom_right == 0. && radii.bottom_left == 0.) {
         return 1.;
     }
-    return saturate(0.5 - quad_sdf(position, mask, radii));
+    return saturate(0.5 - shaped_quad_sdf(position, mask, radii, shapes));
 }
 
 // The solid colour is still resolved in the VERTEX shader — it is one
@@ -698,6 +810,7 @@ struct Quad {
     Bounds content_mask;
     // vue-native fork: the content mask's rounded corners; see `content_mask_coverage`.
     Corners content_mask_radii;
+    CornerShapes content_mask_shapes;
     Background background;
     Hsla border_color;
     Corners corner_radii;
@@ -708,6 +821,7 @@ struct Quad {
     // carries across. That split is why rounded corners and dashes survive a
     // rotation without any of that maths learning about the matrix.
     TransformationMatrix transformation;
+    CornerShapes corner_shapes;
 };
 
 struct QuadVertexOutput {
@@ -816,6 +930,14 @@ float4 quad_color(QuadFragmentInput input) {
     // the point into the bottom right quadrant. Both components are <= 0.
     float2 corner_to_point = abs(center_to_point) - half_size;
 
+    // vue-native fork: the nearest corner's CSS `corner-shape`, 0 when round.
+    // Only a point near a rounded corner reads it, straight from the buffer:
+    // a `quad.` read would load it for every pixel of every quad.
+    uint corner_shape = 0u;
+    if (corner_radius > 0.0 && all(-corner_to_point < corner_radius + max(border.x, border.y))) {
+        corner_shape = pick_corner_shape(center_to_point, quads[input.quad_id].corner_shapes) & 0xfffu;
+    }
+
     // Vector from the point to the center of the rounded corner's circle, also
     // mirrored into bottom right quadrant.
     float2 corner_center_to_point = corner_to_point + corner_radius;
@@ -842,13 +964,20 @@ float4 quad_color(QuadFragmentInput input) {
         straight_border_inner_corner_to_point.x < -antialias_threshold &&
         straight_border_inner_corner_to_point.y < -antialias_threshold;
 
+    // vue-native fork: a shaped corner's inner edge can reach past the round
+    // corner's square along the edges.
+    bool is_near_corner_curve = is_near_rounded_corner || corner_shape != 0u;
+
     // Fast path for points that must be part of the background
-    if (is_within_inner_straight_border && !is_near_rounded_corner) {
+    if (is_within_inner_straight_border && !is_near_corner_curve) {
         return interior_color;
     }
 
     // Signed distance of the point to the outside edge of the quad's border
-    float outer_sdf = quad_sdf_impl(corner_center_to_point, corner_radius);
+    float outer_sdf = corner_shape == 0u
+        ? quad_sdf_impl(corner_center_to_point, corner_radius)
+        : max(max(corner_to_point.x, corner_to_point.y),
+              shaped_corner_piece(-corner_to_point, corner_radius, corner_shape, float2(0., 0.)));
 
     // Approximate signed distance of the point to the inside edge of the quad's
     // border. It is negative outside this edge (within the border), and
@@ -859,7 +988,12 @@ float4 quad_color(QuadFragmentInput input) {
     //   nearest-point-on-ellipse.
     // * When it is quickly known to be outside the edge, -1.0 is used.
     float inner_sdf = 0.0;
-    if (corner_center_to_point.x <= 0.0 || corner_center_to_point.y <= 0.0) {
+    if (corner_shape != 0u) {
+        inner_sdf = border.x == 0.0 && border.y == 0.0
+            ? -(outer_sdf + reduced_border.x)
+            : -max(max(straight_border_inner_corner_to_point.x, straight_border_inner_corner_to_point.y),
+                   shaped_corner_piece(-corner_to_point, corner_radius, corner_shape, border));
+    } else if (corner_center_to_point.x <= 0.0 || corner_center_to_point.y <= 0.0) {
         // Fast paths for straight borders
         inner_sdf = -max(straight_border_inner_corner_to_point.x,
                         straight_border_inner_corner_to_point.y);
@@ -962,6 +1096,21 @@ float4 quad_color(QuadFragmentInput input) {
                 float c_br = r_br * (M_PI_F / 2.0) * corner_dash_velocity_br;
                 float c_bl = r_bl * (M_PI_F / 2.0) * corner_dash_velocity_bl;
                 float c_tl = r_tl * (M_PI_F / 2.0) * corner_dash_velocity_tl;
+                CornerShapes shapes = quads[input.quad_id].corner_shapes;
+                if (!corner_shapes_round(shapes)) {
+                    if ((shapes.top_right & 0xfffu) != 0u) {
+                        c_tr = shaped_corner_length(r_tr, shapes.top_right) * corner_dash_velocity_tr;
+                    }
+                    if ((shapes.bottom_right & 0xfffu) != 0u) {
+                        c_br = shaped_corner_length(r_br, shapes.bottom_right) * corner_dash_velocity_br;
+                    }
+                    if ((shapes.bottom_left & 0xfffu) != 0u) {
+                        c_bl = shaped_corner_length(r_bl, shapes.bottom_left) * corner_dash_velocity_bl;
+                    }
+                    if ((shapes.top_left & 0xfffu) != 0u) {
+                        c_tl = shaped_corner_length(r_tl, shapes.top_left) * corner_dash_velocity_tl;
+                    }
+                }
 
                 // Cumulative dash space upto each segment
                 float upto_tr = s_t;
@@ -976,6 +1125,9 @@ float4 quad_color(QuadFragmentInput input) {
                 if (is_near_rounded_corner) {
                     float radians = atan2(corner_center_to_point.y, corner_center_to_point.x);
                     float corner_t = radians * corner_radius;
+                    if (corner_shape != 0u) {
+                        corner_t = radians / (M_PI_F / 2.0) * shaped_corner_length(corner_radius, corner_shape);
+                    }
 
                     if (center_to_point.x >= 0.0) {
                         if (center_to_point.y < 0.0) {
@@ -1065,8 +1217,13 @@ float4 quad_color(QuadFragmentInput input) {
 float4 quad_fragment(QuadFragmentInput input): SV_Target {
     Quad quad = quads[input.quad_id];
     float4 color = quad_color(input);
-    // Straight alpha, like everything `quad_color` returns.
-    color.a *= content_mask_coverage(input.position.xy, quad.content_mask, quad.content_mask_radii);
+    // Straight alpha, like everything `quad_color` returns. The shapes are
+    // read in the branch, so a quad without a rounded mask never loads them.
+    Corners radii = quad.content_mask_radii;
+    if (radii.top_left != 0. || radii.top_right != 0. || radii.bottom_right != 0. || radii.bottom_left != 0.) {
+        color.a *= saturate(0.5 - shaped_quad_sdf(input.position.xy, quad.content_mask, radii,
+                                                  quads[input.quad_id].content_mask_shapes));
+    }
     return color;
 }
 
@@ -1096,11 +1253,13 @@ struct BlurRect {
     Bounds content_mask;
     // vue-native fork: the content mask's rounded corners; see `content_mask_coverage`.
     Corners content_mask_radii;
+    CornerShapes content_mask_shapes;
     Corners corner_radii;
     float blur_radius;
     // Fades the backdrop replacement, not just the tint.
     float opacity;
     Hsla tint;
+    CornerShapes corner_shapes;
 };
 
 struct BlurPassVertexOutput {
@@ -1196,7 +1355,7 @@ float4 blur_rect_fragment(BlurRectFragmentInput input): SV_Target {
 
     // Match normal GPUI rounded-rect antialiasing.
     const float antialias_threshold = 0.5;
-    float sdf = quad_sdf(position, blur_rect.bounds, blur_rect.corner_radii);
+    float sdf = shaped_quad_sdf(position, blur_rect.bounds, blur_rect.corner_radii, blur_rect.corner_shapes);
     float shape_alpha = saturate(antialias_threshold - sdf);
 
     float4 original = t_backdrop_original.Sample(s_clamp, texture_position);
@@ -1207,7 +1366,7 @@ float4 blur_rect_fragment(BlurRectFragmentInput input): SV_Target {
         ? over_straight_on_premultiplied(blurred, tint)
         : blurred;
     float coverage = shape_alpha * saturate(blur_rect.opacity) *
-        content_mask_coverage(position, blur_rect.content_mask, blur_rect.content_mask_radii);
+        content_mask_coverage(position, blur_rect.content_mask, blur_rect.content_mask_radii, blur_rect.content_mask_shapes);
     return clamp_premultiplied(lerp(original, tinted, coverage));
 }
 
@@ -1225,6 +1384,7 @@ struct Shadow {
     Bounds content_mask;
     // vue-native fork: the content mask's rounded corners; see `content_mask_coverage`.
     Corners content_mask_radii;
+    CornerShapes content_mask_shapes;
     Hsla color;
     Bounds shape_bounds;
     Corners shape_corner_radii;
@@ -1235,6 +1395,8 @@ struct Shadow {
     TransformationMatrix transformation;
     // vue-native fork: the element's border box, rounded by `corner_radii`.
     Bounds element_bounds;
+    // The element's and the shape's; the insets are the shape's alone.
+    CornerShapes corner_shapes;
 };
 
 struct PreparedBlurredRoundedRect {
@@ -1348,31 +1510,45 @@ float4 shadow_fragment(ShadowFragmentInput input): SV_TARGET {
     Shadow shadow = shadows[input.shadow_id];
 
     float alpha;
+    CornerShapes element_shapes = corner_shapes_without_insets(shadow.corner_shapes);
     if (shadow.blur_radius == 0.) {
-        float distance = quad_sdf(input.local_position, shadow.shape_bounds, shadow.shape_corner_radii);
+        float distance = shaped_quad_sdf(input.local_position, shadow.shape_bounds,
+                                         shadow.shape_corner_radii, shadow.corner_shapes);
         alpha = saturate(0.5 - distance);
     } else {
         float2 center = shadow.shape_bounds.origin + shadow.shape_bounds.size / 2.;
-        alpha = blurred_rounded_rect(input.local_position - center, input.blur);
+        float2 center_to_point = input.local_position - center;
+        if ((pick_corner_shape(center_to_point, shadow.corner_shapes) & 0xfffu) == 0u) {
+            alpha = blurred_rounded_rect(center_to_point, input.blur);
+        } else {
+            // vue-native fork: a shaped corner blurs its distance field, which
+            // is exact along the straight edges and an approximation in the
+            // corner, where it is a little denser than a true Gaussian.
+            float d = shaped_quad_sdf(input.local_position, shadow.shape_bounds,
+                                      shadow.shape_corner_radii, shadow.corner_shapes);
+            float scale = pick_corner(center_to_point, input.blur.scale);
+            float s_inv = input.blur.shape.z;
+            alpha = scale * (erf7(s_inv * (input.blur.shape.w + d)) - erf7(s_inv * d));
+        }
     }
 
     if (shadow.inset == 1u) {
         // The inset shadow is the complement of the (blurred) hole rect, clipped to the element.
         // `saturate(0.5 - d)` gives a 1-pixel antialiased edge: d <= -0.5 -> 1, d >= 0.5 -> 0.
         alpha = 1.0 - alpha;
-        float element_distance = quad_sdf(input.local_position, shadow.element_bounds,
-                                          shadow.corner_radii);
+        float element_distance = shaped_quad_sdf(input.local_position, shadow.element_bounds,
+                                                 shadow.corner_radii, element_shapes);
         alpha *= saturate(0.5 - element_distance);
     } else if (shadow.inset == 0u) {
         // vue-native fork: an outer shadow is clipped to the outside of the element's
         // border box (CSS Backgrounds 3 §7.1), so a translucent background shows what is
         // behind the element. inset == 2 is the unclipped variant.
-        float element_distance = quad_sdf(input.local_position, shadow.element_bounds,
-                                          shadow.corner_radii);
+        float element_distance = shaped_quad_sdf(input.local_position, shadow.element_bounds,
+                                                 shadow.corner_radii, element_shapes);
         alpha *= saturate(0.5 + element_distance);
     }
 
-    alpha *= content_mask_coverage(input.position.xy, shadow.content_mask, shadow.content_mask_radii);
+    alpha *= content_mask_coverage(input.position.xy, shadow.content_mask, shadow.content_mask_radii, shadow.content_mask_shapes);
     return input.color * float4(1., 1., 1., alpha);
 }
 
@@ -1408,6 +1584,7 @@ struct PathPaint {
     Bounds content_mask;
     // vue-native fork: the content mask's rounded corners; see `content_mask_coverage`.
     Corners content_mask_radii;
+    CornerShapes content_mask_shapes;
     Background color;
     uint even_odd;
     uint pad;
@@ -1552,7 +1729,7 @@ float4 path_tile_fragment(PathTileFragmentInput input): SV_Target {
             : saturate(coverage);
     }
 
-    coverage *= content_mask_coverage(input.position.xy, paint.content_mask, paint.content_mask_radii);
+    coverage *= content_mask_coverage(input.position.xy, paint.content_mask, paint.content_mask_radii, paint.content_mask_shapes);
     if (coverage == 0.0) {
         return float4(0.0, 0.0, 0.0, 0.0);
     }
@@ -1575,6 +1752,7 @@ struct Underline {
     Bounds content_mask;
     // vue-native fork: the content mask's rounded corners; see `content_mask_coverage`.
     Corners content_mask_radii;
+    CornerShapes content_mask_shapes;
     Hsla color;
     float thickness;
     uint wavy;
@@ -1626,7 +1804,7 @@ float4 underline_fragment(UnderlineFragmentInput input): SV_Target {
 
     Underline underline = underlines[input.underline_id];
     float mask = content_mask_coverage(input.position.xy, underline.content_mask,
-                                       underline.content_mask_radii);
+                                       underline.content_mask_radii, underline.content_mask_shapes);
     if (underline.wavy) {
         float half_thickness = underline.thickness * 0.5;
         float2 origin = underline.bounds.origin;
@@ -1663,6 +1841,7 @@ struct MonochromeSprite {
     Bounds content_mask;
     // vue-native fork: the content mask's rounded corners; see `content_mask_coverage`.
     Corners content_mask_radii;
+    CornerShapes content_mask_shapes;
     Hsla color;
     TransformationMatrix transformation;
     // Upstream's animation id, which renderers ignore.
@@ -1679,6 +1858,7 @@ struct MonochromeSpriteVertexOutput {
     nointerpolation float4 mask_bounds: TEXCOORD1;
     nointerpolation float4 mask_radii: TEXCOORD2;
     nointerpolation uint raw_coverage: TEXCOORD3;
+    nointerpolation uint4 mask_shapes: TEXCOORD4;
     float4 clip_distance: SV_ClipDistance;
 };
 
@@ -1689,11 +1869,12 @@ struct MonochromeSpriteFragmentInput {
     nointerpolation float4 mask_bounds: TEXCOORD1;
     nointerpolation float4 mask_radii: TEXCOORD2;
     nointerpolation uint raw_coverage: TEXCOORD3;
+    nointerpolation uint4 mask_shapes: TEXCOORD4;
     float4 clip_distance: SV_ClipDistance;
 };
 
 // vue-native fork: `content_mask_coverage` for the flat varyings above.
-float sprite_mask_coverage(float2 position, float4 mask_bounds, float4 mask_radii) {
+float sprite_mask_coverage(float2 position, float4 mask_bounds, float4 mask_radii, uint4 mask_shapes) {
     Bounds mask;
     mask.origin = mask_bounds.xy;
     mask.size = mask_bounds.zw;
@@ -1702,7 +1883,8 @@ float sprite_mask_coverage(float2 position, float4 mask_bounds, float4 mask_radi
     radii.top_right = mask_radii.y;
     radii.bottom_right = mask_radii.z;
     radii.bottom_left = mask_radii.w;
-    return content_mask_coverage(position, mask, radii);
+    CornerShapes shapes = { mask_shapes.x, mask_shapes.y, mask_shapes.z, mask_shapes.w };
+    return content_mask_coverage(position, mask, radii, shapes);
 }
 
 StructuredBuffer<MonochromeSprite> mono_sprites: register(t1);
@@ -1724,6 +1906,8 @@ MonochromeSpriteVertexOutput monochrome_sprite_vertex(uint vertex_id: SV_VertexI
     output.mask_bounds = float4(sprite.content_mask.origin, sprite.content_mask.size);
     output.mask_radii = float4(sprite.content_mask_radii.top_left, sprite.content_mask_radii.top_right,
                                sprite.content_mask_radii.bottom_right, sprite.content_mask_radii.bottom_left);
+    output.mask_shapes = uint4(sprite.content_mask_shapes.top_left, sprite.content_mask_shapes.top_right,
+                               sprite.content_mask_shapes.bottom_right, sprite.content_mask_shapes.bottom_left);
     output.raw_coverage = sprite.raw_coverage;
     output.clip_distance = clip_distance;
     return output;
@@ -1734,7 +1918,7 @@ float4 monochrome_sprite_fragment(MonochromeSpriteFragmentInput input): SV_Targe
     float alpha_corrected = input.raw_coverage != 0u
         ? sample
         : apply_contrast_and_gamma_correction(sample, input.color.rgb, grayscale_enhanced_contrast, gamma_ratios);
-    float mask = sprite_mask_coverage(input.position.xy, input.mask_bounds, input.mask_radii);
+    float mask = sprite_mask_coverage(input.position.xy, input.mask_bounds, input.mask_radii, input.mask_shapes);
     return float4(input.color.rgb, input.color.a * alpha_corrected * mask);
 }
 
@@ -1747,6 +1931,7 @@ struct SubpixelSprite {
     Bounds bounds;
     Bounds content_mask;
     Corners content_mask_radii;
+    CornerShapes content_mask_shapes;
     Hsla color;
     TransformationMatrix transformation;
 };
@@ -1765,6 +1950,8 @@ MonochromeSpriteVertexOutput subpixel_sprite_vertex(uint vertex_id: SV_VertexID,
     output.mask_bounds = float4(sprite.content_mask.origin, sprite.content_mask.size);
     output.mask_radii = float4(sprite.content_mask_radii.top_left, sprite.content_mask_radii.top_right,
                                sprite.content_mask_radii.bottom_right, sprite.content_mask_radii.bottom_left);
+    output.mask_shapes = uint4(sprite.content_mask_shapes.top_left, sprite.content_mask_shapes.top_right,
+                               sprite.content_mask_shapes.bottom_right, sprite.content_mask_shapes.bottom_left);
     output.raw_coverage = 0u;
     output.clip_distance = distance_from_clip_rect_transformed(
         unit_vertex, sprite.bounds, sprite.content_mask, sprite.transformation);
@@ -1778,7 +1965,7 @@ SubpixelSpriteFragmentOutput subpixel_sprite_fragment(MonochromeSpriteFragmentIn
     }
     float3 alpha_corrected = apply_contrast_and_gamma_correction3(sample, input.color.rgb, subpixel_enhanced_contrast, gamma_ratios);
 
-    float mask = sprite_mask_coverage(input.position.xy, input.mask_bounds, input.mask_radii);
+    float mask = sprite_mask_coverage(input.position.xy, input.mask_bounds, input.mask_radii, input.mask_shapes);
 
     SubpixelSpriteFragmentOutput output;
     output.foreground = float4(input.color.rgb, 1.0f);
@@ -1802,6 +1989,7 @@ struct PolychromeSprite {
     Bounds content_mask;
     // vue-native fork: the content mask's rounded corners; see `content_mask_coverage`.
     Corners content_mask_radii;
+    CornerShapes content_mask_shapes;
     Corners corner_radii;
     // See `struct Quad`. The monochrome and subpixel sprites have carried one
     // since gpui's SVG element; this is the one that was missing, and it is
@@ -1811,6 +1999,7 @@ struct PolychromeSprite {
     // vue-native fork: `Window::with_image_tint`, after the transformation.
     // Transparent leaves the sprite as it is.
     Hsla tint;
+    CornerShapes corner_shapes;
 };
 
 struct PolychromeSpriteVertexOutput {
@@ -1854,7 +2043,7 @@ PolychromeSpriteVertexOutput polychrome_sprite_vertex(uint vertex_id: SV_VertexI
 float4 polychrome_sprite_fragment(PolychromeSpriteFragmentInput input): SV_Target {
     PolychromeSprite sprite = poly_sprites[input.sprite_id];
     float4 sample = t_sprite.Sample(s_sprite, input.tile_position);
-    float distance = quad_sdf(input.local_position, sprite.bounds, sprite.corner_radii);
+    float distance = shaped_quad_sdf(input.local_position, sprite.bounds, sprite.corner_radii, sprite.corner_shapes);
 
     float4 color = sample;
     // vue-native fork: the tint takes the pixels by its alpha, keeping theirs
@@ -1868,7 +2057,7 @@ float4 polychrome_sprite_fragment(PolychromeSpriteFragmentInput input): SV_Targe
         color = float4(grayscale, color.a);
     }
     color.a *= sprite.opacity * saturate(0.5 - distance) *
-        content_mask_coverage(input.position.xy, sprite.content_mask, sprite.content_mask_radii);
+        content_mask_coverage(input.position.xy, sprite.content_mask, sprite.content_mask_radii, sprite.content_mask_shapes);
     return color;
 }
 
@@ -1903,6 +2092,7 @@ struct VnLayer {
     Bounds bounds;
     Bounds content_mask;
     Corners content_mask_radii;
+    CornerShapes content_mask_shapes;
     uint2 snapshot;
     uint flags;
     float opacity;
@@ -1987,7 +2177,7 @@ float4 vn_snapshot_fragment(VnLayer layer, float2 position) {
     float edge = min(min(local.x, local.y),
         min(layer.source_rect.z - local.x, layer.source_rect.w - local.y));
     float coverage = saturate(edge + 0.5) *
-        content_mask_coverage(position, layer.content_mask, layer.content_mask_radii);
+        content_mask_coverage(position, layer.content_mask, layer.content_mask_radii, layer.content_mask_shapes);
     float4 color = t_sprite.SampleLevel(s_clamp, local / layer.source_rect.zw, 0.0);
     return color * (coverage * layer.opacity);
 }
@@ -1999,7 +2189,7 @@ float4 vn_layer_fragment(VnLayerFragmentInput input): SV_Target {
     }
     float coverage = vn_clip_coverage(input.position.xy, layer.segment_start,
         layer.segment_count, layer.fill_rule & 1u);
-    coverage *= content_mask_coverage(input.position.xy, layer.content_mask, layer.content_mask_radii);
+    coverage *= content_mask_coverage(input.position.xy, layer.content_mask, layer.content_mask_radii, layer.content_mask_shapes);
     // The layer is the size of the window: the texel under the pixel.
     float4 color = t_sprite.Load(int3(int2(input.position.xy), 0));
     if (layer.pad2 != 0u) {

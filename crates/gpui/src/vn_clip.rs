@@ -532,7 +532,7 @@ mod tests {
             0., 1., 2., 3., 5., 6., 7., 8., 10., 11., 12., 13., 15., 16., 17., 18.,
             4., 9., 14., 19.,
         ]);
-        assert_eq!(std::mem::size_of::<crate::VnLayer>(), 224);
+        assert_eq!(std::mem::size_of::<crate::VnLayer>(), 240);
         assert_eq!(std::mem::offset_of!(crate::VnLayer, color_matrix), 32);
         assert_eq!(std::mem::offset_of!(crate::VnLayer, bounds), 112);
     }

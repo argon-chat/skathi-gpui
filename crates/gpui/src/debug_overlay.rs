@@ -111,6 +111,7 @@ impl DebugFrameOverlay {
 
         let content_mask = ContentMask {
             corner_radii: Default::default(),
+            corner_shapes: Default::default(),
             bounds: Bounds {
                 origin: point(ScaledPixels(0.), ScaledPixels(0.)),
                 size: viewport,
@@ -230,6 +231,7 @@ fn solid_quad(
         // what "no transform" spells since the transforms patch made this
         // field required on `Quad`.
         transformation: TransformationMatrix::unit(),
+        corner_shapes: Default::default(),
     }
 }
 

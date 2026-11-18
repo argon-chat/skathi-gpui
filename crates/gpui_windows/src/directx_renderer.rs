@@ -3898,6 +3898,7 @@ pub(crate) mod effect_layer_tests {
             float4 bounds;
             float4 content_mask;
             float4 content_mask_radii;
+            uint4 content_mask_shapes;
             float4 corner_radii;
             float params[32];
             float opacity;
@@ -3906,6 +3907,7 @@ pub(crate) mod effect_layer_tests {
             float backdrop_blur_radius;
             float scale;
             uint flags;
+            uint4 corner_shapes;
         };
         StructuredBuffer<Quad> quads: register(t1);
         Texture2D<float4> image: register(t3);
@@ -3941,7 +3943,7 @@ pub(crate) mod effect_layer_tests {
         reload_app_effects(
             AppEffects::new(
                 "test",
-                r#"{"schema": 10, "effects": [
+                r#"{"schema": 11, "effects": [
                     {"name": "swap", "backdrop": false, "hlsl": "fx.hlsl"},
                     {"name": "count", "backdrop": false, "history": true, "hlsl": "fx.hlsl"}
                 ]}"#,

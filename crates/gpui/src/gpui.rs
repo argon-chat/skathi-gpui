@@ -34,6 +34,10 @@ mod asset_cache;
 mod assets;
 mod bounds_tree;
 mod color;
+mod corner_shape;
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod corner_shape_fixture;
 mod effect_textures;
 mod element;
 mod elements;
@@ -128,6 +132,7 @@ pub use app_effects::*;
 pub use asset_cache::*;
 pub use assets::*;
 pub use color::*;
+pub use corner_shape::{CornerShape, CornerShapes};
 pub use effect_textures::*;
 pub use element::*;
 pub use elements::*;

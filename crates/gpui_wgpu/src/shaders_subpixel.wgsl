@@ -8,6 +8,7 @@ struct SubpixelSprite {
     content_mask: Bounds,
     // vue-native fork: the content mask's rounded corners; see `content_mask_coverage`.
     content_mask_radii: Corners,
+    content_mask_shapes: CornerShapes,
     color: Hsla,
     transformation: TransformationMatrix,
 }
@@ -21,6 +22,7 @@ struct SubpixelSpriteOutput {
     // vue-native fork: as `MonoSpriteVarying`.
     @location(4) @interpolate(flat) mask_bounds: vec4<f32>,
     @location(5) @interpolate(flat) mask_radii: vec4<f32>,
+    @location(7) @interpolate(flat) mask_shapes: vec4<u32>,
 }
 
 struct SubpixelSpriteFragmentOutput {
@@ -41,6 +43,8 @@ fn vs_subpixel_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_i
     out.mask_bounds = vec4<f32>(sprite.content_mask.origin, sprite.content_mask.size);
     out.mask_radii = vec4<f32>(sprite.content_mask_radii.top_left, sprite.content_mask_radii.top_right,
                                sprite.content_mask_radii.bottom_right, sprite.content_mask_radii.bottom_left);
+    out.mask_shapes = vec4<u32>(sprite.content_mask_shapes.top_left, sprite.content_mask_shapes.top_right,
+                                sprite.content_mask_shapes.bottom_right, sprite.content_mask_shapes.bottom_left);
     return out;
 }
 
@@ -57,7 +61,7 @@ fn fs_subpixel_sprite(input: SubpixelSpriteOutput) -> SubpixelSpriteFragmentOutp
         return SubpixelSpriteFragmentOutput(vec4<f32>(0.0), vec4<f32>(0.0));
     }
 
-    let mask = sprite_mask_coverage(input.position.xy, input.mask_bounds, input.mask_radii);
+    let mask = sprite_mask_coverage(input.position.xy, input.mask_bounds, input.mask_radii, input.mask_shapes);
     var out = SubpixelSpriteFragmentOutput();
     out.foreground = vec4<f32>(input.color.rgb, 1.0);
     out.alpha = vec4<f32>(input.color.a * alpha_corrected * mask, 1.0);

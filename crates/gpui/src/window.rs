@@ -11,7 +11,7 @@ use crate::{
     AsyncWindowContext, AtlasKey, AtlasStats, AtlasTile, AvailableSpace, BackdropBlurRect, Background, BorderStyle,
     EffectQuad, EffectSpec,
     Bounds, BoxShadow,
-    Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
+    Capslock, Context, CornerShape, CornerShapes, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
     DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
     EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
     GlyphShadowParams, GpuTextureHandle,
@@ -1009,20 +1009,23 @@ fn transform_mask(
         return ContentMask {
             bounds,
             corner_radii: mask.corner_radii,
+            corner_shapes: mask.corner_shapes,
         };
     }
     let [[a, b], [c, d]] = matrix.rotation_scale;
-    let corner_radii = if b == 0. && c == 0. && a > 0. && d > 0. {
+    let (corner_radii, corner_shapes) = if b == 0. && c == 0. && a > 0. && d > 0. {
         let factor = a.min(d);
-        mask.corner_radii
+        let radii = mask.corner_radii
             .map(|radius| *radius * factor)
-            .clamp_radii_for_quad_size(bounds.size)
+            .clamp_radii_for_quad_size(bounds.size);
+        (radii, mask.corner_shapes.scale(factor))
     } else {
-        Corners::default()
+        (Corners::default(), CornerShapes::default())
     };
     ContentMask {
         bounds,
         corner_radii,
+        corner_shapes,
     }
 }
 
@@ -3138,6 +3141,9 @@ pub struct ContentMask<P: Clone + Debug + Default + PartialEq> {
     /// vue-native fork: each corner's radius, zero for a square corner. Every
     /// primitive carries it right after `bounds`, so the shaders' structs do too.
     pub corner_radii: Corners<P>,
+    /// vue-native fork: CSS `corner-shape`, after `corner_radii` in every primitive. A shaped
+    /// corner's radius is the outer one of the border its insets describe.
+    pub corner_shapes: CornerShapes,
 }
 
 impl<P: Clone + Debug + Default + PartialEq> ContentMask<P> {
@@ -3146,6 +3152,7 @@ impl<P: Clone + Debug + Default + PartialEq> ContentMask<P> {
         ContentMask {
             bounds,
             corner_radii: Corners::default(),
+            corner_shapes: CornerShapes::default(),
         }
     }
 
@@ -3161,6 +3168,7 @@ impl ContentMask<Pixels> {
         ContentMask {
             bounds: self.bounds.scale(factor),
             corner_radii: self.corner_radii.scale(factor),
+            corner_shapes: self.corner_shapes.scale(factor),
         }
     }
 }
@@ -3201,23 +3209,40 @@ where
             let y = if top { mask.bounds.top() } else { mask.bounds.bottom() };
             (x, y)
         };
-        let radius = |left: bool, top: bool, mine: P, theirs: P| {
+        let radius = |left: bool, top: bool, mine: (P, u32), theirs: (P, u32)| {
             let here = at(&ContentMask::rect(bounds), left, top);
-            let mine = if at(self, left, top) == here { mine } else { P::default() };
-            let theirs = if at(other, left, top) == here { theirs } else { P::default() };
-            mine.max(theirs)
+            let mine = if at(self, left, top) == here { mine } else { (P::default(), 0) };
+            let theirs = if at(other, left, top) == here { theirs } else { (P::default(), 0) };
+            if theirs.0 > mine.0 { theirs } else { mine }
         };
         let (a, b) = (&self.corner_radii, &other.corner_radii);
+        let (sa, sb) = (self.corner_shapes.corners(), other.corner_shapes.corners());
+        let top_left = radius(true, true, (a.top_left, sa.top_left), (b.top_left, sb.top_left));
+        let top_right = radius(false, true, (a.top_right, sa.top_right), (b.top_right, sb.top_right));
+        let bottom_right = radius(
+            false,
+            false,
+            (a.bottom_right, sa.bottom_right),
+            (b.bottom_right, sb.bottom_right),
+        );
+        let bottom_left =
+            radius(true, false, (a.bottom_left, sa.bottom_left), (b.bottom_left, sb.bottom_left));
         let corner_radii = Corners {
-            top_left: radius(true, true, a.top_left, b.top_left),
-            top_right: radius(false, true, a.top_right, b.top_right),
-            bottom_right: radius(false, false, a.bottom_right, b.bottom_right),
-            bottom_left: radius(true, false, a.bottom_left, b.bottom_left),
+            top_left: top_left.0,
+            top_right: top_right.0,
+            bottom_right: bottom_right.0,
+            bottom_left: bottom_left.0,
         }
         .clamp_radii_for_quad_size(bounds.size);
         ContentMask {
             bounds,
             corner_radii,
+            corner_shapes: CornerShapes {
+                top_left: top_left.1,
+                top_right: top_right.1,
+                bottom_right: bottom_right.1,
+                bottom_left: bottom_left.1,
+            },
         }
     }
 
@@ -3230,6 +3255,14 @@ where
         }
         if !self.is_rounded() {
             return true;
+        }
+        if !self.corner_shapes.is_round() {
+            return crate::corner_shape::shaped_rect_sdf(
+                *point,
+                &self.bounds,
+                &self.corner_radii,
+                &self.corner_shapes,
+            ) <= 0.;
         }
         let b = &self.bounds;
         let r = &self.corner_radii;
@@ -4564,6 +4597,7 @@ impl Window {
             // sits on the covered bounds, which are at most one device pixel
             // out from the exact ones, as the straight edges already are.
             corner_radii: mask.corner_radii.scale(self.scale_factor()),
+            corner_shapes: mask.corner_shapes.scale(self.scale_factor()),
         }
     }
 
@@ -5983,7 +6017,7 @@ impl Window {
                     geometry: node.geometry.clone(),
                     color_matrix: None,
                     text_paint: None,
-                    content_mask: ContentMask { bounds: device, corner_radii: Default::default() },
+                    content_mask: ContentMask::rect(device),
                     capture: Some(info),
                 });
                 let result = f(window);
@@ -6629,7 +6663,7 @@ impl Window {
         corner_radii: Corners<Pixels>,
         shadows: &[BoxShadow],
     ) {
-        self.paint_outer_shadows(bounds, corner_radii, shadows, SHADOW_OUTSIDE_BOX);
+        self.paint_outer_shadows(bounds, corner_radii, Corners::default(), shadows, SHADOW_OUTSIDE_BOX);
     }
 
     /// vue-native fork: [`Self::paint_drop_shadows`] without the cut-out: the
@@ -6641,13 +6675,28 @@ impl Window {
         corner_radii: Corners<Pixels>,
         shadows: &[BoxShadow],
     ) {
-        self.paint_outer_shadows(bounds, corner_radii, shadows, SHADOW_UNDER_BOX);
+        self.paint_outer_shadows(bounds, corner_radii, Corners::default(), shadows, SHADOW_UNDER_BOX);
+    }
+
+    /// vue-native fork: [`Self::paint_drop_shadows`] (or, with `under_box`,
+    /// [`Self::paint_drop_shadows_under_box`]) for a box with CSS `corner-shape`.
+    pub fn vn_paint_drop_shadows(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        corner_shapes: Corners<CornerShape>,
+        shadows: &[BoxShadow],
+        under_box: bool,
+    ) {
+        let kind = if under_box { SHADOW_UNDER_BOX } else { SHADOW_OUTSIDE_BOX };
+        self.paint_outer_shadows(bounds, corner_radii, corner_shapes, shadows, kind);
     }
 
     fn paint_outer_shadows(
         &mut self,
         bounds: Bounds<Pixels>,
         corner_radii: Corners<Pixels>,
+        corner_shapes: Corners<CornerShape>,
         shadows: &[BoxShadow],
         kind: u32,
     ) {
@@ -6690,6 +6739,7 @@ impl Window {
                 pad: 0,
                 transformation: self.element_transform,
                 element_bounds,
+                corner_shapes: CornerShapes::new(&corner_shapes),
             });
         }
     }
@@ -6701,6 +6751,19 @@ impl Window {
         &mut self,
         bounds: Bounds<Pixels>,
         corner_radii: Corners<Pixels>,
+        shadows: &[BoxShadow],
+    ) {
+        self.vn_paint_inset_shadows(bounds, corner_radii, Corners::default(), shadows);
+    }
+
+    /// vue-native fork: [`Self::paint_inset_shadows`] for a box with CSS `corner-shape`. A
+    /// shaped corner's hole is the inner edge of a border as wide as the spread (css-borders-4
+    /// §3.9.4), not the corner shrunk by it.
+    pub fn vn_paint_inset_shadows(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        corner_shapes: Corners<CornerShape>,
         shadows: &[BoxShadow],
     ) {
         self.invalidator.debug_assert_paint();
@@ -6718,12 +6781,17 @@ impl Window {
             // Clamp at zero so a large spread can't produce negative radii, which would
             // break the SDF in the shader.
             let zero = Pixels::ZERO;
-            let hole_corner_radii = Corners {
-                top_left: (corner_radii.top_left - shadow.spread_radius).max(zero),
-                top_right: (corner_radii.top_right - shadow.spread_radius).max(zero),
-                bottom_right: (corner_radii.bottom_right - shadow.spread_radius).max(zero),
-                bottom_left: (corner_radii.bottom_left - shadow.spread_radius).max(zero),
+            let spread = shadow.spread_radius;
+            let hole_radius = |radius: Pixels, shape: CornerShape| {
+                if shape.is_round() || spread <= zero { (radius - spread).max(zero) } else { radius }
             };
+            let hole_corner_radii = Corners {
+                top_left: hole_radius(corner_radii.top_left, corner_shapes.top_left),
+                top_right: hole_radius(corner_radii.top_right, corner_shapes.top_right),
+                bottom_right: hole_radius(corner_radii.bottom_right, corner_shapes.bottom_right),
+                bottom_left: hole_radius(corner_radii.bottom_left, corner_shapes.bottom_left),
+            };
+            let inset = f32::from(spread.max(zero)) * scale_factor;
             self.next_frame.scene.insert_primitive(Shadow {
                 order: 0,
                 blur_radius: shadow.blur_radius.scale(scale_factor),
@@ -6737,6 +6805,13 @@ impl Window {
                 pad: 0,
                 transformation: self.element_transform,
                 element_bounds,
+                corner_shapes: CornerShapes::new(&corner_shapes)
+                    .with_insets(Corners {
+                        top_left: (inset, inset),
+                        top_right: (inset, inset),
+                        bottom_right: (inset, inset),
+                        bottom_left: (inset, inset),
+                    }),
             });
         }
     }
@@ -6808,6 +6883,7 @@ impl Window {
             border_widths: snapped_border_widths,
             border_style: quad.border_style,
             transformation: self.element_transform,
+            corner_shapes: CornerShapes::new(&quad.corner_shapes),
         };
         self.insert_quad(quad);
     }
@@ -6833,7 +6909,11 @@ impl Window {
         // optimisation is skipped rather than made wrong. (vue-native fork:
         // under a rounded content mask too: a strip's mask would cut through
         // the curve, and `ContentMask::intersect` squares such a corner.)
-        if !quad.transformation.is_unit() || quad.content_mask.is_rounded() {
+        // A shaped corner reaches past the rounded interior the split assumes.
+        if !quad.transformation.is_unit()
+            || quad.content_mask.is_rounded()
+            || !quad.corner_shapes.is_round()
+        {
             self.next_frame.scene.insert_primitive(quad);
             return;
         }
@@ -6930,6 +7010,17 @@ impl Window {
         corner_radii: Corners<Pixels>,
         effect: BackdropBlurEffect,
     ) {
+        self.vn_paint_backdrop_blur_rect(bounds, corner_radii, Corners::default(), effect);
+    }
+
+    /// vue-native fork: [`Self::paint_backdrop_blur_rect`] with CSS `corner-shape`.
+    pub fn vn_paint_backdrop_blur_rect(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        corner_shapes: Corners<CornerShape>,
+        effect: BackdropBlurEffect,
+    ) {
         self.invalidator.debug_assert_paint();
 
         let opacity = self.element_opacity();
@@ -6942,7 +7033,9 @@ impl Window {
         if blur_radius.0 <= 0. {
             let tint = effect.tint.opacity(opacity);
             if tint.a > 0. {
-                self.paint_quad(fill(bounds, tint).corner_radii(corner_radii));
+                self.paint_quad(
+                    fill(bounds, tint).corner_radii(corner_radii).corner_shapes(corner_shapes),
+                );
             }
             return;
         }
@@ -6966,6 +7059,7 @@ impl Window {
             blur_radius,
             opacity,
             tint: effect.tint,
+            corner_shapes: CornerShapes::new(&corner_shapes),
         });
     }
 
@@ -7007,7 +7101,7 @@ impl Window {
         spec: EffectSpec,
         element: u64,
     ) {
-        self.vn_paint_effect_with(bounds, corner_radii, spec, element, None);
+        self.vn_paint_effect_with(bounds, corner_radii, Corners::default(), spec, element, None);
     }
 
     /// vue-native: [`Self::vn_paint_effect`] with the images `spec` samples,
@@ -7016,18 +7110,20 @@ impl Window {
         &mut self,
         bounds: Bounds<Pixels>,
         corner_radii: Corners<Pixels>,
+        corner_shapes: Corners<CornerShape>,
         spec: EffectSpec,
         element: u64,
         cx: &mut App,
     ) {
         let textures = crate::resolve_effect_textures(&spec, self, cx);
-        self.vn_paint_effect_with(bounds, corner_radii, spec, element, textures);
+        self.vn_paint_effect_with(bounds, corner_radii, corner_shapes, spec, element, textures);
     }
 
     fn vn_paint_effect_with(
         &mut self,
         bounds: Bounds<Pixels>,
         corner_radii: Corners<Pixels>,
+        corner_shapes: Corners<CornerShape>,
         spec: EffectSpec,
         element: u64,
         textures: Option<Arc<crate::EffectTextureSet>>,
@@ -7035,7 +7131,7 @@ impl Window {
         self.invalidator.debug_assert_paint();
         let opacity = self.element_opacity();
         let Some(mut quad) =
-            self.vn_effect_quad(bounds, corner_radii, spec, element, opacity, textures.as_deref())
+            self.vn_effect_quad(bounds, corner_radii, corner_shapes, spec, element, opacity, textures.as_deref())
         else {
             return;
         };
@@ -7076,10 +7172,12 @@ impl Window {
     /// vue-native fork: paints `f` into an isolated group at full opacity, which
     /// the `[SkContent]` effects among `effects` composite in its place; the
     /// opacity share none of them takes composites the group as it is.
+    #[allow(clippy::too_many_arguments)]
     pub fn vn_with_effect_content<R>(
         &mut self,
         bounds: Bounds<Pixels>,
         corner_radii: Corners<Pixels>,
+        corner_shapes: Corners<CornerShape>,
         effects: &[(EffectSpec, f32, Option<Arc<crate::EffectTextureSet>>)],
         element: u64,
         cx: &mut App,
@@ -7098,6 +7196,7 @@ impl Window {
             let Some(mut quad) = self.vn_effect_quad(
                 bounds,
                 corner_radii,
+                corner_shapes,
                 *spec,
                 element,
                 opacity * weight,
@@ -7150,10 +7249,12 @@ impl Window {
 
     /// The quad `spec` draws over `bounds` at `opacity`, None when it draws
     /// nothing; asks for the next frame while it animates.
+    #[allow(clippy::too_many_arguments)]
     fn vn_effect_quad(
         &mut self,
         bounds: Bounds<Pixels>,
         corner_radii: Corners<Pixels>,
+        corner_shapes: Corners<CornerShape>,
         spec: EffectSpec,
         element: u64,
         opacity: f32,
@@ -7250,6 +7351,7 @@ impl Window {
             backdrop_blur_radius: px(spec.backdrop_blur_radius()).scale(scale_factor),
             scale: scale_factor,
             flags: spec.flags,
+            corner_shapes: CornerShapes::new(&corner_shapes),
         })
     }
 
@@ -7288,6 +7390,7 @@ impl Window {
             backdrop_blur_radius: ScaledPixels(0.),
             scale: scale_factor,
             flags: 0,
+            corner_shapes: CornerShapes::default(),
         });
     }
 
@@ -7633,6 +7736,7 @@ impl Window {
                 opacity,
                 transformation: self.element_transform,
                 tint: Hsla::transparent_black(),
+                corner_shapes: CornerShapes::default(),
             });
         }
         Ok(())
@@ -7845,6 +7949,7 @@ impl Window {
             opacity,
             transformation: self.element_transform,
             tint: self.element_image_tint,
+            corner_shapes: CornerShapes::default(),
         });
         Ok(())
     }
@@ -11215,6 +11320,8 @@ pub struct PaintQuad {
     pub border_color: Hsla,
     /// The style of the quad's borders.
     pub border_style: BorderStyle,
+    /// vue-native fork: CSS `corner-shape` of `corner_radii`.
+    pub corner_shapes: Corners<CornerShape>,
 }
 
 /// Options for [`Window::paint_backdrop_blur_rect`].
@@ -11293,6 +11400,14 @@ impl PaintQuad {
             ..self
         }
     }
+
+    /// vue-native fork: sets the CSS `corner-shape` of the quad's corners.
+    pub fn corner_shapes(self, corner_shapes: Corners<CornerShape>) -> Self {
+        PaintQuad {
+            corner_shapes,
+            ..self
+        }
+    }
 }
 
 /// vue-native: a host's smaller copy of an image that is about to be drawn
@@ -11332,6 +11447,7 @@ pub fn quad(
         border_widths: border_widths.into(),
         border_color: border_color.into(),
         border_style,
+        corner_shapes: Corners::default(),
     }
 }
 
@@ -11344,6 +11460,7 @@ pub fn fill(bounds: impl Into<Bounds<Pixels>>, background: impl Into<Background>
         border_widths: (0.).into(),
         border_color: transparent_black(),
         border_style: BorderStyle::default(),
+        corner_shapes: Corners::default(),
     }
 }
 
@@ -11360,6 +11477,7 @@ pub fn outline(
         border_widths: (1.).into(),
         border_color: border_color.into(),
         border_style,
+        corner_shapes: Corners::default(),
     }
 }
 
@@ -13426,7 +13544,7 @@ mod tests {
             let original_opacity = window.element_opacity();
             let mask = ContentMask {
                 bounds: Bounds::from_corners(point(px(4.), px(10.)), point(px(16.), px(12.))),
-                corner_radii: crate::Corners::default(),
+                ..Default::default()
             };
             let style = UnderlineStyle {
                 thickness: px(2.),
@@ -14266,6 +14384,7 @@ mod vn_rounded_mask_tests {
         ContentMask {
             bounds: Bounds::new(point(px(x), px(y)), size(px(w), px(h))),
             corner_radii: Corners::all(px(radius)),
+            ..Default::default()
         }
     }
 

@@ -2066,7 +2066,7 @@ pub(super) mod tests {
         gpui::reload_app_effects(
             gpui::AppEffects::new(
                 "test",
-                r#"{"schema": 10, "effects": [
+                r#"{"schema": 11, "effects": [
                     {"name": "tint", "backdrop": false, "metal": "tint.metal"}
                 ]}"#,
                 [("tint.metal".to_string(), msl.to_string())],
@@ -2220,6 +2220,19 @@ pub(super) mod tests {
                 effect.name
             );
             assert_eq!(pixel(&image, 2, 2), [0, 0, 0, 255], "{}", effect.name);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn corner_shapes_cut_and_fill_where_their_curves_say() -> Result<()> {
+        use gpui::corner_shape_fixture::{SIZE, expectations, scene};
+        let image = renderer()?.render_scene_to_image(
+            &scene(),
+            size(DevicePixels(SIZE.0 as i32), DevicePixels(SIZE.1 as i32)),
+        )?;
+        for (x, y, expected, what) in expectations() {
+            assert_close(pixel(&image, x, y), expected, what);
         }
         Ok(())
     }
