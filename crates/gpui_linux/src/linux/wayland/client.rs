@@ -239,6 +239,9 @@ pub(crate) fn take_wayland_socket_from_environment() -> Option<UnixStream> {
     }
 }
 
+#[path = "tablet.rs"]
+mod tablet;
+
 #[derive(Clone)]
 pub struct Globals {
     pub qh: QueueHandle<WaylandClientStatePtr>,
@@ -261,6 +264,9 @@ pub struct Globals {
         Option<ext_background_effect_manager_v1::ExtBackgroundEffectManagerV1>,
     pub text_input_manager: Option<zwp_text_input_manager_v3::ZwpTextInputManagerV3>,
     pub gesture_manager: Option<zwp_pointer_gestures_v1::ZwpPointerGesturesV1>,
+    pub tablet_manager: Option<
+        wayland_protocols::wp::tablet::zv2::client::zwp_tablet_manager_v2::ZwpTabletManagerV2,
+    >,
     pub dialog: Option<xdg_wm_dialog_v1::XdgWmDialogV1>,
     pub system_bell: Option<xdg_system_bell_v1::XdgSystemBellV1>,
     pub executor: ForegroundExecutor,
@@ -312,6 +318,7 @@ impl Globals {
             background_effects_manager: globals.bind(&qh, 1..=1, ()).ok(),
             text_input_manager: globals.bind(&qh, 1..=1, ()).ok(),
             gesture_manager: globals.bind(&qh, 1..=3, ()).ok(),
+            tablet_manager: globals.bind(&qh, 1..=1, ()).ok(),
             dialog: globals.bind(&qh, dialog_v..=dialog_v, ()).ok(),
             system_bell: globals.bind(&qh, 1..=1, ()).ok(),
             executor,
@@ -368,6 +375,9 @@ pub(crate) struct WaylandClientState {
     pinch_scale: f32,
     wl_keyboard: Option<wl_keyboard::WlKeyboard>,
     cursor_shape_device: Option<wp_cursor_shape_device_v1::WpCursorShapeDeviceV1>,
+    _tablet_seat:
+        Option<wayland_protocols::wp::tablet::zv2::client::zwp_tablet_seat_v2::ZwpTabletSeatV2>,
+    tablet_tools: HashMap<ObjectId, tablet::Tool>,
     data_device: Option<wl_data_device::WlDataDevice>,
     primary_selection: Option<zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1>,
     text_input: Option<zwp_text_input_v3::ZwpTextInputV3>,
@@ -1062,6 +1072,7 @@ impl WaylandConnection {
             .map(|primary_selection_manager| primary_selection_manager.get_device(&seat, &qh, ()));
 
         let cursor = Cursor::new(&conn, &globals, 24);
+        let tablet_seat = tablet::tablet_seat(&globals, &seat);
 
         let state = Rc::new(RefCell::new(WaylandClientState {
             serial_tracker: SerialTracker::new(),
@@ -1074,6 +1085,8 @@ impl WaylandConnection {
             pinch_gesture: None,
             pinch_scale: 1.0,
             cursor_shape_device: None,
+            _tablet_seat: tablet_seat,
+            tablet_tools: HashMap::default(),
             data_device,
             primary_selection,
             text_input: None,

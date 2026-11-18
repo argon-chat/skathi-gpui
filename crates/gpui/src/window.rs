@@ -1790,6 +1790,8 @@ pub struct Window {
     vn_raw_mouse_position: Option<Point<Pixels>>,
     /// vue-native fork: see [`Window::vn_mouse_movement`].
     vn_mouse_movement: Point<Pixels>,
+    /// vue-native fork: see [`Window::vn_pen`].
+    vn_pen: Option<crate::PenInput>,
     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
     /// vue-native fork: the `clip-path` shapes in force that are no rounded
     /// rectangle, innermost first ([`Window::vn_with_clip_shape`]). A hitbox
@@ -3068,6 +3070,7 @@ impl Window {
             vn_pointer_lock: None,
             vn_raw_mouse_position: None,
             vn_mouse_movement: Point::default(),
+            vn_pen: None,
             requested_autoscroll: None,
             last_text_input_configuration: None,
             focused_text_input: None,
@@ -8708,6 +8711,13 @@ impl Window {
         self.vn_mouse_movement
     }
 
+    /// vue-native fork: the pen behind the latest pointer event ([`PlatformInput::Pen`]), or
+    /// `None` once a mouse event arrives. A pen event is dispatched as its mouse event; its
+    /// listeners read the stylus data here.
+    pub fn vn_pen(&self) -> Option<&crate::PenInput> {
+        self.vn_pen.as_ref()
+    }
+
     fn vn_pin_to_pointer_lock(&mut self, mut event: PlatformInput) -> PlatformInput {
         let system = matches!(
             self.vn_pointer_lock,
@@ -9133,6 +9143,21 @@ impl Window {
     /// Dispatch a mouse, keyboard, or touch event on the window.
     #[profiling::function]
     pub fn dispatch_event(&mut self, event: PlatformInput, cx: &mut App) -> DispatchEventResult {
+        let event = match event {
+            PlatformInput::Pen(pen) => {
+                let (mouse, pen) = pen.into_mouse();
+                self.vn_pen = Some(pen);
+                mouse
+            }
+            PlatformInput::MouseMove(_)
+            | PlatformInput::MouseDown(_)
+            | PlatformInput::MouseUp(_)
+            | PlatformInput::Scroll(_) => {
+                self.vn_pen = None;
+                event
+            }
+            event => event,
+        };
         // A modal tool consumes the complete gesture before focus, native widgets,
         // click tracking and application listeners can observe it. Cloning the
         // Rc permits the interceptor to remove itself while handling an event.
@@ -9173,7 +9198,8 @@ impl Window {
             | PlatformInput::LongPress(_)
             | PlatformInput::TouchDrag(_)
             | PlatformInput::BackGesture(_)
-            | PlatformInput::Touch(_) => {
+            | PlatformInput::Touch(_)
+            | PlatformInput::Pen(_) => {
                 self.pointer_inside = true;
                 false
             }
@@ -9286,6 +9312,7 @@ impl Window {
                 }
             },
             PlatformInput::Touch(touch) => PlatformInput::Touch(touch),
+            PlatformInput::Pen(pen) => PlatformInput::Pen(pen),
             PlatformInput::LongPress(long_press) => {
                 self.mouse_position = if long_press.phase == crate::TouchPhase::Started {
                     long_press.start_position

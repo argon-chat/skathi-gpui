@@ -93,6 +93,7 @@ pub struct WindowsWindowState {
     pub(crate) a11y: RefCell<Option<A11yState>>,
     pub(crate) mouse_position: Cell<Option<Point<Pixels>>>,
     pub(crate) pointer_lock: crate::pointer_lock::PointerLock,
+    pub(crate) pen: crate::pen::PenTracker,
 }
 
 pub(crate) struct WindowsWindowInner {
@@ -197,6 +198,7 @@ impl WindowsWindowState {
             a11y: RefCell::new(None),
             mouse_position: Cell::new(None),
             pointer_lock: Default::default(),
+            pen: Default::default(),
         })
     }
 
@@ -597,6 +599,7 @@ impl WindowsWindow {
 
         register_drag_drop(&this)?;
         set_non_rude_hwnd(hwnd, true);
+        crate::pen::disable_feedback(hwnd);
         configure_dwm_dark_mode(hwnd, appearance);
         this.state.border_offset.update(hwnd)?;
         let placement =

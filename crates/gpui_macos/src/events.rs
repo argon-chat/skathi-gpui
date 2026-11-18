@@ -1,9 +1,11 @@
 use gpui::{
     Capslock, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton,
     MouseDownEvent, MouseExitEvent, MouseMoveEvent, MousePressureEvent, MouseUpEvent,
-    NavigationDirection, PinchEvent, Pixels, PlatformInput, PressureStage, ScrollDelta,
-    ScrollEvent, ScrollSource, TouchPhase, point, px,
+    NavigationDirection, PenAction, PenEvent, PenInput, PenSample, PinchEvent, Pixels,
+    PlatformInput, Point, PressureStage, ScrollDelta, ScrollEvent, ScrollSource, TouchPhase, point,
+    px,
 };
+use std::cell::Cell;
 
 use crate::{
     LMGetKbdType, NSStringExt, TISCopyCurrentKeyboardLayoutInputSource, TISGetInputSourceProperty,
@@ -13,17 +15,17 @@ use core_foundation::data::{CFDataGetBytePtr, CFDataRef};
 use core_graphics::event::CGKeyCode;
 use objc2::{msg_send, runtime::AnyObject};
 use objc2_app_kit::{
-    NSDeleteFunctionKey, NSDownArrowFunctionKey, NSEndFunctionKey, NSEvent, NSEventModifierFlags,
-    NSEventPhase, NSEventType, NSF1FunctionKey, NSF2FunctionKey, NSF3FunctionKey, NSF4FunctionKey,
-    NSF5FunctionKey, NSF6FunctionKey, NSF7FunctionKey, NSF8FunctionKey, NSF9FunctionKey,
-    NSF10FunctionKey, NSF11FunctionKey, NSF12FunctionKey, NSF13FunctionKey, NSF14FunctionKey,
-    NSF15FunctionKey, NSF16FunctionKey, NSF17FunctionKey, NSF18FunctionKey, NSF19FunctionKey,
-    NSF20FunctionKey, NSF21FunctionKey, NSF22FunctionKey, NSF23FunctionKey, NSF24FunctionKey,
-    NSF25FunctionKey, NSF26FunctionKey, NSF27FunctionKey, NSF28FunctionKey, NSF29FunctionKey,
-    NSF30FunctionKey, NSF31FunctionKey, NSF32FunctionKey, NSF33FunctionKey, NSF34FunctionKey,
-    NSF35FunctionKey, NSHelpFunctionKey, NSHomeFunctionKey, NSLeftArrowFunctionKey,
-    NSModeSwitchFunctionKey, NSPageDownFunctionKey, NSPageUpFunctionKey, NSRightArrowFunctionKey,
-    NSUpArrowFunctionKey,
+    NSDeleteFunctionKey, NSDownArrowFunctionKey, NSEndFunctionKey, NSEvent, NSEventButtonMask,
+    NSEventModifierFlags, NSEventPhase, NSEventSubtype, NSEventType, NSF1FunctionKey,
+    NSF2FunctionKey, NSF3FunctionKey, NSF4FunctionKey, NSF5FunctionKey, NSF6FunctionKey,
+    NSF7FunctionKey, NSF8FunctionKey, NSF9FunctionKey, NSF10FunctionKey, NSF11FunctionKey,
+    NSF12FunctionKey, NSF13FunctionKey, NSF14FunctionKey, NSF15FunctionKey, NSF16FunctionKey,
+    NSF17FunctionKey, NSF18FunctionKey, NSF19FunctionKey, NSF20FunctionKey, NSF21FunctionKey,
+    NSF22FunctionKey, NSF23FunctionKey, NSF24FunctionKey, NSF25FunctionKey, NSF26FunctionKey,
+    NSF27FunctionKey, NSF28FunctionKey, NSF29FunctionKey, NSF30FunctionKey, NSF31FunctionKey,
+    NSF32FunctionKey, NSF33FunctionKey, NSF34FunctionKey, NSF35FunctionKey, NSHelpFunctionKey,
+    NSHomeFunctionKey, NSLeftArrowFunctionKey, NSModeSwitchFunctionKey, NSPageDownFunctionKey,
+    NSPageUpFunctionKey, NSPointingDeviceType, NSRightArrowFunctionKey, NSUpArrowFunctionKey,
 };
 use std::{borrow::Cow, ffi::c_void};
 
@@ -329,6 +331,7 @@ pub(crate) unsafe fn platform_input_from_native(
                     modifiers: read_modifiers(native_event),
                 })
             }),
+            NSEventType::TabletProximity => note_proximity(native_event),
             NSEventType::MouseExited => window_height.map(|window_height| {
                 PlatformInput::MouseExited(MouseExitEvent {
                     position: point(
@@ -342,6 +345,163 @@ pub(crate) unsafe fn platform_input_from_native(
             }),
             _ => None,
         }
+    }
+}
+
+/// The tablet's pen, from its proximity events: which end is in range, and where it was last.
+#[derive(Clone, Copy, Default)]
+struct Tablet {
+    eraser: bool,
+    last: Option<Point<Pixels>>,
+}
+
+thread_local! {
+    static TABLET: Cell<Tablet> = Cell::new(Tablet::default());
+}
+
+/// A proximity event (or a mouse event of the proximity subtype): the pen leaving range leaves
+/// the window.
+unsafe fn note_proximity(native_event: &NSEvent) -> Option<PlatformInput> {
+    let entering = native_event.isEnteringProximity();
+    let eraser = native_event.pointingDeviceType() == NSPointingDeviceType::Eraser;
+    let tablet = TABLET.with(|t| {
+        let mut tablet = t.get();
+        tablet.eraser = eraser;
+        if !entering {
+            tablet.last = None;
+        }
+        t.replace(tablet)
+    });
+    if entering {
+        return None;
+    }
+    let position = tablet.last?;
+    Some(PlatformInput::Pen(PenEvent {
+        action: PenAction::Exited(MouseExitEvent {
+            position,
+            pressed_button: None,
+            modifiers: read_modifiers(native_event),
+        }),
+        pen: PenInput {
+            eraser,
+            sample: PenSample {
+                position,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    }))
+}
+
+/// A tablet reading: `tilt` is AppKit's, -1..1 per axis, and `rotation` its degrees.
+pub(crate) fn pen_sample(
+    position: Point<Pixels>,
+    pressure: f32,
+    tangential_pressure: f32,
+    tilt: (f64, f64),
+    rotation: f32,
+) -> PenSample {
+    PenSample {
+        position,
+        pressure: pressure.clamp(0.0, 1.0),
+        tangential_pressure: tangential_pressure.clamp(-1.0, 1.0),
+        tilt_x: (tilt.0.clamp(-1.0, 1.0) * 90.0) as f32,
+        tilt_y: (tilt.1.clamp(-1.0, 1.0) * 90.0) as f32,
+        twist: rotation.rem_euclid(360.0),
+        width: 0.0,
+        height: 0.0,
+    }
+}
+
+/// `input` as a [`PenEvent`] when a tablet's pen made it (a mouse event of the tablet-point
+/// subtype); otherwise as it is.
+pub(crate) unsafe fn with_pen(native_event: *mut AnyObject, input: PlatformInput) -> PlatformInput {
+    unsafe {
+        let Some(native_event) = native_event.cast::<NSEvent>().as_ref() else {
+            return input;
+        };
+        if !matches!(
+            input,
+            PlatformInput::MouseDown(_) | PlatformInput::MouseUp(_) | PlatformInput::MouseMove(_)
+        ) {
+            return input;
+        }
+        let subtype = native_event.subtype();
+        if subtype == NSEventSubtype::TabletProximity {
+            let _ = note_proximity(native_event);
+            return input;
+        }
+        if subtype != NSEventSubtype::TabletPoint {
+            return input;
+        }
+        let (position, contact, right) = match &input {
+            PlatformInput::MouseDown(e) => (e.position, true, e.button == MouseButton::Right),
+            PlatformInput::MouseUp(e) => (e.position, false, e.button == MouseButton::Right),
+            PlatformInput::MouseMove(e) => (
+                e.position,
+                e.pressed_button.is_some(),
+                e.pressed_button == Some(MouseButton::Right),
+            ),
+            _ => return input,
+        };
+        let tilt = native_event.tilt();
+        let sample = pen_sample(
+            position,
+            if contact {
+                native_event.pressure()
+            } else {
+                0.0
+            },
+            native_event.tangentialPressure(),
+            (tilt.x, tilt.y),
+            native_event.rotation(),
+        );
+        let side = native_event.buttonMask().0
+            & (NSEventButtonMask::PenLowerSide.0 | NSEventButtonMask::PenUpperSide.0)
+            != 0;
+        let eraser = TABLET.with(|t| {
+            let mut tablet = t.get();
+            tablet.last = Some(position);
+            t.set(tablet);
+            tablet.eraser
+        });
+        let action = match input {
+            PlatformInput::MouseDown(e) => PenAction::Down(e),
+            PlatformInput::MouseUp(e) => PenAction::Up(e),
+            PlatformInput::MouseMove(e) => PenAction::Move(e),
+            other => return other,
+        };
+        PlatformInput::Pen(PenEvent {
+            action,
+            pen: PenInput {
+                pointer_id: 1,
+                eraser,
+                barrel: right || side,
+                in_contact: contact,
+                sample,
+                history: Vec::new(),
+            },
+        })
+    }
+}
+
+#[cfg(test)]
+mod pen_tests {
+    use super::*;
+
+    #[test]
+    fn appkit_tilt_and_rotation_become_degrees() {
+        let s = pen_sample(point(px(1.0), px(2.0)), 1.5, -2.0, (0.5, -1.2), -30.0);
+        assert_eq!(
+            (
+                s.pressure,
+                s.tangential_pressure,
+                s.tilt_x,
+                s.tilt_y,
+                s.twist
+            ),
+            (1.0, -1.0, 45.0, -90.0, 330.0)
+        );
     }
 }
 

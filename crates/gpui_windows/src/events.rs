@@ -111,6 +111,12 @@ impl WindowsWindowInner {
             WM_PAINT => self.handle_paint_msg(handle),
             WM_CLOSE => self.handle_close_msg(),
             WM_DESTROY => self.handle_destroy_msg(handle),
+            WM_POINTERDOWN
+            | WM_POINTERUP
+            | WM_POINTERUPDATE
+            | WM_POINTERLEAVE
+            | WM_POINTERCAPTURECHANGED => self.handle_pen_msg(handle, msg, wparam),
+            crate::pen::WM_TABLET_QUERYSYSTEMGESTURESTATUS => Some(crate::pen::TABLET_GESTURES_OFF),
             WM_MOUSEMOVE => self.handle_mouse_move_msg(handle, lparam, wparam),
             WM_INPUT => self.handle_raw_input_msg(lparam),
             WM_MOUSELEAVE | WM_NCMOUSELEAVE => self.handle_mouse_leave_msg(),
@@ -407,6 +413,86 @@ impl WindowsWindowInner {
         let handled = !func(input).propagate;
         self.state.callbacks.input.set(Some(func));
         if handled { Some(0) } else { Some(1) }
+    }
+
+    /// A pen's pointer message as a [`PenEvent`]; `None` (the system's mouse emulation) for any
+    /// other pointer, and while the pointer is locked.
+    fn handle_pen_msg(&self, handle: HWND, msg: u32, wparam: WPARAM) -> Option<isize> {
+        if self.state.pointer_lock.is_locked() {
+            return None;
+        }
+        let pointer_id = wparam.loword() as u32;
+        let readings = crate::pen::read(handle, pointer_id)?;
+        let latest = *readings.last()?;
+        let scale = self.state.scale_factor.get();
+        if msg != WM_POINTERLEAVE && msg != WM_POINTERCAPTURECHANGED {
+            self.start_tracking_mouse(handle, TME_LEAVE);
+            self.restore_cursor_after_hide();
+        }
+        let mut samples: Vec<PenSample> = readings.iter().map(|r| r.sample(scale)).collect();
+        let sample = samples.pop().unwrap_or_default();
+        let position = crate::pen::position(&latest, scale);
+        let physical = point(
+            DevicePixels(latest.x.round() as i32),
+            DevicePixels(latest.y.round() as i32),
+        );
+        let steps = crate::pen::steps(
+            msg,
+            latest.in_contact(),
+            latest.barrel(),
+            self.state.pen.down.get(),
+        );
+        let mut func = self.state.callbacks.input.take()?;
+        self.state.mouse_position.set(Some(position));
+        let modifiers = current_modifiers();
+        for step in steps {
+            let action = match step {
+                crate::pen::PenStep::Down(button) => {
+                    self.state.pen.down.set(Some(button));
+                    PenAction::Down(MouseDownEvent {
+                        button,
+                        position,
+                        modifiers,
+                        click_count: self.state.click_state.update(button, physical),
+                        first_mouse: false,
+                    })
+                }
+                crate::pen::PenStep::Up(button) => {
+                    self.state.pen.down.set(None);
+                    PenAction::Up(MouseUpEvent {
+                        button,
+                        position,
+                        modifiers,
+                        click_count: self.state.click_state.current_count.get(),
+                    })
+                }
+                crate::pen::PenStep::Move(pressed_button) => PenAction::Move(MouseMoveEvent {
+                    position,
+                    pressed_button,
+                    modifiers,
+                }),
+                crate::pen::PenStep::Exited => PenAction::Exited(MouseExitEvent {
+                    position,
+                    pressed_button: None,
+                    modifiers,
+                }),
+            };
+            let in_contact = matches!(action, PenAction::Down(_))
+                || matches!(&action, PenAction::Move(m) if m.pressed_button.is_some());
+            func(PlatformInput::Pen(PenEvent {
+                action,
+                pen: PenInput {
+                    pointer_id,
+                    eraser: latest.eraser(),
+                    barrel: latest.barrel(),
+                    in_contact,
+                    sample,
+                    history: std::mem::take(&mut samples),
+                },
+            }));
+        }
+        self.state.callbacks.input.set(Some(func));
+        Some(0)
     }
 
     fn handle_raw_input_msg(&self, lparam: LPARAM) -> Option<isize> {

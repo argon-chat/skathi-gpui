@@ -163,6 +163,10 @@ unsafe fn build_classes() {
                 handle_view_event as extern "C" fn(_, Sel, *mut AnyObject),
             );
             decl.add_method(
+                sel!(tabletProximity:),
+                handle_view_event as extern "C" fn(_, Sel, *mut AnyObject),
+            );
+            decl.add_method(
                 sel!(magnifyWithEvent:),
                 handle_view_event as extern "C" fn(_, Sel, *mut AnyObject),
             );
@@ -3455,6 +3459,7 @@ extern "C" fn handle_view_event(this: &AnyObject, _: Sel, native_event: *mut Any
             _ => {}
         }
 
+        let event = unsafe { crate::events::with_pen(native_event, event) };
         if let Some(mut callback) = lock.event_callback.take() {
             drop(lock);
             callback(event);
