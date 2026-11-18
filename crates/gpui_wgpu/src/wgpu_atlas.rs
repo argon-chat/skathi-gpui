@@ -127,6 +127,47 @@ impl PlatformAtlas for WgpuAtlas {
     fn remove(&self, key: &AtlasKey) {
         self.0.lock().remove(key);
     }
+
+    fn tile(&self, key: &AtlasKey) -> Option<AtlasTile> {
+        self.0.lock().tile(key)
+    }
+
+    fn write_hdr_bytes(
+        &self,
+        key: &AtlasKey,
+        size: Size<DevicePixels>,
+        bytes: &[u8],
+    ) -> Result<Option<AtlasTile>> {
+        if size.width.0 <= 0 || size.height.0 <= 0 {
+            return Ok(None);
+        }
+        let needed = size.width.0 as usize * size.height.0 as usize * 8;
+        anyhow::ensure!(
+            bytes.len() >= needed,
+            "an HDR tile needs {needed} bytes; got {}",
+            bytes.len()
+        );
+        let mut lock = self.0.lock();
+        let kind = AtlasTextureKind::PolychromeHdr;
+        let existing = lock.tile(key);
+        if let Some(tile) =
+            existing.filter(|tile| tile.bounds.size == size && tile.texture_id.kind == kind)
+        {
+            lock.backend
+                .upload_texture(tile.texture_id, tile.bounds, &bytes[..needed]);
+            return Ok(Some(tile));
+        }
+        if existing.is_some() {
+            lock.remove(key);
+        }
+        let Some(tile) = lock.backend.allocate(size, kind) else {
+            return Ok(None);
+        };
+        lock.backend
+            .upload_texture(tile.texture_id, tile.bounds, &bytes[..needed]);
+        lock.insert_tile(key.clone(), tile);
+        Ok(Some(tile))
+    }
 }
 
 impl AtlasBackend for WgpuAtlasTextures {
@@ -204,6 +245,7 @@ impl WgpuAtlasTextures {
         let format = match kind {
             AtlasTextureKind::Monochrome => wgpu::TextureFormat::R8Unorm,
             AtlasTextureKind::Subpixel | AtlasTextureKind::Polychrome => self.color_texture_format,
+            AtlasTextureKind::PolychromeHdr => wgpu::TextureFormat::Rgba16Float,
         };
 
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -308,6 +350,7 @@ struct WgpuAtlasStorage {
     monochrome_textures: AtlasTextureList<WgpuAtlasTexture>,
     subpixel_textures: AtlasTextureList<WgpuAtlasTexture>,
     polychrome_textures: AtlasTextureList<WgpuAtlasTexture>,
+    polychrome_hdr_textures: AtlasTextureList<WgpuAtlasTexture>,
 }
 
 impl ops::Index<AtlasTextureKind> for WgpuAtlasStorage {
@@ -317,6 +360,7 @@ impl ops::Index<AtlasTextureKind> for WgpuAtlasStorage {
             AtlasTextureKind::Monochrome => &self.monochrome_textures,
             AtlasTextureKind::Subpixel => &self.subpixel_textures,
             AtlasTextureKind::Polychrome => &self.polychrome_textures,
+            AtlasTextureKind::PolychromeHdr => &self.polychrome_hdr_textures,
         }
     }
 }
@@ -327,6 +371,7 @@ impl ops::IndexMut<AtlasTextureKind> for WgpuAtlasStorage {
             AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
             AtlasTextureKind::Subpixel => &mut self.subpixel_textures,
             AtlasTextureKind::Polychrome => &mut self.polychrome_textures,
+            AtlasTextureKind::PolychromeHdr => &mut self.polychrome_hdr_textures,
         }
     }
 }
@@ -370,6 +415,7 @@ impl WgpuAtlasTexture {
         match self.format {
             wgpu::TextureFormat::R8Unorm => 1,
             wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm => 4,
+            wgpu::TextureFormat::Rgba16Float => 8,
             _ => 4,
         }
     }

@@ -34,6 +34,8 @@ use windows::{
 };
 
 const FORMAT: DXGI_FORMAT = DXGI_FORMAT_B8G8R8A8_UNORM;
+/// vue-native: an HDR window's swap chain and the target its scene draws into.
+const HDR_FORMAT: DXGI_FORMAT = DXGI_FORMAT_R16G16B16A16_FLOAT;
 const SWAP_CHAIN_FLAGS: DXGI_SWAP_CHAIN_FLAG = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
 /// Presents that may queue ahead of the compositor. DXGI's default is three,
 /// which lets input latency grow by two frames whenever the GPU falls behind.
@@ -348,16 +350,6 @@ struct Target {
     state: Mutex<D3D12_RESOURCE_STATES>,
 }
 impl Target {
-    fn from_resource(
-        device: &Device,
-        resource: ID3D12Resource,
-        width: u32,
-        height: u32,
-        samples: u32,
-        state: D3D12_RESOURCE_STATES,
-    ) -> Result<Arc<Self>> {
-        Self::from_resource_in(device, resource, FORMAT, width, height, samples, state)
-    }
     fn from_resource_in(
         device: &Device,
         resource: ID3D12Resource,
@@ -406,9 +398,6 @@ impl Target {
             height,
             state: Mutex::new(state),
         }))
-    }
-    fn new(device: &Device, width: u32, height: u32, samples: u32) -> Result<Arc<Self>> {
-        Self::new_in(device, FORMAT, width, height, samples)
     }
     fn new_in(
         device: &Device,
@@ -595,6 +584,14 @@ pub(crate) struct DirectXRenderer {
     /// vue-native: the snapshots captures keep (`Scene::vn_captures`), by id.
     /// They outlive a resize; a device loss drops them with the renderer.
     vn_snapshots: HashMap<u64, VnSnapshot>,
+    /// vue-native: the swap chain's format, and the scene targets'.
+    format: DXGI_FORMAT,
+    /// vue-native: the HDR output drawn now, and the one `Window::set_hdr_output`
+    /// asked for, applied at the next draw.
+    hdr: Option<HdrOutput>,
+    hdr_wanted: Option<HdrOutput>,
+    /// vue-native: an HDR window's scene, before it is linearised into the swap chain.
+    hdr_scene: Option<Arc<Target>>,
 }
 
 /// vue-native: a capture's pixels, kept across frames until no frame has
@@ -683,7 +680,7 @@ impl DirectXRenderer {
         let pipelines = Pipelines::new(&gpu.device)?;
         pipelines.prewarm(FORMAT);
         let atlas = Arc::new(Atlas::new(gpu.clone()));
-        let back_buffers = Self::buffers(&gpu, &swap_chain, 1, 1)?;
+        let back_buffers = Self::buffers(&gpu, &swap_chain, 1, 1, FORMAT)?;
         Ok(Self {
             hwnd,
             gpu,
@@ -710,6 +707,10 @@ impl DirectXRenderer {
             histories: VnEffectHistories::default(),
             effect_textures: EffectTextureCache::default(),
             vn_snapshots: HashMap::new(),
+            format: FORMAT,
+            hdr: None,
+            hdr_wanted: None,
+            hdr_scene: None,
         })
     }
     fn buffers(
@@ -717,13 +718,15 @@ impl DirectXRenderer {
         swap_chain: &IDXGISwapChain3,
         width: u32,
         height: u32,
+        format: DXGI_FORMAT,
     ) -> Result<Vec<Arc<Target>>> {
         (0..BUFFERS)
             .map(|index| {
                 let resource: ID3D12Resource = unsafe { swap_chain.GetBuffer(index as u32)? };
-                Target::from_resource(
+                Target::from_resource_in(
                     gpu,
                     resource,
+                    format,
                     width,
                     height,
                     1,
@@ -731,6 +734,68 @@ impl DirectXRenderer {
                 )
             })
             .collect()
+    }
+    /// vue-native: `Window::set_hdr_output`; the swap chain changes at the next draw.
+    pub(crate) fn set_hdr_output(&mut self, output: Option<HdrOutput>) -> bool {
+        self.hdr_wanted = output;
+        true
+    }
+    /// vue-native: puts the swap chain in the format and colour space
+    /// `hdr_wanted` asks for. A failed switch to HDR stays standard.
+    fn apply_hdr_output(&mut self) -> Result<()> {
+        match (self.hdr_wanted, self.hdr) {
+            (Some(wanted), Some(_)) => {
+                self.hdr = Some(wanted);
+                return Ok(());
+            }
+            (None, None) => return Ok(()),
+            _ => {}
+        }
+        if let Err(error) = self.switch_swap_chain(self.hdr_wanted) {
+            log::error!("switching the window's HDR output failed: {error:#}");
+            self.hdr_wanted = None;
+            self.switch_swap_chain(None)?;
+        }
+        Ok(())
+    }
+    fn switch_swap_chain(&mut self, output: Option<HdrOutput>) -> Result<()> {
+        let (format, color_space) = match output {
+            Some(_) => (HDR_FORMAT, DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709),
+            None => (FORMAT, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709),
+        };
+        if let Some(swap_chain) = self.swap_chain.clone() {
+            self.gpu.wait_idle()?;
+            self.back_buffers.clear();
+            unsafe {
+                swap_chain
+                    .ResizeBuffers(
+                        BUFFERS as u32,
+                        self.width,
+                        self.height,
+                        format,
+                        SWAP_CHAIN_FLAGS,
+                    )
+                    .context("Changing the D3D12 swap chain's format")?;
+                swap_chain
+                    .SetColorSpace1(color_space)
+                    .context("Setting the D3D12 swap chain's colour space")?;
+            }
+            self.back_buffers =
+                Self::buffers(&self.gpu, &swap_chain, self.width, self.height, format)?;
+            self.fences = [0; BUFFERS];
+        }
+        self.format = format;
+        self.hdr = output;
+        // Every scratch target and snapshot had the old format.
+        self.layers.clear();
+        self.snapshot = None;
+        self.blur.clear();
+        self.vn_snapshots.clear();
+        self.hdr_scene = None;
+        if output.is_some() {
+            self.pipelines.prewarm(HDR_FORMAT);
+        }
+        Ok(())
     }
     pub(crate) fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
         self.atlas.clone()
@@ -772,6 +837,7 @@ impl DirectXRenderer {
         replacement.atlas = self.atlas.clone();
         replacement.skip_draws = true;
         replacement.present_no_wait = self.present_no_wait;
+        replacement.hdr_wanted = self.hdr_wanted;
         *self = replacement;
         Ok(())
     }
@@ -787,13 +853,7 @@ impl DirectXRenderer {
             self.swap_chain
                 .as_ref()
                 .context("D3D12 swap chain unavailable during recovery")?
-                .ResizeBuffers(
-                    BUFFERS as u32,
-                    width,
-                    height,
-                    FORMAT,
-                    SWAP_CHAIN_FLAGS,
-                )?;
+                .ResizeBuffers(BUFFERS as u32, width, height, self.format, SWAP_CHAIN_FLAGS)?;
         }
         self.back_buffers = Self::buffers(
             &self.gpu,
@@ -802,6 +862,7 @@ impl DirectXRenderer {
                 .context("D3D12 swap chain missing")?,
             width,
             height,
+            self.format,
         )?;
         self.width = width;
         self.height = height;
@@ -812,6 +873,7 @@ impl DirectXRenderer {
         self.layers.clear();
         self.snapshot = None;
         self.blur.clear();
+        self.hdr_scene = None;
         Ok(())
     }
     pub(crate) fn draw(
@@ -822,6 +884,7 @@ impl DirectXRenderer {
         if self.skip_draws || self.uploads_failed {
             return Ok(());
         }
+        self.apply_hdr_output()?;
         let _profile = crate::profiling::span(self.hwnd.0 as usize, "native", "D3D12 draw");
         let started = self.timings.as_ref().map(|_| Instant::now());
         if !self.latency_ready {
@@ -976,6 +1039,33 @@ impl DirectXRenderer {
         trim_scratch(&mut self.layers, depth, &mut self.idle_frames.layers);
         self.vn_age_snapshots(scene);
         let needs_backdrop = self.prepare_pipelines(scene)?;
+        // An HDR window draws its scene into a half-float target of its own and
+        // linearises that into the swap chain (`HDR_OUTPUT_HLSL`).
+        let output = match self.hdr {
+            Some(hdr) if present && target.format == HDR_FORMAT => {
+                let pipeline = self.pipelines.hdr_output(HDR_FORMAT)?;
+                let fits = self
+                    .hdr_scene
+                    .as_ref()
+                    .is_some_and(|scene| scene.width == self.width && scene.height == self.height);
+                if !fits {
+                    self.hdr_scene = Some(Target::new_in(
+                        &self.gpu,
+                        HDR_FORMAT,
+                        self.width,
+                        self.height,
+                        1,
+                    )?);
+                }
+                let scene_target = self.hdr_scene.clone().context("HDR scene target missing")?;
+                Some((target.clone(), scene_target, pipeline, hdr.sdr_white))
+            }
+            _ => None,
+        };
+        let target = match &output {
+            Some((_, scene_target, _, _)) => scene_target.clone(),
+            None => target,
+        };
         let backdrop_levels = if needs_backdrop {
             scene
                 .backdrop_blur_rects
@@ -1115,6 +1205,7 @@ impl DirectXRenderer {
                 work: &mut work,
                 uploads,
                 target: target.clone(),
+                format: self.format,
                 width: self.width,
                 height: self.height,
                 layers: &mut self.layers,
@@ -1137,6 +1228,13 @@ impl DirectXRenderer {
                 list.ClearRenderTargetView(target.rtv(), &clear, None);
             }
             encoding.group(0, 0)?;
+            let target = match &output {
+                Some((output, scene_target, pipeline, sdr_white)) => {
+                    encoding.hdr_output(output, scene_target, pipeline, *sdr_white)?;
+                    output
+                }
+                None => &target,
+            };
             if present {
                 target.to(list, D3D12_RESOURCE_STATE_PRESENT, encoding.changes);
             }
@@ -1199,7 +1297,7 @@ impl DirectXRenderer {
             ),
         ] {
             if needed {
-                self.pipelines.pipeline(module, FORMAT, samples)?;
+                self.pipelines.pipeline(module, self.format, samples)?;
             }
         }
         if scene
@@ -1207,26 +1305,27 @@ impl DirectXRenderer {
             .iter()
             .any(|layer| layer.flags & vn_layer_flags::PLUS_LIGHTER != 0)
         {
-            self.pipelines.vn_plus_lighter(FORMAT)?;
+            self.pipelines.vn_plus_lighter(self.format)?;
         }
         let mut needs_backdrop = !scene.backdrop_blur_rects.is_empty();
         let mut effects = HashSet::new();
         let layer_quads = scene.vn_effect_draws.iter().map(|draw| &draw.quad);
         for effect in scene.effect_quads.iter().chain(layer_quads) {
             if effects.insert(effect.effect_id)
-                && let Some((_, backdrop)) = self.pipelines.effect(effect.effect_id, FORMAT, 1)?
+                && let Some((_, backdrop)) =
+                    self.pipelines.effect(effect.effect_id, self.format, 1)?
             {
                 needs_backdrop |= backdrop;
             }
         }
         if !scene.vn_effect_draws.is_empty() {
-            self.pipelines.effect(effect_id::CONTENT, FORMAT, 1)?;
+            self.pipelines.effect(effect_id::CONTENT, self.format, 1)?;
         }
         if needs_backdrop {
             self.pipelines
-                .pipeline(ShaderModule::BlurDownsample, FORMAT, 1)?;
+                .pipeline(ShaderModule::BlurDownsample, self.format, 1)?;
             self.pipelines
-                .pipeline(ShaderModule::BlurUpsample, FORMAT, 1)?;
+                .pipeline(ShaderModule::BlurUpsample, self.format, 1)?;
         }
         Ok(needs_backdrop)
     }
@@ -1314,7 +1413,7 @@ impl DirectXRenderer {
         );
         let _profile =
             crate::profiling::span(self.hwnd.0 as usize, "native", "D3D12 frame capture");
-        let target = Target::new(&self.gpu, self.width, self.height, 1)?;
+        let target = Target::new_in(&self.gpu, self.format, self.width, self.height, 1)?;
         let mut uploads = UploadPool::default();
         uploads.begin(self.gpu.completed_value(), 0)?;
         self.render(scene, appearance, target.clone(), false, &mut uploads)?;
@@ -1322,7 +1421,32 @@ impl DirectXRenderer {
         self.capture_target(target)
     }
     fn capture_target(&self, target: Arc<Target>) -> Result<image::RgbaImage> {
-        let row_pitch = (u64::from(self.width) * 4 + 255) & !255;
+        let format = target.format;
+        let pixels = self.read_target(target)?;
+        if format == HDR_FORMAT {
+            // An HDR scene target holds what an 8-bit one would, sRGB-encoded,
+            // plus values above 1.0, which an 8-bit image clips.
+            let pixels = pixels
+                .chunks_exact(2)
+                .map(|half| {
+                    let value = half_to_f32(u16::from_le_bytes([half[0], half[1]]));
+                    (value.clamp(0.0, 1.0) * 255.0).round() as u8
+                })
+                .collect();
+            return image::RgbaImage::from_raw(self.width, self.height, pixels)
+                .context("Invalid D3D12 capture dimensions");
+        }
+        let mut pixels = pixels;
+        for pixel in pixels.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+        image::RgbaImage::from_raw(self.width, self.height, pixels)
+            .context("Invalid D3D12 capture dimensions")
+    }
+    /// The target's texels, rows packed.
+    fn read_target(&self, target: Arc<Target>) -> Result<Vec<u8>> {
+        let bytes_per_pixel: u64 = if target.format == HDR_FORMAT { 8 } else { 4 };
+        let row_pitch = (u64::from(self.width) * bytes_per_pixel + 255) & !255;
         let length = row_pitch
             .checked_mul(u64::from(self.height))
             .context("D3D12 capture size overflow")?;
@@ -1346,7 +1470,7 @@ impl DirectXRenderer {
                     D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
                         Offset: 0,
                         Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
-                            Format: FORMAT,
+                            Format: target.format,
                             Width: self.width,
                             Height: self.height,
                             Depth: 1,
@@ -1373,7 +1497,7 @@ impl DirectXRenderer {
                 Some(&mut mapped),
             )?;
         }
-        let row_bytes = self.width as usize * 4;
+        let row_bytes = self.width as usize * bytes_per_pixel as usize;
         let mut pixels = vec![0u8; row_bytes * self.height as usize];
         for row in 0..self.height as usize {
             unsafe {
@@ -1387,11 +1511,7 @@ impl DirectXRenderer {
         unsafe {
             readback.Unmap(0, Some(&D3D12_RANGE { Begin: 0, End: 0 }));
         }
-        for pixel in pixels.chunks_exact_mut(4) {
-            pixel.swap(0, 2);
-        }
-        image::RgbaImage::from_raw(self.width, self.height, pixels)
-            .context("Invalid D3D12 capture dimensions")
+        Ok(pixels)
     }
     pub(crate) fn gpu_specs(&self) -> Result<GpuSpecs> {
         let description = unsafe { self.gpu.adapter.GetDesc1()? };
@@ -1817,8 +1937,34 @@ struct Encoding<'a> {
     reads_backdrop: bool,
     effects: &'a VnEffectFrame,
     vn_snapshots: &'a mut HashMap<u64, VnSnapshot>,
+    /// The scene targets' format.
+    format: DXGI_FORMAT,
 }
 impl Encoding<'_> {
+    /// vue-native: linearises an HDR window's `scene` into `output`, its swap
+    /// chain's buffer; `sdr_white` reaches the shader as the batch constant.
+    fn hdr_output(
+        &mut self,
+        output: &Arc<Target>,
+        scene: &Arc<Target>,
+        pipeline: &ID3D12PipelineState,
+        sdr_white: f32,
+    ) -> Result<()> {
+        scene.to(self.list, SHADER_READ, self.changes);
+        retain(&self.retained, scene.clone());
+        self.target = output.clone();
+        self.clip = full_rect(output.width, output.height);
+        self.bind_target(output)?;
+        let dummy = self.data.dummy;
+        self.draw_pipeline_textures(
+            pipeline,
+            dummy,
+            sdr_white.to_bits(),
+            1,
+            3,
+            [Some(&scene.sampled()), None, None, None],
+        )
+    }
     /// Binds a window-sized target, scissored to the current clip.
     fn bind_target(&mut self, target: &Arc<Target>) -> Result<()> {
         let clip = self.clip;
@@ -1877,7 +2023,7 @@ impl Encoding<'_> {
         second: Option<&AtlasTexture>,
         samples: u32,
     ) -> Result<()> {
-        let pipeline = self.pipelines.pipeline(module, FORMAT, samples)?;
+        let pipeline = self.pipelines.pipeline(module, self.format, samples)?;
         self.draw_pipeline(&pipeline, buffer, start, count, vertices, first, second)
     }
     fn draw_pipeline(
@@ -2032,9 +2178,10 @@ impl Encoding<'_> {
         mask: Option<&AtlasTexture>,
     ) -> Result<()> {
         let pipeline = if flags & vn_layer_flags::PLUS_LIGHTER != 0 {
-            self.pipelines.vn_plus_lighter(FORMAT)?
+            self.pipelines.vn_plus_lighter(self.format)?
         } else {
-            self.pipelines.pipeline(ShaderModule::VnLayer, FORMAT, 1)?
+            self.pipelines
+                .pipeline(ShaderModule::VnLayer, self.format, 1)?
         };
         let buffer = self.data.layers;
         self.draw_pipeline(&pipeline, buffer, index as u32, 1, 4, Some(source), mask)
@@ -2063,9 +2210,14 @@ impl Encoding<'_> {
                 .get(&id)
                 .is_some_and(|s| s.target.width == width && s.target.height == height);
             if !reuse {
-                let snapshot = Target::new(self.gpu, width, height, 1)?;
-                self.vn_snapshots
-                    .insert(id, VnSnapshot { target: snapshot, idle: 0 });
+                let snapshot = Target::new_in(self.gpu, self.format, width, height, 1)?;
+                self.vn_snapshots.insert(
+                    id,
+                    VnSnapshot {
+                        target: snapshot,
+                        idle: 0,
+                    },
+                );
             }
             let snapshot = self
                 .vn_snapshots
@@ -2110,8 +2262,13 @@ impl Encoding<'_> {
             "D3D12 isolated layer nesting exceeds {MAX_LAYER_DEPTH}"
         );
         while self.layers.len() <= depth {
-            self.layers
-                .push(Target::new(self.gpu, self.width, self.height, 1)?);
+            self.layers.push(Target::new_in(
+                self.gpu,
+                self.format,
+                self.width,
+                self.height,
+                1,
+            )?);
         }
         let target = self
             .layers
@@ -2194,10 +2351,10 @@ impl Encoding<'_> {
             }
             // An effect whose pipeline did not build leaves its share to the
             // content as it is.
-            let found = match self.pipelines.effect(quad.effect_id, FORMAT, 1)? {
+            let found = match self.pipelines.effect(quad.effect_id, self.format, 1)? {
                 Some(found) => Some(found),
                 None if quad.needs_content() => {
-                    self.pipelines.effect(effect_id::CONTENT, FORMAT, 1)?
+                    self.pipelines.effect(effect_id::CONTENT, self.format, 1)?
                 }
                 None => None,
             };
@@ -2374,12 +2531,19 @@ impl Encoding<'_> {
     }
     fn ensure_blur(&mut self, levels: usize) -> Result<()> {
         if self.snapshot.is_none() {
-            *self.snapshot = Some(Target::new(self.gpu, self.width, self.height, 1)?);
+            *self.snapshot = Some(Target::new_in(
+                self.gpu,
+                self.format,
+                self.width,
+                self.height,
+                1,
+            )?);
         }
         while self.blur.len() < levels {
             let divisor = 2u32.saturating_pow((self.blur.len() + 1) as u32);
-            self.blur.push(Target::new(
+            self.blur.push(Target::new_in(
                 self.gpu,
+                self.format,
                 (self.width / divisor).max(1),
                 (self.height / divisor).max(1),
                 1,
@@ -2526,7 +2690,8 @@ impl Encoding<'_> {
         Ok(())
     }
     fn effects(&mut self, effect: u32, start: usize, end: usize) -> Result<()> {
-        let Some((pipeline, needs_backdrop)) = self.pipelines.effect(effect, FORMAT, 1)? else {
+        let Some((pipeline, needs_backdrop)) = self.pipelines.effect(effect, self.format, 1)?
+        else {
             return Ok(());
         };
         let buffer = self.data.effects;
@@ -2766,7 +2931,48 @@ mod tests {
             histories: VnEffectHistories::default(),
             effect_textures: EffectTextureCache::default(),
             vn_snapshots: HashMap::new(),
+            format: FORMAT,
+            hdr: None,
+            hdr_wanted: None,
+            hdr_scene: None,
         })
+    }
+
+    #[::core::prelude::v1::test]
+    #[ignore = "requires a native D3D12 hardware adapter; run explicitly for renderer qualification"]
+    fn native_hdr_output_keeps_sdr_at_sdr_white_and_passes_hdr_tiles_to_their_headroom()
+    -> Result<()> {
+        use gpui::hdr_test_scene::{self as hdr_tests, HEIGHT, SDR_WHITE, WIDTH};
+        let mut renderer = offscreen(WIDTH, HEIGHT)?;
+        let scene = hdr_tests::scene(&*renderer.atlas)?;
+        let opaque = WindowBackgroundAppearance::Opaque;
+        let sdr = renderer.render_to_image(&scene, opaque)?;
+        renderer.set_hdr_output(Some(HdrOutput {
+            sdr_white: SDR_WHITE,
+        }));
+        renderer.apply_hdr_output()?;
+        let output = Target::new_in(&renderer.gpu, HDR_FORMAT, WIDTH, HEIGHT, 1)?;
+        let mut uploads = UploadPool::default();
+        uploads.begin(renderer.gpu.completed_value(), 0)?;
+        renderer.render(&scene, opaque, output.clone(), true, &mut uploads)?;
+        uploads.finish();
+        let linear = renderer.read_target(output)?;
+        let halves: Vec<u16> = linear
+            .chunks_exact(2)
+            .map(|half| u16::from_le_bytes([half[0], half[1]]))
+            .collect();
+        let encoded = renderer.capture_target(
+            renderer
+                .hdr_scene
+                .clone()
+                .context("the HDR scene target was not made")?,
+        )?;
+        hdr_tests::check(&sdr, &encoded, &hdr_tests::halves_to_pixels(&halves))?;
+        renderer.set_hdr_output(None);
+        renderer.apply_hdr_output()?;
+        let again = renderer.render_to_image(&scene, opaque)?;
+        assert!(again == sdr, "back on SDR, every pixel is as before");
+        Ok(())
     }
 
     fn bounds(x: f32, y: f32, width: f32, height: f32) -> Bounds<ScaledPixels> {
@@ -3569,7 +3775,7 @@ mod tests {
     fn native_upload_pools_reuse_completed_resources_and_refresh_pixels() -> Result<()> {
         let mut renderer = offscreen(32, 32)?;
         let content_mask = mask(32., 32.);
-        let target = Target::new(&renderer.gpu, 32, 32, 1)?;
+        let target = Target::new_in(&renderer.gpu, FORMAT, 32, 32, 1)?;
         let mut identities: [Option<ID3D12Resource>; BUFFERS] = std::array::from_fn(|_| None);
         let mut guarded = UploadPool::default();
         assert!(

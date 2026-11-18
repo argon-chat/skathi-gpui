@@ -119,6 +119,7 @@ pub(super) struct MetalBackdrop {
     targets: Option<BackdropTargets>,
     /// Consecutive frames that held more scratch targets than they needed.
     idle_frames: u32,
+    format: MTLPixelFormat,
 }
 
 struct AppEffectPipeline {
@@ -285,16 +286,17 @@ impl MetalRenderer {
 
     pub(super) fn ensure_backdrop(&mut self) -> bool {
         if matches!(self.backdrop, BackdropState::Unbuilt) {
-            self.backdrop = match MetalBackdrop::new(&self.device, &self.library) {
-                Ok(backdrop) => BackdropState::Ready(Box::new(backdrop)),
-                Err(error) => {
-                    effects_advisory(&format!(
-                        "`backdrop-filter` and `--shading` are unavailable — their pipelines \
+            self.backdrop =
+                match MetalBackdrop::new(&self.device, &self.library, self.target_format) {
+                    Ok(backdrop) => BackdropState::Ready(Box::new(backdrop)),
+                    Err(error) => {
+                        effects_advisory(&format!(
+                            "`backdrop-filter` and `--shading` are unavailable — their pipelines \
                          failed to build: {error:#}"
-                    ));
-                    BackdropState::Unavailable
-                }
-            };
+                        ));
+                        BackdropState::Unavailable
+                    }
+                };
         }
         matches!(self.backdrop, BackdropState::Ready(_))
     }
@@ -511,7 +513,7 @@ impl MetalRenderer {
             y: region.top as usize,
             z: 0,
         };
-        // SAFETY: Both textures are retained BGRA8Unorm 2D textures of the
+        // SAFETY: Both textures are retained 2D textures in the frame's format, of the
         // frame's size, and the region lies within them.
         unsafe {
             blit.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin(
@@ -730,6 +732,7 @@ impl MetalBackdrop {
     fn new(
         device: &ProtocolObject<dyn MTLDevice>,
         library: &ProtocolObject<dyn MTLLibrary>,
+        format: MTLPixelFormat,
     ) -> Result<Self> {
         let function = |name: &str| -> Result<Retained<ProtocolObject<dyn MTLFunction>>> {
             library
@@ -739,7 +742,7 @@ impl MetalBackdrop {
         let pass_vertex = function("backdrop_pass_vertex")?;
         let pass = |label: &str, fragment: &str| {
             let fragment = function(fragment)?;
-            backdrop_pipeline(device, label, &pass_vertex, &fragment, Blend::Off)
+            backdrop_pipeline(device, label, &pass_vertex, &fragment, format, Blend::Off)
         };
         let blur_downsample = pass("backdrop_blur_downsample", "blur_downsample_fragment")?;
         let blur_upsample = pass("backdrop_blur_upsample", "blur_upsample_fragment")?;
@@ -751,11 +754,12 @@ impl MetalBackdrop {
             "backdrop_blur_rect",
             &blur_rect_vertex,
             &blur_rect_fragment,
+            format,
             Blend::Off,
         )?;
 
         let effect_vertex = function("effect_vertex")?;
-        let effects = build_builtin_effect_pipelines(device, &effect_vertex);
+        let effects = build_builtin_effect_pipelines(device, &effect_vertex, format);
         let punch = function("punch_fragment")
             .and_then(|fragment| {
                 backdrop_pipeline(
@@ -763,6 +767,7 @@ impl MetalBackdrop {
                     "effect_punch",
                     &effect_vertex,
                     &fragment,
+                    format,
                     Blend::DestinationOut,
                 )
             })
@@ -780,6 +785,7 @@ impl MetalBackdrop {
                     "effect_content",
                     &effect_vertex,
                     &fragment,
+                    format,
                     Blend::Premultiplied,
                 )
             })
@@ -805,6 +811,7 @@ impl MetalBackdrop {
             1,
             1,
             MTLTextureUsage::ShaderRead,
+            format,
         )?;
 
         sampler_descriptor.setSAddressMode(MTLSamplerAddressMode::Repeat);
@@ -831,6 +838,7 @@ impl MetalBackdrop {
             frame_effect_textures: Vec::new(),
             targets: None,
             idle_frames: 0,
+            format,
         };
         backdrop.sync_app_effects(device);
         Ok(backdrop)
@@ -877,7 +885,7 @@ impl MetalBackdrop {
                 vertex,
                 &library,
                 &effect.name,
-                MTLPixelFormat::BGRA8Unorm,
+                self.format,
                 effect.needs_backdrop,
             )?;
             let history = effect
@@ -960,6 +968,7 @@ impl MetalBackdrop {
                     width,
                     height,
                     MTLTextureUsage::ShaderRead,
+                    self.format,
                 )?,
                 levels: Vec::new(),
                 frame: None,
@@ -974,6 +983,7 @@ impl MetalBackdrop {
                 (width / divisor).max(1),
                 (height / divisor).max(1),
                 MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead,
+                self.format,
             )?);
         }
         Ok(targets)
@@ -985,6 +995,7 @@ impl MetalBackdrop {
         width: usize,
         height: usize,
     ) -> Result<Texture> {
+        let format = self.format;
         let targets = self.ensure_targets(device, width, height, 0)?;
         if let Some(frame) = &targets.frame {
             return Ok(frame.clone());
@@ -995,6 +1006,7 @@ impl MetalBackdrop {
             width,
             height,
             MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead,
+            format,
         )?;
         targets.frame = Some(frame.clone());
         Ok(frame)
@@ -1103,13 +1115,21 @@ impl MetalBackdrop {
 fn build_builtin_effect_pipelines(
     device: &ProtocolObject<dyn MTLDevice>,
     vertex: &ProtocolObject<dyn MTLFunction>,
+    format: MTLPixelFormat,
 ) -> Vec<Option<Pipeline>> {
     let mut pipelines = Vec::new();
     for (index, &(name, msl)) in BUILTIN_EFFECT_MSL.iter().enumerate() {
         let pipeline = msl
             .context("this build carries no shader for it")
             .and_then(|msl| {
-                frame_effect_pipeline(device, vertex, name, msl, builtin_needs_backdrop(index))
+                frame_effect_pipeline(
+                    device,
+                    vertex,
+                    name,
+                    msl,
+                    builtin_needs_backdrop(index),
+                    format,
+                )
             });
         pipelines.push(match pipeline {
             Ok(pipeline) => Some(pipeline),
@@ -1145,16 +1165,10 @@ fn frame_effect_pipeline(
     name: &str,
     msl: &str,
     needs_backdrop: bool,
+    format: MTLPixelFormat,
 ) -> Result<Pipeline> {
     let library = effect_library(device, msl)?;
-    effect_pipeline(
-        device,
-        vertex,
-        &library,
-        name,
-        MTLPixelFormat::BGRA8Unorm,
-        needs_backdrop,
-    )
+    effect_pipeline(device, vertex, &library, name, format, needs_backdrop)
 }
 
 fn effect_pipeline(
@@ -1190,16 +1204,10 @@ fn backdrop_pipeline(
     label: &str,
     vertex: &ProtocolObject<dyn MTLFunction>,
     fragment: &ProtocolObject<dyn MTLFunction>,
+    format: MTLPixelFormat,
     blend: Blend,
 ) -> Result<Pipeline> {
-    pipeline_in(
-        device,
-        label,
-        vertex,
-        fragment,
-        MTLPixelFormat::BGRA8Unorm,
-        blend,
-    )
+    pipeline_in(device, label, vertex, fragment, format, blend)
 }
 
 fn pipeline_in(
@@ -1287,15 +1295,9 @@ pub(super) fn create_target_texture(
     width: usize,
     height: usize,
     usage: MTLTextureUsage,
+    format: MTLPixelFormat,
 ) -> Result<Texture> {
-    create_texture_in(
-        device,
-        label,
-        width,
-        height,
-        usage,
-        MTLPixelFormat::BGRA8Unorm,
-    )
+    create_texture_in(device, label, width, height, usage, format)
 }
 
 pub(super) fn create_texture_in(
@@ -2017,6 +2019,7 @@ pub(super) mod tests {
             "broken",
             "fragment float4 effect_fragment() { return oops; }",
             false,
+            MTLPixelFormat::BGRA8Unorm,
         );
         assert!(
             broken.is_err(),
@@ -2030,6 +2033,7 @@ pub(super) mod tests {
              struct In { float4 tint [[user(SOMETHING_ELSE)]]; };\n\
              fragment float4 effect_fragment(In input [[stage_in]]) { return input.tint; }",
             false,
+            MTLPixelFormat::BGRA8Unorm,
         );
         assert!(
             mismatched.is_err(),

@@ -144,7 +144,7 @@ impl Fixture {
                     .chunks_exact(4)
                     .flat_map(|pixel| [pixel[2], pixel[1], pixel[0], 255])
                     .collect(),
-                AtlasTextureKind::Subpixel => unreachable!(),
+                AtlasTextureKind::Subpixel | AtlasTextureKind::PolychromeHdr => unreachable!(),
             };
             assert_eq!(image.as_raw(), &expected);
         }
@@ -190,7 +190,7 @@ fn make_entry(kind: AtlasTextureKind, dimensions: Size<DevicePixels>, index: usi
             image_id: ImageId(index),
             frame_index: 0,
         }),
-        AtlasTextureKind::Subpixel => unreachable!(),
+        AtlasTextureKind::Subpixel | AtlasTextureKind::PolychromeHdr => unreachable!(),
     };
     let mut bytes = Vec::new();
     for row in 0..dimensions.height.0 {
@@ -204,7 +204,7 @@ fn make_entry(kind: AtlasTextureKind, dimensions: Size<DevicePixels>, index: usi
                 AtlasTextureKind::Polychrome => {
                     bytes.extend([value, value.wrapping_add(53), value.wrapping_add(107), 255])
                 }
-                AtlasTextureKind::Subpixel => unreachable!(),
+                AtlasTextureKind::Subpixel | AtlasTextureKind::PolychromeHdr => unreachable!(),
             }
         }
     }
@@ -248,7 +248,7 @@ fn tile_scene(tile: AtlasTile) -> Scene {
             content_mask,
             corner_radii: Corners::default(),
         }),
-        AtlasTextureKind::Subpixel => unreachable!(),
+        AtlasTextureKind::Subpixel | AtlasTextureKind::PolychromeHdr => unreachable!(),
     }
     scene.finish();
     scene

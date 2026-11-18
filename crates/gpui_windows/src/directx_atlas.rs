@@ -22,6 +22,7 @@ struct DirectXAtlasTextures {
     monochrome_textures: AtlasTextureList<DirectXAtlasTexture>,
     polychrome_textures: AtlasTextureList<DirectXAtlasTexture>,
     subpixel_textures: AtlasTextureList<DirectXAtlasTexture>,
+    polychrome_hdr_textures: AtlasTextureList<DirectXAtlasTexture>,
 }
 
 struct DirectXAtlasTexture {
@@ -41,6 +42,7 @@ impl DirectXAtlas {
             monochrome_textures: Default::default(),
             polychrome_textures: Default::default(),
             subpixel_textures: Default::default(),
+            polychrome_hdr_textures: Default::default(),
         })))
     }
 
@@ -69,6 +71,7 @@ impl DirectXAtlas {
             textures.monochrome_textures = AtlasTextureList::default();
             textures.polychrome_textures = AtlasTextureList::default();
             textures.subpixel_textures = AtlasTextureList::default();
+            textures.polychrome_hdr_textures = AtlasTextureList::default();
         });
     }
 }
@@ -127,16 +130,17 @@ impl PlatformAtlas for DirectXAtlas {
         // The key → tile map lives in gpui's shared `AtlasState` since
         // zed#64331; `tile` / `insert_tile` are the fork's two doors into it.
         let existing = lock.tile(key);
+        let kind = source_kind(source);
         let tile = match existing {
-            Some(tile) if tile.bounds.size == size => tile,
+            Some(tile) if tile.bounds.size == size && Some(tile.texture_id.kind) == kind => tile,
             _ => {
-                if !lock.backend.can_copy_from(source, size) {
+                let Some(kind) = kind.filter(|_| lock.backend.can_copy_from(source, size)) else {
                     return Ok(None);
-                }
+                };
                 if existing.is_some() {
                     lock.remove(key);
                 }
-                let Some(tile) = lock.backend.allocate(size, key.texture_kind()) else {
+                let Some(tile) = lock.backend.allocate(size, kind) else {
                     log::error!(
                         "DirectXAtlas::upload_from_gpu: could not allocate a {}x{} tile",
                         size.width.0,
@@ -200,18 +204,66 @@ impl PlatformAtlas for DirectXAtlas {
         size: Size<DevicePixels>,
         bytes: &[u8],
     ) -> anyhow::Result<Option<AtlasTile>> {
+        self.write_bytes_as(key, size, key.texture_kind(), bytes)
+    }
+
+    fn write_hdr_bytes(
+        &self,
+        key: &AtlasKey,
+        size: Size<DevicePixels>,
+        bytes: &[u8],
+    ) -> anyhow::Result<Option<AtlasTile>> {
+        self.write_bytes_as(key, size, AtlasTextureKind::PolychromeHdr, bytes)
+    }
+
+    fn stats(&self) -> Option<AtlasStats> {
+        let lock = self.0.lock();
+        let mut stats = AtlasStats::default();
+        lock.count_keys(&mut stats);
+        let backend = &lock.backend;
+        for (kind, list) in [
+            (AtlasTextureKind::Monochrome, &backend.monochrome_textures),
+            (AtlasTextureKind::Polychrome, &backend.polychrome_textures),
+            (AtlasTextureKind::Subpixel, &backend.subpixel_textures),
+            (
+                AtlasTextureKind::PolychromeHdr,
+                &backend.polychrome_hdr_textures,
+            ),
+        ] {
+            let out = &mut stats.kinds[kind as usize];
+            for texture in list.textures.iter().flatten() {
+                let size = texture.allocator.size();
+                out.pages += 1;
+                out.bytes += (size.width.max(0) as u64)
+                    * (size.height.max(0) as u64)
+                    * u64::from(texture.bytes_per_pixel);
+                out.tiles += texture.live_atlas_keys;
+            }
+        }
+        Some(stats)
+    }
+}
+
+impl DirectXAtlas {
+    fn write_bytes_as(
+        &self,
+        key: &AtlasKey,
+        size: Size<DevicePixels>,
+        kind: AtlasTextureKind,
+        bytes: &[u8],
+    ) -> anyhow::Result<Option<AtlasTile>> {
         if size.width.0 <= 0 || size.height.0 <= 0 {
             return Ok(None);
         }
         let mut lock = self.0.lock();
         let existing = lock.tile(key);
         let tile = match existing {
-            Some(tile) if tile.bounds.size == size => tile,
+            Some(tile) if tile.bounds.size == size && tile.texture_id.kind == kind => tile,
             _ => {
                 if existing.is_some() {
                     lock.remove(key);
                 }
-                let Some(tile) = lock.backend.allocate(size, key.texture_kind()) else {
+                let Some(tile) = lock.backend.allocate(size, kind) else {
                     log::error!(
                         "DirectXAtlas::write_bytes: could not allocate a {}x{} tile",
                         size.width.0,
@@ -229,29 +281,6 @@ impl PlatformAtlas for DirectXAtlas {
         // Checks the length itself: a short slice is logged and skipped.
         texture.upload(&lock.backend.device_context, tile.bounds, bytes);
         Ok(Some(tile))
-    }
-
-    fn stats(&self) -> Option<AtlasStats> {
-        let lock = self.0.lock();
-        let mut stats = AtlasStats::default();
-        lock.count_keys(&mut stats);
-        let backend = &lock.backend;
-        for (kind, list) in [
-            (AtlasTextureKind::Monochrome, &backend.monochrome_textures),
-            (AtlasTextureKind::Polychrome, &backend.polychrome_textures),
-            (AtlasTextureKind::Subpixel, &backend.subpixel_textures),
-        ] {
-            let out = &mut stats.kinds[kind as usize];
-            for texture in list.textures.iter().flatten() {
-                let size = texture.allocator.size();
-                out.pages += 1;
-                out.bytes += (size.width.max(0) as u64)
-                    * (size.height.max(0) as u64)
-                    * u64::from(texture.bytes_per_pixel);
-                out.tiles += texture.live_atlas_keys;
-            }
-        }
-        Some(stats)
     }
 }
 
@@ -279,6 +308,7 @@ impl AtlasBackend for DirectXAtlasTextures {
             AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
             AtlasTextureKind::Polychrome => &mut self.polychrome_textures,
             AtlasTextureKind::Subpixel => &mut self.subpixel_textures,
+            AtlasTextureKind::PolychromeHdr => &mut self.polychrome_hdr_textures,
         };
 
         let Some(texture_slot) = textures.textures.get_mut(id.index as usize) else {
@@ -308,6 +338,7 @@ impl DirectXAtlasTextures {
                 AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
                 AtlasTextureKind::Polychrome => &mut self.polychrome_textures,
                 AtlasTextureKind::Subpixel => &mut self.subpixel_textures,
+                AtlasTextureKind::PolychromeHdr => &mut self.polychrome_hdr_textures,
             };
 
             if let Some(tile) = textures
@@ -349,6 +380,7 @@ impl DirectXAtlasTextures {
             AtlasTextureKind::Monochrome => &self.monochrome_textures,
             AtlasTextureKind::Polychrome => &self.polychrome_textures,
             AtlasTextureKind::Subpixel => &self.subpixel_textures,
+            AtlasTextureKind::PolychromeHdr => &self.polychrome_hdr_textures,
         }
         .textures
         .iter()
@@ -378,6 +410,11 @@ impl DirectXAtlasTextures {
                 pixel_format = DXGI_FORMAT_R8G8B8A8_UNORM;
                 bind_flag = D3D11_BIND_SHADER_RESOURCE;
                 bytes_per_pixel = 4;
+            }
+            AtlasTextureKind::PolychromeHdr => {
+                pixel_format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                bind_flag = D3D11_BIND_SHADER_RESOURCE;
+                bytes_per_pixel = 8;
             }
         }
         let texture_desc = D3D11_TEXTURE2D_DESC {
@@ -409,6 +446,7 @@ impl DirectXAtlasTextures {
             AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
             AtlasTextureKind::Polychrome => &mut self.polychrome_textures,
             AtlasTextureKind::Subpixel => &mut self.subpixel_textures,
+            AtlasTextureKind::PolychromeHdr => &mut self.polychrome_hdr_textures,
         };
         let index = texture_list.free_list.pop();
         let view = unsafe {
@@ -450,10 +488,10 @@ impl DirectXAtlasTextures {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe { source.GetDesc(&mut desc) };
 
-        if desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM {
+        if source_kind(source).is_none() {
             log::error!(
                 "DirectXAtlas::upload_from_gpu: source texture is format {:?}, and the polychrome \
-                 atlas is DXGI_FORMAT_B8G8R8A8_UNORM — refusing the copy",
+                 atlases are DXGI_FORMAT_B8G8R8A8_UNORM and R16G16B16A16_FLOAT — refusing the copy",
                 desc.Format,
             );
             return false;
@@ -491,6 +529,7 @@ impl DirectXAtlasTextures {
             AtlasTextureKind::Monochrome => &self.monochrome_textures,
             AtlasTextureKind::Polychrome => &self.polychrome_textures,
             AtlasTextureKind::Subpixel => &self.subpixel_textures,
+            AtlasTextureKind::PolychromeHdr => &self.polychrome_hdr_textures,
         };
         textures.textures.get(id.index as usize)?.as_ref()
     }
@@ -561,6 +600,17 @@ impl DirectXAtlasTexture {
 
     fn is_unreferenced(&mut self) -> bool {
         self.live_atlas_keys == 0
+    }
+}
+
+/// The atlas kind a texture copies into, by its format.
+fn source_kind(source: &ID3D11Texture2D) -> Option<AtlasTextureKind> {
+    let mut desc = D3D11_TEXTURE2D_DESC::default();
+    unsafe { source.GetDesc(&mut desc) };
+    match desc.Format {
+        DXGI_FORMAT_B8G8R8A8_UNORM => Some(AtlasTextureKind::Polychrome),
+        DXGI_FORMAT_R16G16B16A16_FLOAT => Some(AtlasTextureKind::PolychromeHdr),
+        _ => None,
     }
 }
 

@@ -1,4 +1,5 @@
 mod backdrop;
+mod hdr;
 mod vn_effect;
 mod vn_layer;
 
@@ -7,8 +8,8 @@ use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
 use collections::FxHashMap;
 use gpui::{
-    AtlasTextureId, Bounds, DevicePixels, GpuSpecs, PrimitiveBatch, ScaledPixels, Scene, Size,
-    VnBatch, get_gamma_correction_ratios,
+    AtlasTextureId, Bounds, DevicePixels, GpuSpecs, HdrOutput, PrimitiveBatch, ScaledPixels, Scene,
+    Size, VnBatch, get_gamma_correction_ratios,
 };
 use log::warn;
 #[cfg(not(target_family = "wasm"))]
@@ -267,6 +268,8 @@ struct WgpuRendererCore {
     dual_source_blending: bool,
     adapter_info: wgpu::AdapterInfo,
     target_format: wgpu::TextureFormat,
+    sdr_format: wgpu::TextureFormat,
+    hdr: Option<Box<hdr::HdrState>>,
     max_texture_size: u32,
 }
 
@@ -310,6 +313,10 @@ pub struct WgpuRenderer {
     observed_error_generation: u64,
     last_surface_error: Option<String>,
     needs_redraw: bool,
+    sdr_format: wgpu::TextureFormat,
+    /// The surface takes half float in extended linear sRGB.
+    hdr_capable: bool,
+    hdr: Option<HdrOutput>,
 }
 
 impl WgpuRenderer {
@@ -550,6 +557,10 @@ impl WgpuRenderer {
         let surface_format = surface_config.format;
         let alpha_mode = surface_config.alpha_mode;
         let max_texture_size = context.device.limits().max_texture_dimension_2d;
+        let hdr_capable = surface
+            .get_capabilities(&context.adapter)
+            .color_spaces(hdr::HDR_FORMAT)
+            .contains(wgpu::SurfaceColorSpaces::EXTENDED_SRGB_LINEAR);
         let core = WgpuRendererCore::new(context, atlas.clone(), surface_format, alpha_mode);
 
         Ok(Self {
@@ -568,7 +579,39 @@ impl WgpuRenderer {
             observed_error_generation: 0,
             last_surface_error: None,
             needs_redraw: false,
+            sdr_format: surface_format,
+            hdr_capable,
+            hdr: None,
         })
+    }
+
+    /// Outputs half float in extended linear sRGB while `output` is set, when
+    /// the surface can take it; `false` when it cannot.
+    pub fn set_hdr_output(&mut self, output: Option<HdrOutput>) -> bool {
+        if output.is_some() && !self.hdr_capable {
+            return false;
+        }
+        let switch = output.is_some() != self.hdr.is_some();
+        let alpha_mode = self.surface_config.alpha_mode;
+        if let Some(core) = self.core_mut()
+            && !core.set_hdr_output(output, alpha_mode)
+        {
+            return false;
+        }
+        self.hdr = output;
+        if switch {
+            let (format, color_space) = match output {
+                Some(_) => (hdr::HDR_FORMAT, wgpu::SurfaceColorSpace::ExtendedSrgbLinear),
+                None => (self.sdr_format, wgpu::SurfaceColorSpace::Auto),
+            };
+            self.surface_config.format = format;
+            self.surface_config.color_space = color_space;
+            if let RendererState::Ready { surface, core } = &mut self.state {
+                core.resources.invalidate_intermediate_textures();
+                surface.configure(&core.resources.device, &self.surface_config);
+            }
+        }
+        true
     }
 }
 
@@ -1325,6 +1368,8 @@ impl WgpuRendererCore {
             dual_source_blending,
             adapter_info: context.adapter.get_info(),
             target_format,
+            sdr_format: target_format,
+            hdr: None,
             max_texture_size,
         }
     }
@@ -1394,11 +1439,22 @@ impl WgpuRendererCore {
             bytemuck::bytes_of(&gamma_params),
         );
 
-        self.record_frame(scene, target, target_view, globals, clear_color)
-            .inspect_err(|_| {
-                // Queue writes are staged before encoding; flush them even if the frame fails.
-                self.resources.queue.submit(std::iter::empty());
-            })
+        let hdr_scene = self.hdr_scene(target.width(), target.height());
+        let result = match &hdr_scene {
+            Some(hdr_scene) => self.record_frame(
+                scene,
+                &hdr_scene.texture,
+                &hdr_scene.view,
+                globals,
+                clear_color,
+                Some((target_view, premultiplied_alpha)),
+            ),
+            None => self.record_frame(scene, target, target_view, globals, clear_color, None),
+        };
+        result.inspect_err(|_| {
+            // Queue writes are staged before encoding; flush them even if the frame fails.
+            self.resources.queue.submit(std::iter::empty());
+        })
     }
 
     fn record_frame(
@@ -1408,6 +1464,7 @@ impl WgpuRendererCore {
         target_view: &wgpu::TextureView,
         globals: GlobalParams,
         clear_color: wgpu::Color,
+        hdr_output: Option<(&wgpu::TextureView, bool)>,
     ) -> Result<wgpu::SubmissionIndex> {
         let mut instance_offset = 0;
         let effects = self.prepare_vn_effects(scene);
@@ -1468,6 +1525,9 @@ impl WgpuRendererCore {
         self.finish_vn_layers();
         self.finish_vn_effects();
         self.finish_frame_target(&mut encoder, &frame);
+        if let Some((output, premultiplied)) = hdr_output {
+            self.draw_hdr_output(&mut encoder, target_view, output, premultiplied);
+        }
 
         let submission = self
             .resources()
@@ -2229,6 +2289,7 @@ impl WgpuRenderer {
         self.atlas.handle_device_lost(context);
 
         let is_bgr = self.is_bgr;
+        let hdr = self.hdr;
         *self = Self::new_internal(
             Some(gpu_context.clone()),
             context,
@@ -2239,6 +2300,7 @@ impl WgpuRenderer {
             self.atlas.clone(),
         )?;
         self.set_subpixel_layout(is_bgr);
+        self.set_hdr_output(hdr);
 
         log::info!("GPU recovery complete");
         Ok(())
@@ -2377,14 +2439,32 @@ impl WgpuHeadlessRenderer {
     /// Copies the current render target back to the CPU. Dimensions come from the
     /// target texture itself, so the copy can never disagree with what was rendered.
     fn read_image(&mut self) -> anyhow::Result<image::RgbaImage> {
-        let target = self
+        let texture = self
             .render_target
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Headless render target was not created"))?;
-        let width = target.texture.width();
-        let height = target.texture.height();
+            .ok_or_else(|| anyhow::anyhow!("Headless render target was not created"))?
+            .texture
+            .clone();
+        let mut pixels = self.read_texture(&texture, 4)?;
+        if self.core.target_format == wgpu::TextureFormat::Bgra8Unorm {
+            for pixel in pixels.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
+        }
+
+        image::RgbaImage::from_raw(texture.width(), texture.height(), pixels)
+            .ok_or_else(|| anyhow::anyhow!("Failed to create image from headless pixel data"))
+    }
+
+    fn read_texture(
+        &mut self,
+        texture: &wgpu::Texture,
+        bytes_per_pixel: u32,
+    ) -> anyhow::Result<Vec<u8>> {
+        let width = texture.width();
+        let height = texture.height();
         let bytes_per_row = width
-            .checked_mul(4)
+            .checked_mul(bytes_per_pixel)
             .ok_or_else(|| anyhow::anyhow!("Headless render target row size overflowed"))?;
         let padded_bytes_per_row = bytes_per_row
             .checked_next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
@@ -2416,7 +2496,7 @@ impl WgpuHeadlessRenderer {
                 });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &target.texture,
+                texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -2474,15 +2554,64 @@ impl WgpuHeadlessRenderer {
         }
         drop(mapped_data);
         readback_buffer.unmap();
+        Ok(pixels)
+    }
 
-        if self.core.target_format == wgpu::TextureFormat::Bgra8Unorm {
-            for pixel in pixels.chunks_exact_mut(4) {
-                pixel.swap(0, 2);
-            }
-        }
-
-        image::RgbaImage::from_raw(width, height, pixels)
-            .ok_or_else(|| anyhow::anyhow!("Failed to create image from headless pixel data"))
+    /// The scene in HDR on an `HDR_FORMAT` output: the scene target read as
+    /// 8-bit, and the output's pixels.
+    #[cfg(test)]
+    fn render_hdr(
+        &mut self,
+        scene: &Scene,
+        size: Size<DevicePixels>,
+        output: HdrOutput,
+    ) -> anyhow::Result<(image::RgbaImage, Vec<[f32; 4]>)> {
+        self.check_gpu_errors()?;
+        anyhow::ensure!(
+            self.core
+                .set_hdr_output(Some(output), wgpu::CompositeAlphaMode::Opaque)
+        );
+        let (width, height) = (size.width.0 as u32, size.height.0 as u32);
+        let target = backdrop::create_target_texture(
+            &self.core.resources.device,
+            "headless_hdr_output",
+            hdr::HDR_FORMAT,
+            width,
+            height,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        );
+        self.core.render_frame(
+            scene,
+            &target.texture,
+            &target.view,
+            size,
+            false,
+            wgpu::Color::BLACK,
+        )?;
+        let halves: Vec<u16> = self
+            .read_texture(&target.texture, 8)?
+            .chunks_exact(2)
+            .map(|half| u16::from_le_bytes([half[0], half[1]]))
+            .collect();
+        let scene_target = self
+            .core
+            .hdr_scene(width, height)
+            .context("the HDR scene target was not made")?;
+        let encoded: Vec<u8> = self
+            .read_texture(&scene_target.texture, 8)?
+            .chunks_exact(2)
+            .map(|half| {
+                let value = gpui::half_to_f32(u16::from_le_bytes([half[0], half[1]]));
+                (value.clamp(0.0, 1.0) * 255.0).round() as u8
+            })
+            .collect();
+        self.core
+            .set_hdr_output(None, wgpu::CompositeAlphaMode::Opaque);
+        Ok((
+            image::RgbaImage::from_raw(width, height, encoded)
+                .context("the HDR scene read back short")?,
+            gpui::hdr_test_scene::halves_to_pixels(&halves),
+        ))
     }
 }
 
@@ -2805,6 +2934,31 @@ mod tests {
         let oklab = mean(16..32);
         assert!((srgb - 125.5).abs() <= 2.0, "sRGB midpoint {srgb}");
         assert!((oklab - 96.9).abs() <= 2.0, "Oklab midpoint {oklab}");
+        Ok(())
+    }
+
+    #[test]
+    fn hdr_output_keeps_sdr_at_sdr_white_and_passes_hdr_tiles_to_their_headroom()
+    -> anyhow::Result<()> {
+        use gpui::PlatformHeadlessRenderer as _;
+        use gpui::hdr_test_scene::{self as hdr_tests, HEIGHT, SDR_WHITE, WIDTH};
+        let mut renderer = WgpuHeadlessRenderer::new()?;
+        let scene = hdr_tests::scene(&*renderer.core.atlas)?;
+        let size = gpui::size(
+            gpui::DevicePixels(WIDTH as i32),
+            gpui::DevicePixels(HEIGHT as i32),
+        );
+        let sdr = renderer.render_scene_to_image(&scene, size)?;
+        let (encoded, output) = renderer.render_hdr(
+            &scene,
+            size,
+            HdrOutput {
+                sdr_white: SDR_WHITE,
+            },
+        )?;
+        hdr_tests::check(&sdr, &encoded, &output)?;
+        let again = renderer.render_scene_to_image(&scene, size)?;
+        assert!(again == sdr, "back on SDR, every pixel is as before");
         Ok(())
     }
 

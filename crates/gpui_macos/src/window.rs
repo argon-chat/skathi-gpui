@@ -2822,6 +2822,13 @@ impl PlatformWindow for MacWindow {
         true
     }
 
+    fn set_hdr_output(&self, output: Option<gpui::HdrOutput>) -> bool {
+        let mut this = self.0.lock();
+        let screen: *mut AnyObject = unsafe { msg_send![this.native_window, screen] };
+        let display = display_id_for_screen(screen);
+        this.renderer.set_hdr_output(output, display)
+    }
+
     fn a11y_init(&self, callbacks: gpui::A11yCallbacks) {
         let mut lock = self.0.lock();
 

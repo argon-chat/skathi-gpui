@@ -8,13 +8,13 @@ use crate::subscription::SingleSubscriberSet;
 use crate::taffy::TaffyLayoutEngine;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AtlasKey, AtlasStats, AtlasTile, AvailableSpace, BackdropBlurRect, Background, BorderStyle,
+    AsyncWindowContext, AtlasKey, AtlasStats, AtlasTextureKind, AtlasTile, AvailableSpace, BackdropBlurRect, Background, BorderStyle,
     EffectQuad, EffectSpec,
     Bounds, BoxShadow,
     Capslock, Context, CornerShape, CornerShapes, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
     DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
     EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
-    GlyphShadowParams, GpuTextureHandle,
+    GlyphShadowParams, GpuTextureHandle, HdrOutput,
     Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent,
     Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent,
     MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, PaintedPath, Path,
@@ -1748,6 +1748,9 @@ pub struct Window {
     /// vue-native fork: the colour [`Window::paint_image`] tints with
     /// ([`Window::with_image_tint`]); transparent outside a tint scope.
     element_image_tint: Hsla,
+    /// vue-native fork: the brightest value an HDR image tile paints with
+    /// ([`Window::with_image_headroom`]).
+    element_image_headroom: f32,
     /// The composed CSS `transform` of every ancestor currently being painted,
     /// in DEVICE space. Identity outside a `Style::vn_transform`.
     ///
@@ -3052,6 +3055,7 @@ impl Window {
             vn_capture_records: FxHashMap::default(),
             element_opacity: 1.0,
             element_image_tint: Hsla::transparent_black(),
+            element_image_headroom: 1.0,
             element_transform: TransformationMatrix::unit(),
             vn_hitbox_tag: 0,
             vn_tag_fresh: false,
@@ -4241,6 +4245,12 @@ impl Window {
     /// visible (macOS stops it otherwise); minimised or hidden still stops.
     pub fn set_draws_while_occluded(&self, on: bool) {
         self.platform_window.set_draws_while_occluded(on);
+    }
+
+    /// vue-native fork: draws the window high dynamic range from its next frame, or standard
+    /// with `None`. False when the renderer cannot; the window then stays standard.
+    pub fn set_hdr_output(&self, output: Option<HdrOutput>) -> bool {
+        self.platform_window.set_hdr_output(output)
     }
 
     /// Returns whether this window is considered to be the window
@@ -6233,6 +6243,22 @@ impl Window {
         result
     }
 
+    /// vue-native fork: the brightest value, in SDR-white units, that an
+    /// [`AtlasTextureKind::PolychromeHdr`] image painted inside `f` reaches; 1.0 outside any
+    /// scope. CSS `dynamic-range-limit` applied to the display's headroom.
+    pub fn with_image_headroom<R>(&mut self, headroom: f32, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.invalidator.debug_assert_paint_or_prepaint();
+        let headroom = if headroom.is_finite() {
+            headroom.max(1.0)
+        } else {
+            1.0
+        };
+        let previous = std::mem::replace(&mut self.element_image_headroom, headroom);
+        let result = f(self);
+        self.element_image_headroom = previous;
+        result
+    }
+
     /// Paints everything `f` paints — this element's own quads, shadows, text
     /// and its whole subtree — through `transformation`, which is composed on
     /// top of whatever an ancestor already pushed.
@@ -7966,9 +7992,16 @@ impl Window {
             .scale(self.scale_factor());
         let opacity = self.element_opacity();
 
+        // An HDR tile carries its headroom in `pad`, as f32 bits; the shaders take a non-zero
+        // `pad` as linear values to clamp to it and encode.
+        let pad = if sub_tile.texture_id.kind == AtlasTextureKind::PolychromeHdr {
+            self.element_image_headroom.to_bits()
+        } else {
+            0
+        };
         self.next_frame.scene.insert_primitive(PolychromeSprite {
             order: 0,
-            pad: 0,
+            pad,
             grayscale: grayscale.into(),
             bounds: visible_bounds_snapped,
             content_mask,
@@ -8088,6 +8121,37 @@ impl Window {
                     }
                 }
             }
+        };
+        Ok(match before {
+            Some(tile) if tile == after => TileWrite::InPlace,
+            _ => TileWrite::Placed,
+        })
+    }
+
+    /// vue-native fork: [`Window::write_image_tile`] from RGBA half floats in linear extended
+    /// sRGB, into an [`AtlasTextureKind::PolychromeHdr`] tile. [`TileWrite::Refused`] from a
+    /// backend without HDR tiles.
+    pub fn write_image_tile_rgba16f(
+        &mut self,
+        image: &RenderImage,
+        frame_index: usize,
+        halves: &[u16],
+    ) -> Result<TileWrite> {
+        let key: AtlasKey = RenderImageParams {
+            image_id: image.id,
+            frame_index,
+        }
+        .into();
+        let before = self.sprite_atlas.tile(&key);
+        // SAFETY: a u16 slice is readable as twice as many bytes; every target is little-endian.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(halves.as_ptr().cast::<u8>(), std::mem::size_of_val(halves))
+        };
+        let Some(after) =
+            self.sprite_atlas
+                .write_hdr_bytes(&key, image.size(frame_index), bytes)?
+        else {
+            return Ok(TileWrite::Refused);
         };
         Ok(match before {
             Some(tile) if tile == after => TileWrite::InPlace,

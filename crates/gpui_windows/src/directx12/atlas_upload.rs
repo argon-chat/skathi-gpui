@@ -49,6 +49,7 @@ impl UploadBatch {
         let expected_pixel_size = match descriptor.Format {
             DXGI_FORMAT_R8_UNORM => 1,
             DXGI_FORMAT_R8G8B8A8_UNORM | DXGI_FORMAT_B8G8R8A8_UNORM => 4,
+            DXGI_FORMAT_R16G16B16A16_FLOAT => 8,
             _ => 0,
         };
         ensure!(

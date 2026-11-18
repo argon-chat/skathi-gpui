@@ -29,6 +29,9 @@ use gpui::*;
 
 pub(crate) const DISABLE_DIRECT_COMPOSITION: &str = "GPUI_DISABLE_DIRECT_COMPOSITION";
 const RENDER_TARGET_FORMAT: DXGI_FORMAT = DXGI_FORMAT_B8G8R8A8_UNORM;
+/// vue-native fork: an HDR window's swap chain and the target its scene draws into.
+const HDR_FORMAT: DXGI_FORMAT = DXGI_FORMAT_R16G16B16A16_FLOAT;
+pub(crate) const HDR_OUTPUT_HLSL: &str = include_str!("hdr_output.hlsl");
 const MAX_INSTANCE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
 const BLUR_TEXTURE_LEVELS: usize = MAX_BACKDROP_BLUR_KERNEL_LEVELS as usize;
 /// vue-native fork: isolated layers nested deeper than this draw into their
@@ -82,6 +85,34 @@ pub(crate) struct DirectXRenderer {
     /// vue-native fork: the snapshots captures keep (`Scene::vn_captures`),
     /// by id. They outlive a resize; a device loss drops them.
     vn_snapshots: HashMap<u64, VnSnapshot>,
+
+    /// vue-native fork: the output `Window::set_hdr_output` asked for, applied
+    /// at the next render.
+    hdr_wanted: Option<HdrOutput>,
+    hdr_pipeline: Option<HdrPipeline>,
+}
+
+/// vue-native fork: [`HDR_OUTPUT_HLSL`], the pass from an HDR window's scene
+/// target to its swap chain.
+struct HdrPipeline {
+    vertex: ID3D11VertexShader,
+    fragment: ID3D11PixelShader,
+    params: Option<ID3D11Buffer>,
+}
+
+/// vue-native fork: an HDR window's swap-chain buffer, which the scene
+/// target (`DirectXResources::render_target`, half float) is linearised into.
+struct HdrResources {
+    output: Option<ID3D11RenderTargetView>,
+    scene: Option<ID3D11ShaderResourceView>,
+    sdr_white: f32,
+}
+
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+struct HdrParams {
+    sdr_white: f32,
+    _pad: [f32; 3],
 }
 
 /// vue-native fork: one `[SkHistory]` texture, RGBA 16-bit float.
@@ -125,6 +156,10 @@ struct DirectXResources {
     swap_chain: IDXGISwapChain1,
     render_target: Option<ID3D11Texture2D>,
     render_target_view: Option<ID3D11RenderTargetView>,
+    /// vue-native fork: `render_target`'s format, which every target and
+    /// snapshot copied to or from it shares.
+    format: DXGI_FORMAT,
+    hdr: Option<HdrResources>,
 
     // Backdrop blur textures are allocated lazily because most windows never
     // paint a `backdrop-filter`.
@@ -333,11 +368,119 @@ impl DirectXRenderer {
             vn_histories: VnEffectHistories::default(),
             vn_effects: VnEffectFrame::default(),
             vn_snapshots: HashMap::default(),
+            hdr_wanted: None,
+            hdr_pipeline: None,
         })
     }
 
     pub(crate) fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
         self.atlas.clone()
+    }
+
+    /// vue-native fork: `Window::set_hdr_output`; the swap chain changes at the
+    /// next render. False without `IDXGISwapChain3`.
+    pub(crate) fn set_hdr_output(&mut self, output: Option<HdrOutput>) -> bool {
+        let supported = self
+            .resources
+            .as_ref()
+            .is_some_and(|resources| resources.swap_chain.cast::<IDXGISwapChain3>().is_ok());
+        self.hdr_wanted = output.filter(|_| supported);
+        supported
+    }
+
+    /// vue-native fork: puts the swap chain in the format and colour space
+    /// [`Self::hdr_wanted`] asks for. A failed switch to HDR stays standard.
+    fn apply_hdr_output(&mut self) -> Result<()> {
+        let resources = self.resources.as_mut().context("resources missing")?;
+        match (self.hdr_wanted, resources.hdr.as_mut()) {
+            (Some(wanted), Some(hdr)) => {
+                hdr.sdr_white = wanted.sdr_white;
+                return Ok(());
+            }
+            (None, None) => return Ok(()),
+            _ => {}
+        }
+        if let Err(error) = self.switch_swap_chain(self.hdr_wanted) {
+            log::error!("switching the window's HDR output failed: {error:#}");
+            self.hdr_wanted = None;
+            self.switch_swap_chain(None)?;
+        }
+        Ok(())
+    }
+
+    fn switch_swap_chain(&mut self, output: Option<HdrOutput>) -> Result<()> {
+        let devices = self.devices.as_ref().context("devices missing")?;
+        let resources = self.resources.as_mut().context("resources missing")?;
+        unsafe { devices.device_context.OMSetRenderTargets(None, None) };
+        resources.render_target.take();
+        resources.render_target_view.take();
+        resources.hdr = None;
+        let (format, color_space) = match output {
+            Some(_) => (HDR_FORMAT, DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709),
+            None => (
+                RENDER_TARGET_FORMAT,
+                DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,
+            ),
+        };
+        unsafe {
+            resources
+                .swap_chain
+                .ResizeBuffers(
+                    BUFFER_COUNT as u32,
+                    self.width,
+                    self.height,
+                    format,
+                    DXGI_SWAP_CHAIN_FLAG(0),
+                )
+                .context("Failed to change the swap chain's format")?;
+            resources
+                .swap_chain
+                .cast::<IDXGISwapChain3>()?
+                .SetColorSpace1(color_space)
+                .context("Setting the swap chain's colour space")?;
+        }
+        resources.recreate_resources(devices, self.width, self.height, output)?;
+        // Their format was the old target's.
+        self.vn_snapshots.clear();
+        Ok(())
+    }
+
+    /// vue-native fork: linearises an HDR window's scene into its swap chain.
+    fn draw_hdr_output(&mut self) -> Result<()> {
+        let devices = self.devices.as_ref().context("devices missing")?;
+        let Some(hdr) = self.resources.as_ref().and_then(|r| r.hdr.as_ref()) else {
+            return Ok(());
+        };
+        if self.hdr_pipeline.is_none() {
+            self.hdr_pipeline = Some(HdrPipeline::new(&devices.device)?);
+        }
+        let pipeline = self.hdr_pipeline.as_ref().context("HDR pipeline missing")?;
+        let resources = self.resources.as_ref().context("resources missing")?;
+        let context = &devices.device_context;
+        update_buffer(
+            context,
+            pipeline.params.as_ref().context("HDR params missing")?,
+            &[HdrParams {
+                sdr_white: hdr.sdr_white,
+                _pad: [0.0; 3],
+            }],
+        )?;
+        unsafe {
+            unbind_shader_resources(context);
+            context.OMSetRenderTargets(Some(slice::from_ref(&hdr.output)), None);
+            context.RSSetViewports(Some(slice::from_ref(&resources.viewport)));
+            context.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            context.IASetInputLayout(None);
+            context.VSSetShader(&pipeline.vertex, None);
+            context.PSSetShader(&pipeline.fragment, None);
+            context.PSSetConstantBuffers(1, Some(slice::from_ref(&pipeline.params)));
+            context.PSSetShaderResources(0, Some(slice::from_ref(&hdr.scene)));
+            context.OMSetBlendState(None, None, u32::MAX);
+            context.Draw(3, 0);
+            unbind_shader_resources(context);
+            context.OMSetRenderTargets(Some(slice::from_ref(&resources.render_target_view)), None);
+        }
+        Ok(())
     }
 
     fn pre_draw(&self, clear_color: &[f32; 4]) -> Result<()> {
@@ -455,6 +598,7 @@ impl DirectXRenderer {
             disable_direct_composition,
         )
         .context("Creating DirectX resources")?;
+        self.hdr_pipeline = None;
         let globals = DirectXGlobalElements::new(&devices.device)
             .context("Creating DirectXGlobalElements")?;
         let pipelines = DirectXRenderPipelines::new(&devices.device)
@@ -514,6 +658,7 @@ impl DirectXRenderer {
         if let Some(devices) = &self.devices {
             self.pipelines.sync_app_effects(&devices.device);
         }
+        self.apply_hdr_output()?;
         self.pre_draw(&match background_appearance {
             WindowBackgroundAppearance::Opaque => [1.0f32; 4],
             _ => [0.0f32; 4],
@@ -531,7 +676,8 @@ impl DirectXRenderer {
         let result = self.draw_vn_group(scene, 0, 0);
         self.vn_target = None;
         self.vn_histories.finish_frame();
-        result
+        result?;
+        self.draw_hdr_output()
     }
 
     /// vue-native fork: draws each capture's group into a cleared target and
@@ -555,7 +701,9 @@ impl DirectXRenderer {
                 .get(&capture.info.id)
                 .is_some_and(|s| s.width == width && s.height == height);
             if !reuse {
-                let (texture, srv) = create_vn_snapshot_texture(&devices.device, width, height)?;
+                let format = self.resources.as_ref().context("resources missing")?.format;
+                let (texture, srv) =
+                    create_vn_snapshot_texture(&devices.device, format, width, height)?;
                 self.vn_snapshots.insert(
                     capture.info.id,
                     VnSnapshot { texture, srv, width, height, idle: 0 },
@@ -752,9 +900,12 @@ impl DirectXRenderer {
         let devices = self.devices.as_ref().context("devices missing")?;
         let resources = self.resources.as_mut().context("resources missing")?;
         while resources.vn_layer_targets.len() <= depth {
-            resources
-                .vn_layer_targets
-                .push(create_vn_layer_target(&devices.device, self.width, self.height)?);
+            resources.vn_layer_targets.push(create_vn_layer_target(
+                &devices.device,
+                resources.format,
+                self.width,
+                self.height,
+            )?);
         }
         Ok(resources.vn_layer_targets[depth].clone())
     }
@@ -1058,6 +1209,30 @@ impl DirectXRenderer {
 
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         unsafe { context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))? };
+        if desc.Format == HDR_FORMAT {
+            // An HDR scene target holds what an 8-bit one would, sRGB-encoded,
+            // plus values above 1.0, which an 8-bit image clips.
+            let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
+            for row in 0..height as usize {
+                // SAFETY: as below; a half-float row is `width * 8` bytes.
+                let halves = unsafe {
+                    slice::from_raw_parts(
+                        (mapped.pData as *const u8)
+                            .add(row * mapped.RowPitch as usize)
+                            .cast::<u16>(),
+                        width as usize * 4,
+                    )
+                };
+                pixels.extend(
+                    halves
+                        .iter()
+                        .map(|&half| (half_to_f32(half).clamp(0.0, 1.0) * 255.0).round() as u8),
+                );
+            }
+            unsafe { context.Unmap(&staging, 0) };
+            return image::RgbaImage::from_raw(width, height, pixels)
+                .context("Failed to build RgbaImage from staging readback");
+        }
         let row_bytes = (width as usize) * 4;
         let mut pixels = vec![0u8; row_bytes * height as usize];
         // SAFETY: `Map` succeeded, so `pData` points at `RowPitch * height`
@@ -1097,6 +1272,9 @@ impl DirectXRenderer {
         let resources = self.resources.as_mut().context("resources missing")?;
         resources.render_target.take();
         resources.render_target_view.take();
+        let output = resources.hdr.take().map(|hdr| HdrOutput {
+            sdr_white: hdr.sdr_white,
+        });
 
         // Resizing the swap chain requires a call to the underlying DXGI adapter, which can return the device removed error.
         // The app might have moved to a monitor that's attached to a different graphics device.
@@ -1109,13 +1287,13 @@ impl DirectXRenderer {
                     BUFFER_COUNT as u32,
                     width,
                     height,
-                    RENDER_TARGET_FORMAT,
+                    resources.format,
                     DXGI_SWAP_CHAIN_FLAG(0),
                 )
                 .context("Failed to resize swap chain")?;
         }
 
-        resources.recreate_resources(devices, width, height)?;
+        resources.recreate_resources(devices, width, height, output)?;
 
         unsafe {
             devices
@@ -1491,6 +1669,7 @@ impl DirectXRenderer {
         if resources.backdrop_blur_resources.is_none() {
             resources.backdrop_blur_resources = Some(create_backdrop_blur_resources(
                 &devices.device,
+                resources.format,
                 self.width,
                 self.height,
             )?);
@@ -1894,8 +2073,8 @@ impl DirectXResources {
             .context("Creating the composition swap chain")?
         };
 
-        let (render_target, render_target_view, viewport) =
-            create_resources(devices, &swap_chain, width, height)?;
+        let (render_target, render_target_view, viewport, hdr) =
+            create_resources(devices, &swap_chain, width, height, None)?;
         set_rasterizer_state(&devices.device, &devices.device_context)
             .context("Setting the rasterizer state")?;
 
@@ -1903,6 +2082,8 @@ impl DirectXResources {
             swap_chain,
             render_target: Some(render_target),
             render_target_view,
+            format: RENDER_TARGET_FORMAT,
+            hdr,
             backdrop_blur_resources: None,
             vn_layer_targets: Vec::new(),
             viewport,
@@ -1915,11 +2096,18 @@ impl DirectXResources {
         devices: &DirectXRendererDevices,
         width: u32,
         height: u32,
+        output: Option<HdrOutput>,
     ) -> Result<()> {
-        let (render_target, render_target_view, viewport) =
-            create_resources(devices, &self.swap_chain, width, height)?;
+        let (render_target, render_target_view, viewport, hdr) =
+            create_resources(devices, &self.swap_chain, width, height, output)?;
         self.render_target = Some(render_target);
         self.render_target_view = render_target_view;
+        self.format = if hdr.is_some() {
+            HDR_FORMAT
+        } else {
+            RENDER_TARGET_FORMAT
+        };
+        self.hdr = hdr;
         // The pyramid is sized from the swap chain; drop it and re-allocate
         // lazily on the next frame that actually paints a blur.
         self.backdrop_blur_resources = None;
@@ -2329,6 +2517,72 @@ impl DirectComposition {
             self.comp_device.Commit()?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+impl DirectXRenderer {
+    /// vue-native fork: the HDR swap chain's buffer, linear RGBA.
+    pub(crate) fn read_hdr_output(&self) -> Result<Vec<[f32; 4]>> {
+        let devices = self.devices.as_ref().context("devices missing")?;
+        let resources = self.resources.as_ref().context("resources missing")?;
+        let buffer: ID3D11Texture2D = unsafe { resources.swap_chain.GetBuffer(0) }?;
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { buffer.GetDesc(&mut desc) };
+        anyhow::ensure!(
+            desc.Format == HDR_FORMAT,
+            "the swap chain is not half float"
+        );
+        let staging_desc = D3D11_TEXTURE2D_DESC {
+            Usage: D3D11_USAGE_STAGING,
+            BindFlags: 0,
+            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+            MiscFlags: 0,
+            ..desc
+        };
+        let mut staging = None;
+        unsafe {
+            devices
+                .device
+                .CreateTexture2D(&staging_desc, None, Some(&mut staging))?
+        };
+        let staging = staging.context("creating staging texture")?;
+        let context = &devices.device_context;
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        let mut halves = Vec::with_capacity(desc.Width as usize * desc.Height as usize * 4);
+        unsafe {
+            context.CopyResource(&staging, &buffer);
+            context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
+            for row in 0..desc.Height as usize {
+                halves.extend_from_slice(slice::from_raw_parts(
+                    (mapped.pData as *const u8)
+                        .add(row * mapped.RowPitch as usize)
+                        .cast::<u16>(),
+                    desc.Width as usize * 4,
+                ));
+            }
+            context.Unmap(&staging, 0);
+        }
+        Ok(gpui::hdr_test_scene::halves_to_pixels(&halves))
+    }
+}
+
+impl HdrPipeline {
+    fn new(device: &ID3D11Device) -> Result<Self> {
+        let compile = |entry: &str, target: &str| {
+            shader_resources::compile_hlsl_source(HDR_OUTPUT_HLSL, "hdr_output.hlsl", entry, target)
+        };
+        let vertex = compile("hdr_output_vertex\0", "vs_4_0\0")?;
+        let fragment = compile("hdr_output_fragment\0", "ps_4_0\0")?;
+        // SAFETY: a blob's pointer covers its size for its life.
+        let bytes = |blob: &ID3DBlob| unsafe {
+            slice::from_raw_parts(blob.GetBufferPointer().cast::<u8>(), blob.GetBufferSize())
+        };
+        Ok(Self {
+            vertex: create_vertex_shader(device, bytes(&vertex))?,
+            fragment: create_fragment_shader(device, bytes(&fragment))?,
+            params: create_constant_buffer::<HdrParams>(device)?,
+        })
     }
 }
 
@@ -2746,20 +3000,23 @@ fn create_swap_chain(
     Ok(swap_chain)
 }
 
+/// The scene's target and its view, and with `output` the HDR swap-chain
+/// buffer the scene is linearised into.
 #[inline]
 fn create_resources(
     devices: &DirectXRendererDevices,
     swap_chain: &IDXGISwapChain1,
     width: u32,
     height: u32,
+    output: Option<HdrOutput>,
 ) -> Result<(
     ID3D11Texture2D,
     Option<ID3D11RenderTargetView>,
     D3D11_VIEWPORT,
+    Option<HdrResources>,
 )> {
-    let (render_target, render_target_view) =
-        create_render_target_and_its_view(swap_chain, &devices.device)
-            .context("Creating the render target")?;
+    let (buffer, buffer_view) = create_render_target_and_its_view(swap_chain, &devices.device)
+        .context("Creating the render target")?;
     let viewport = D3D11_VIEWPORT {
         TopLeftX: 0.0,
         TopLeftY: 0.0,
@@ -2768,7 +3025,17 @@ fn create_resources(
         MinDepth: 0.0,
         MaxDepth: 1.0,
     };
-    Ok((render_target, render_target_view, viewport))
+    let Some(output) = output else {
+        return Ok((buffer, buffer_view, viewport, None));
+    };
+    let scene = create_vn_layer_target(&devices.device, HDR_FORMAT, width, height)
+        .context("Creating the HDR scene target")?;
+    let hdr = HdrResources {
+        output: buffer_view,
+        scene: scene.srv,
+        sdr_white: output.sdr_white,
+    };
+    Ok((scene.texture, scene.rtv, viewport, Some(hdr)))
 }
 
 #[inline]
@@ -2784,11 +3051,13 @@ fn create_render_target_and_its_view(
 
 fn create_backdrop_blur_resources(
     device: &ID3D11Device,
+    format: DXGI_FORMAT,
     width: u32,
     height: u32,
 ) -> Result<BackdropBlurResources> {
-    let (snapshot_texture, snapshot_srv) = create_blur_snapshot_texture(device, width, height)?;
-    let textures = create_blur_textures(device, width, height)?;
+    let (snapshot_texture, snapshot_srv) =
+        create_vn_snapshot_texture(device, format, width, height)?;
+    let textures = create_blur_textures(device, format, width, height)?;
     Ok(BackdropBlurResources {
         snapshot_texture,
         snapshot_srv,
@@ -2796,9 +3065,11 @@ fn create_backdrop_blur_resources(
     })
 }
 
-#[inline]
-fn create_blur_snapshot_texture(
+/// vue-native fork: a snapshot's texture (a capture's, the backdrop's): the
+/// scene target's format, sampled only.
+fn create_vn_snapshot_texture(
     device: &ID3D11Device,
+    format: DXGI_FORMAT,
     width: u32,
     height: u32,
 ) -> Result<(ID3D11Texture2D, Option<ID3D11ShaderResourceView>)> {
@@ -2809,42 +3080,11 @@ fn create_blur_snapshot_texture(
             Height: height,
             MipLevels: 1,
             ArraySize: 1,
-            Format: RENDER_TARGET_FORMAT,
+            Format: format,
             SampleDesc: DXGI_SAMPLE_DESC {
                 Count: 1,
                 Quality: 0,
             },
-            Usage: D3D11_USAGE_DEFAULT,
-            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
-            CPUAccessFlags: 0,
-            MiscFlags: 0,
-        };
-        device.CreateTexture2D(&desc, None, Some(&mut output))?;
-        output.unwrap()
-    };
-
-    let mut shader_resource_view = None;
-    unsafe { device.CreateShaderResourceView(&texture, None, Some(&mut shader_resource_view))? };
-
-    Ok((texture, shader_resource_view))
-}
-
-/// vue-native fork: a snapshot's texture: the swap chain's format, sampled
-/// only.
-fn create_vn_snapshot_texture(
-    device: &ID3D11Device,
-    width: u32,
-    height: u32,
-) -> Result<(ID3D11Texture2D, Option<ID3D11ShaderResourceView>)> {
-    let texture = unsafe {
-        let mut output = None;
-        let desc = D3D11_TEXTURE2D_DESC {
-            Width: width,
-            Height: height,
-            MipLevels: 1,
-            ArraySize: 1,
-            Format: RENDER_TARGET_FORMAT,
-            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
             Usage: D3D11_USAGE_DEFAULT,
             BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
             CPUAccessFlags: 0,
@@ -2858,9 +3098,14 @@ fn create_vn_snapshot_texture(
     Ok((texture, srv))
 }
 
-/// vue-native fork: an isolated layer's target: the swap chain's format and
-/// size, a render target and a shader resource.
-fn create_vn_layer_target(device: &ID3D11Device, width: u32, height: u32) -> Result<VnLayerTarget> {
+/// vue-native fork: an isolated layer's target: the scene target's format
+/// and size, a render target and a shader resource.
+fn create_vn_layer_target(
+    device: &ID3D11Device,
+    format: DXGI_FORMAT,
+    width: u32,
+    height: u32,
+) -> Result<VnLayerTarget> {
     let texture = unsafe {
         let mut output = None;
         let desc = D3D11_TEXTURE2D_DESC {
@@ -2868,7 +3113,7 @@ fn create_vn_layer_target(device: &ID3D11Device, width: u32, height: u32) -> Res
             Height: height,
             MipLevels: 1,
             ArraySize: 1,
-            Format: RENDER_TARGET_FORMAT,
+            Format: format,
             SampleDesc: DXGI_SAMPLE_DESC {
                 Count: 1,
                 Quality: 0,
@@ -2923,6 +3168,7 @@ impl VnStructuredBuffer {
 
 fn create_blur_textures(
     device: &ID3D11Device,
+    format: DXGI_FORMAT,
     width: u32,
     height: u32,
 ) -> Result<Vec<BlurTexture>> {
@@ -2931,12 +3177,22 @@ fn create_blur_textures(
         let divisor = 2u32.saturating_pow((level + 1) as u32);
         let texture_width = (width / divisor).max(1);
         let texture_height = (height / divisor).max(1);
-        textures.push(create_blur_texture(device, texture_width, texture_height)?);
+        textures.push(create_blur_texture(
+            device,
+            format,
+            texture_width,
+            texture_height,
+        )?);
     }
     Ok(textures)
 }
 
-fn create_blur_texture(device: &ID3D11Device, width: u32, height: u32) -> Result<BlurTexture> {
+fn create_blur_texture(
+    device: &ID3D11Device,
+    format: DXGI_FORMAT,
+    width: u32,
+    height: u32,
+) -> Result<BlurTexture> {
     let texture = unsafe {
         let mut output = None;
         let desc = D3D11_TEXTURE2D_DESC {
@@ -2944,7 +3200,7 @@ fn create_blur_texture(device: &ID3D11Device, width: u32, height: u32) -> Result
             Height: height,
             MipLevels: 1,
             ArraySize: 1,
-            Format: RENDER_TARGET_FORMAT,
+            Format: format,
             SampleDesc: DXGI_SAMPLE_DESC {
                 Count: 1,
                 Quality: 0,
@@ -4064,6 +4320,8 @@ pub(crate) mod effect_layer_tests {
                 vn_histories: VnEffectHistories::default(),
                 vn_effects: VnEffectFrame::default(),
                 vn_snapshots: HashMap::default(),
+                hdr_wanted: None,
+                hdr_pipeline: None,
             })
         }
 
@@ -4206,6 +4464,26 @@ pub(crate) mod effect_layer_tests {
                 renderer.vn_histories.is_empty(),
                 "a frame without it frees it"
             );
+            Ok(())
+        }
+
+        #[::core::prelude::v1::test]
+        #[ignore = "requires a D3D11 adapter; run explicitly for renderer qualification"]
+        fn d3d11_hdr_output_keeps_sdr_at_sdr_white_and_passes_hdr_tiles_to_their_headroom()
+        -> Result<()> {
+            use gpui::hdr_test_scene::{self as hdr_tests, HEIGHT, SDR_WHITE, WIDTH};
+            let mut renderer = offscreen(WIDTH, HEIGHT)?;
+            let scene = hdr_tests::scene(&*renderer.atlas)?;
+            let opaque = WindowBackgroundAppearance::Opaque;
+            let sdr = renderer.render_to_image(&scene, opaque)?;
+            assert!(renderer.set_hdr_output(Some(HdrOutput {
+                sdr_white: SDR_WHITE
+            })));
+            let encoded = renderer.render_to_image(&scene, opaque)?;
+            hdr_tests::check(&sdr, &encoded, &renderer.read_hdr_output()?)?;
+            renderer.set_hdr_output(None);
+            let again = renderer.render_to_image(&scene, opaque)?;
+            assert!(again == sdr, "back on SDR, every pixel is as before");
             Ok(())
         }
 

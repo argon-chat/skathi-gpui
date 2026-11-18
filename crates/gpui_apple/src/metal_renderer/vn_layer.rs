@@ -15,9 +15,9 @@ use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::CVMetalTexture;
 use objc2_metal::{
-    MTLBlendFactor, MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommandEncoder,
-    MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPipelineState,
-    MTLSize, MTLTexture, MTLTextureUsage,
+    MTLBlendFactor, MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommandEncoder, MTLOrigin,
+    MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPipelineState, MTLSize, MTLTexture,
+    MTLTextureUsage,
 };
 use std::{collections::HashMap, mem, ptr};
 
@@ -237,6 +237,7 @@ impl MetalRenderer {
                     width,
                     height,
                     MTLTextureUsage::ShaderRead,
+                    self.target_format,
                 )?;
                 self.vn_layers.snapshots.insert(id, Snapshot { texture, idle: 0 });
             }
@@ -245,7 +246,7 @@ impl MetalRenderer {
             let blit = command_buffer
                 .blitCommandEncoder()
                 .context("creating snapshot blit encoder")?;
-            // SAFETY: both are retained BGRA8Unorm 2D textures; the region lies
+            // SAFETY: both are retained 2D textures in the frame's format; the region lies
             // within the frame-sized target and is the snapshot's size.
             unsafe {
                 blit.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin(
@@ -295,7 +296,7 @@ impl MetalRenderer {
         flags: u32,
     ) -> Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>> {
         let plus_lighter = flags & vn_layer_flags::PLUS_LIGHTER != 0;
-        let (device, library) = (&self.device, &self.library);
+        let (device, library, format) = (&self.device, &self.library, self.target_format);
         let slot = if plus_lighter {
             &mut self.vn_layers.plus_lighter
         } else {
@@ -309,7 +310,7 @@ impl MetalRenderer {
                     "vn_layers_plus_lighter",
                     "vn_layer_vertex",
                     "vn_layer_fragment",
-                    MTLPixelFormat::BGRA8Unorm,
+                    format,
                     MTLBlendFactor::One,
                 )
             } else {
@@ -319,7 +320,7 @@ impl MetalRenderer {
                     "vn_layers",
                     "vn_layer_vertex",
                     "vn_layer_fragment",
-                    MTLPixelFormat::BGRA8Unorm,
+                    format,
                 )
             };
             *slot = match built {
@@ -363,6 +364,7 @@ impl MetalRenderer {
                 width,
                 height,
                 MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead,
+                self.target_format,
             )?);
         }
         state.depth_used = state.depth_used.max(depth + 1);

@@ -29,7 +29,48 @@ impl MetalAtlas {
             supports_shared_storage,
             monochrome_textures: AtlasTextureList::default(),
             polychrome_textures: AtlasTextureList::default(),
+            polychrome_hdr_textures: AtlasTextureList::default(),
         })))
+    }
+
+    fn write_bytes_as(
+        &self,
+        key: &AtlasKey,
+        size: Size<DevicePixels>,
+        kind: AtlasTextureKind,
+        bytes: &[u8],
+    ) -> Result<Option<AtlasTile>> {
+        let Some(layout) = upload_layout(kind, size, bytes.len()) else {
+            return Ok(None);
+        };
+        let mut state = self.0.lock();
+        let existing = state.tile(key);
+        let tile = match existing {
+            Some(tile) if tile.bounds.size == size && tile.texture_id.kind == kind => tile,
+            _ => {
+                if existing.is_some() {
+                    state.remove(key);
+                }
+                let tile = state.backend.allocate(size, kind)?;
+                state.insert_tile(key.clone(), tile);
+                tile
+            }
+        };
+        let Some(texture) = state.backend.texture(tile.texture_id) else {
+            return Ok(None);
+        };
+        // Callers write before encoding the next scene. Uploads use the SAME
+        // queue as that renderer, ordering prior reads -> blit -> next draw.
+        // replace_region would instead race CPU writes against in-flight GPU
+        // reads of this live tile on shared/managed atlas pages.
+        texture.upload_queued(
+            &state.backend.device,
+            &state.backend.command_queue,
+            tile.bounds,
+            bytes,
+            layout,
+        )?;
+        Ok(Some(tile))
     }
 
     /// Returns the GPU texture backing `id`, or `None` once every tile in it
@@ -51,6 +92,7 @@ struct MetalAtlasTextures {
     supports_shared_storage: bool,
     monochrome_textures: AtlasTextureList<MetalAtlasTexture>,
     polychrome_textures: AtlasTextureList<MetalAtlasTexture>,
+    polychrome_hdr_textures: AtlasTextureList<MetalAtlasTexture>,
 }
 
 impl PlatformAtlas for MetalAtlas {
@@ -76,37 +118,19 @@ impl PlatformAtlas for MetalAtlas {
         size: Size<DevicePixels>,
         bytes: &[u8],
     ) -> Result<Option<AtlasTile>> {
-        let Some(layout) = upload_layout(key.texture_kind(), size, bytes.len()) else {
+        self.write_bytes_as(key, size, key.texture_kind(), bytes)
+    }
+
+    fn write_hdr_bytes(
+        &self,
+        key: &AtlasKey,
+        size: Size<DevicePixels>,
+        bytes: &[u8],
+    ) -> Result<Option<AtlasTile>> {
+        if key.texture_kind() != AtlasTextureKind::Polychrome {
             return Ok(None);
-        };
-        let mut state = self.0.lock();
-        let existing = state.tile(key);
-        let tile = match existing {
-            Some(tile) if tile.bounds.size == size => tile,
-            _ => {
-                if existing.is_some() {
-                    state.remove(key);
-                }
-                let tile = state.backend.allocate(size, key.texture_kind())?;
-                state.insert_tile(key.clone(), tile);
-                tile
-            }
-        };
-        let Some(texture) = state.backend.texture(tile.texture_id) else {
-            return Ok(None);
-        };
-        // Callers write before encoding the next scene. Uploads use the SAME
-        // queue as that renderer, ordering prior reads -> blit -> next draw.
-        // replace_region would instead race CPU writes against in-flight GPU
-        // reads of this live tile on shared/managed atlas pages.
-        texture.upload_queued(
-            &state.backend.device,
-            &state.backend.command_queue,
-            tile.bounds,
-            bytes,
-            layout,
-        )?;
-        Ok(Some(tile))
+        }
+        self.write_bytes_as(key, size, AtlasTextureKind::PolychromeHdr, bytes)
     }
 
     fn upload_from_metal(
@@ -128,14 +152,15 @@ impl PlatformAtlas for MetalAtlas {
         };
         let mut state = self.0.lock();
         let device: *const ProtocolObject<dyn MTLDevice> = &*state.backend.device;
-        let source = match source.pixelFormat() {
-            MTLPixelFormat::BGRA8Unorm => source,
+        let (source, kind) = match source.pixelFormat() {
+            MTLPixelFormat::BGRA8Unorm => (source, AtlasTextureKind::Polychrome),
             MTLPixelFormat::BGRA8Unorm_sRGB => {
                 match source.newTextureViewWithPixelFormat(MTLPixelFormat::BGRA8Unorm) {
-                    Some(view) => view,
+                    Some(view) => (view, AtlasTextureKind::Polychrome),
                     None => return Ok(None),
                 }
             }
+            MTLPixelFormat::RGBA16Float => (source, AtlasTextureKind::PolychromeHdr),
             _ => return Ok(None),
         };
         if !std::ptr::eq(Retained::as_ptr(&source.device()), device)
@@ -149,12 +174,12 @@ impl PlatformAtlas for MetalAtlas {
         }
         let existing = state.tile(key);
         let tile = match existing {
-            Some(tile) if tile.bounds.size == size => tile,
+            Some(tile) if tile.bounds.size == size && tile.texture_id.kind == kind => tile,
             _ => {
                 if existing.is_some() {
                     state.remove(key);
                 }
-                let tile = state.backend.allocate(size, key.texture_kind())?;
+                let tile = state.backend.allocate(size, kind)?;
                 state.insert_tile(key.clone(), tile);
                 tile
             }
@@ -184,7 +209,7 @@ impl PlatformAtlas for MetalAtlas {
         let encoder = command
             .blitCommandEncoder()
             .context("creating atlas copy blit encoder")?;
-        // SAFETY: both textures are BGRA8Unorm on this device, the region lies inside the source,
+        // SAFETY: both textures have the tile's pixel format on this device, the region lies inside the source,
         // and `tile.bounds` is a tile allocated inside the target.
         unsafe {
             encoder.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin(
@@ -236,6 +261,10 @@ impl PlatformAtlas for MetalAtlas {
                 AtlasTextureKind::Polychrome,
                 &state.backend.polychrome_textures,
             ),
+            (
+                AtlasTextureKind::PolychromeHdr,
+                &state.backend.polychrome_hdr_textures,
+            ),
         ] {
             let out = &mut stats.kinds[kind as usize];
             for texture in list.textures.iter().flatten() {
@@ -273,6 +302,7 @@ impl AtlasBackend for MetalAtlasTextures {
         let textures = match id.kind {
             AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
             AtlasTextureKind::Polychrome => &mut self.polychrome_textures,
+            AtlasTextureKind::PolychromeHdr => &mut self.polychrome_hdr_textures,
             AtlasTextureKind::Subpixel => unreachable!(),
         };
 
@@ -306,6 +336,7 @@ impl MetalAtlasTextures {
             let textures = match texture_kind {
                 AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
                 AtlasTextureKind::Polychrome => &mut self.polychrome_textures,
+                AtlasTextureKind::PolychromeHdr => &mut self.polychrome_hdr_textures,
                 AtlasTextureKind::Subpixel => unreachable!(),
             };
 
@@ -354,6 +385,10 @@ impl MetalAtlasTextures {
                 pixel_format = MTLPixelFormat::BGRA8Unorm;
                 usage = MTLTextureUsage::ShaderRead;
             }
+            AtlasTextureKind::PolychromeHdr => {
+                pixel_format = MTLPixelFormat::RGBA16Float;
+                usage = MTLTextureUsage::ShaderRead;
+            }
             AtlasTextureKind::Subpixel => unreachable!(),
         }
         texture_descriptor.setPixelFormat(pixel_format);
@@ -373,6 +408,7 @@ impl MetalAtlasTextures {
         let texture_list = match kind {
             AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
             AtlasTextureKind::Polychrome => &mut self.polychrome_textures,
+            AtlasTextureKind::PolychromeHdr => &mut self.polychrome_hdr_textures,
             AtlasTextureKind::Subpixel => unreachable!(),
         };
 
@@ -399,6 +435,7 @@ impl MetalAtlasTextures {
         let textures = match id.kind {
             AtlasTextureKind::Monochrome => &self.monochrome_textures,
             AtlasTextureKind::Polychrome => &self.polychrome_textures,
+            AtlasTextureKind::PolychromeHdr => &self.polychrome_hdr_textures,
             AtlasTextureKind::Subpixel => unreachable!(),
         };
         textures.textures.get(id.index as usize)?.as_ref()
@@ -536,6 +573,7 @@ impl MetalAtlasTexture {
         match self.id.kind {
             AtlasTextureKind::Monochrome => 1,
             AtlasTextureKind::Polychrome => 4,
+            AtlasTextureKind::PolychromeHdr => 8,
             AtlasTextureKind::Subpixel => unreachable!(),
         }
     }
@@ -569,6 +607,7 @@ fn upload_layout(
     let pixel_bytes = match kind {
         AtlasTextureKind::Monochrome => 1,
         AtlasTextureKind::Polychrome => 4,
+        AtlasTextureKind::PolychromeHdr => 8,
         AtlasTextureKind::Subpixel => return None,
     };
     let row_bytes = (size.width.0 as usize).checked_mul(pixel_bytes)?;
@@ -604,6 +643,7 @@ impl<'a> AtlasUpload<'a> {
         let bytes_per_pixel = match kind {
             AtlasTextureKind::Monochrome => 1,
             AtlasTextureKind::Polychrome => 4,
+            AtlasTextureKind::PolychromeHdr => 8,
             AtlasTextureKind::Subpixel => unreachable!(),
         };
         let bytes_per_row = (size.width.0 as usize)

@@ -42,6 +42,7 @@ struct Textures {
     monochrome: AtlasTextureList<Page>,
     polychrome: AtlasTextureList<Page>,
     subpixel: AtlasTextureList<Page>,
+    polychrome_hdr: AtlasTextureList<Page>,
 }
 
 struct Page {
@@ -87,8 +88,10 @@ impl Atlas {
             return Ok(None);
         }
         let descriptor = unsafe { resource.GetDesc() };
+        let Some(kind) = format_kind(descriptor.Format) else {
+            return Ok(None);
+        };
         if descriptor.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D
-            || descriptor.Format != DXGI_FORMAT_B8G8R8A8_UNORM
             || descriptor.SampleDesc.Count != 1
             || descriptor.Width < size.width.0 as u64
             || descriptor.Height < size.height.0 as u32
@@ -110,9 +113,7 @@ impl Atlas {
         // including a pending cached tile that occupies the same atlas page.
         state.backend.flush_uploads()?;
         let existing = state.tile(key);
-        let (tile, fresh) = state
-            .backend
-            .tile_for_write(existing, size, key.texture_kind())?;
+        let (tile, fresh) = state.backend.tile_for_write(existing, size, kind)?;
         let page = state
             .backend
             .texture(tile.texture_id)
@@ -199,7 +200,7 @@ impl PlatformAtlas for Atlas {
         }
         if size.width.0 <= 0
             || size.height.0 <= 0
-            || descriptor.Format != DXGI_FORMAT_B8G8R8A8_UNORM
+            || format_kind(descriptor.Format).is_none()
             || descriptor.SampleDesc.Count != 1
             || descriptor.Width < size.width.0 as u32
             || descriptor.Height < size.height.0 as u32
@@ -261,25 +262,16 @@ impl PlatformAtlas for Atlas {
         size: Size<DevicePixels>,
         bytes: &[u8],
     ) -> Result<Option<AtlasTile>> {
-        if size.width.0 <= 0 || size.height.0 <= 0 {
-            return Ok(None);
-        }
-        let kind = key.texture_kind();
-        validate_bytes(kind, size, bytes)?;
-        let mut state = self.0.lock();
-        let existing = state.tile(key);
-        let (tile, fresh) = state.backend.tile_for_write(existing, size, kind)?;
-        if let Err(error) = state.backend.upload(tile, bytes) {
-            if fresh {
-                state.backend.remove(tile);
-            }
-            return Err(error);
-        }
-        if fresh {
-            state.remove(key);
-            state.insert_tile(key.clone(), tile);
-        }
-        Ok(Some(tile))
+        self.write_bytes_as(key, size, key.texture_kind(), bytes)
+    }
+
+    fn write_hdr_bytes(
+        &self,
+        key: &AtlasKey,
+        size: Size<DevicePixels>,
+        bytes: &[u8],
+    ) -> Result<Option<AtlasTile>> {
+        self.write_bytes_as(key, size, AtlasTextureKind::PolychromeHdr, bytes)
     }
 
     #[cfg(feature = "test-support")]
@@ -295,6 +287,7 @@ impl PlatformAtlas for Atlas {
             AtlasTextureKind::Monochrome,
             AtlasTextureKind::Polychrome,
             AtlasTextureKind::Subpixel,
+            AtlasTextureKind::PolychromeHdr,
         ] {
             let output = &mut stats.kinds[kind as usize];
             for page in state.backend.list(kind).textures.iter().flatten() {
@@ -306,6 +299,35 @@ impl PlatformAtlas for Atlas {
             }
         }
         Some(stats)
+    }
+}
+
+impl Atlas {
+    fn write_bytes_as(
+        &self,
+        key: &AtlasKey,
+        size: Size<DevicePixels>,
+        kind: AtlasTextureKind,
+        bytes: &[u8],
+    ) -> Result<Option<AtlasTile>> {
+        if size.width.0 <= 0 || size.height.0 <= 0 {
+            return Ok(None);
+        }
+        validate_bytes(kind, size, bytes)?;
+        let mut state = self.0.lock();
+        let existing = state.tile(key);
+        let (tile, fresh) = state.backend.tile_for_write(existing, size, kind)?;
+        if let Err(error) = state.backend.upload(tile, bytes) {
+            if fresh {
+                state.backend.remove(tile);
+            }
+            return Err(error);
+        }
+        if fresh {
+            state.remove(key);
+            state.insert_tile(key.clone(), tile);
+        }
+        Ok(Some(tile))
     }
 }
 
@@ -355,6 +377,7 @@ impl Textures {
             monochrome: Default::default(),
             polychrome: Default::default(),
             subpixel: Default::default(),
+            polychrome_hdr: Default::default(),
         }
     }
 
@@ -363,6 +386,7 @@ impl Textures {
             AtlasTextureKind::Monochrome => &self.monochrome,
             AtlasTextureKind::Polychrome => &self.polychrome,
             AtlasTextureKind::Subpixel => &self.subpixel,
+            AtlasTextureKind::PolychromeHdr => &self.polychrome_hdr,
         }
     }
 
@@ -371,6 +395,7 @@ impl Textures {
             AtlasTextureKind::Monochrome => &mut self.monochrome,
             AtlasTextureKind::Polychrome => &mut self.polychrome,
             AtlasTextureKind::Subpixel => &mut self.subpixel,
+            AtlasTextureKind::PolychromeHdr => &mut self.polychrome_hdr,
         }
     }
 
@@ -384,7 +409,9 @@ impl Textures {
         size: Size<DevicePixels>,
         kind: AtlasTextureKind,
     ) -> Result<(AtlasTile, bool)> {
-        if let Some(tile) = existing.filter(|tile| tile.bounds.size == size) {
+        if let Some(tile) =
+            existing.filter(|tile| tile.bounds.size == size && tile.texture_id.kind == kind)
+        {
             return Ok((tile, false));
         }
         Ok((self.allocate(size, kind)?, true))
@@ -509,6 +536,16 @@ fn pixel_layout(kind: AtlasTextureKind) -> (DXGI_FORMAT, u32) {
         AtlasTextureKind::Monochrome => (DXGI_FORMAT_R8_UNORM, 1),
         AtlasTextureKind::Polychrome => (DXGI_FORMAT_B8G8R8A8_UNORM, 4),
         AtlasTextureKind::Subpixel => (DXGI_FORMAT_R8G8B8A8_UNORM, 4),
+        AtlasTextureKind::PolychromeHdr => (DXGI_FORMAT_R16G16B16A16_FLOAT, 8),
+    }
+}
+
+/// The atlas kind a texture of `format` copies into.
+fn format_kind(format: DXGI_FORMAT) -> Option<AtlasTextureKind> {
+    match format {
+        DXGI_FORMAT_B8G8R8A8_UNORM => Some(AtlasTextureKind::Polychrome),
+        DXGI_FORMAT_R16G16B16A16_FLOAT => Some(AtlasTextureKind::PolychromeHdr),
+        _ => None,
     }
 }
 

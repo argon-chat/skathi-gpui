@@ -1909,6 +1909,13 @@ fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
     let distance = shaped_quad_sdf(input.local_position, sprite.bounds, sprite.corner_radii, sprite.corner_shapes);
 
     var color = sample;
+    // vue-native fork: an HDR tile (`pad` non-zero) holds linear values; they
+    // clamp to the sprite's headroom, `pad`'s float bits, and are encoded as
+    // the target blends.
+    if (sprite.pad != 0u) {
+        let headroom = vec3<f32>(bitcast<f32>(sprite.pad));
+        color = vec4<f32>(linear_to_srgb(clamp(color.rgb, vec3<f32>(0.0), headroom)), saturate(color.a));
+    }
     // vue-native fork: the tint takes the pixels by its alpha, keeping theirs
     // (canvas `source-atop`, in straight alpha).
     if (sprite.tint.a > 0.0) {

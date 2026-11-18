@@ -6,13 +6,15 @@ use crate::metal_atlas::MetalAtlas;
 use anyhow::{Context as _, Result};
 use block2::RcBlock;
 use gpui::{
-    AtlasTextureId, Bounds, ContentMask, DevicePixels, EffectQuad, PaintSurface, PrimitiveBatch,
-    ScaledPixels, Scene, Size, VnBatch, point, size,
+    AtlasTextureId, Bounds, ContentMask, DevicePixels, EffectQuad, HdrOutput, PaintSurface,
+    PrimitiveBatch, ScaledPixels, Scene, Size, VnBatch, point, size,
 };
 use image::RgbaImage;
 use objc2::{Message, rc::Retained, runtime::ProtocolObject};
 use objc2_core_foundation::{CFRetained, CGSize};
-use objc2_core_graphics::{CGColorSpace, kCGColorSpaceDisplayP3};
+use objc2_core_graphics::{
+    CGColorSpace, kCGColorSpaceDisplayP3, kCGColorSpaceExtendedDisplayP3, kCGColorSpaceExtendedSRGB,
+};
 use objc2_core_video::{
     CVMetalTexture, CVMetalTextureCache, CVMetalTextureGetTexture, CVPixelBufferGetHeight,
     CVPixelBufferGetHeightOfPlane, CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth,
@@ -157,6 +159,9 @@ pub struct MetalRenderer {
     headless_render_target: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
     /// vue-native: presents made while present feedback was wanted.
     presents: u64,
+    /// vue-native: `BGRA8Unorm`, or `RGBA16Float` while the layer shows EDR.
+    target_format: MTLPixelFormat,
+    use_display_p3: bool,
 }
 
 impl MetalRenderer {
@@ -169,7 +174,10 @@ impl MetalRenderer {
         let device = Self::create_device()?;
         let layer = CAMetalLayer::new();
         Self::configure_layer(&layer, &device, transparent, use_display_p3);
-        Self::new_internal(device, Some(layer), !transparent, instance_buffer_pool)
+        let mut renderer =
+            Self::new_internal(device, Some(layer), !transparent, instance_buffer_pool)?;
+        renderer.use_display_p3 = use_display_p3;
+        Ok(renderer)
     }
 
     /// Creates a renderer for a CAMetalLayer owned by a platform view, such as
@@ -323,62 +331,15 @@ impl MetalRenderer {
         }
         .context("allocating unit vertex buffer")?;
 
-        let path_tiles_pipeline_state = build_pipeline_state(
-            &device,
-            &library,
-            "path_tiles",
-            "path_tile_vertex",
-            "path_tile_fragment",
-            MTLPixelFormat::BGRA8Unorm,
-        )?;
-        let shadows_pipeline_state = build_pipeline_state(
-            &device,
-            &library,
-            "shadows",
-            "shadow_vertex",
-            "shadow_fragment",
-            MTLPixelFormat::BGRA8Unorm,
-        )?;
-        let quads_pipeline_state = build_pipeline_state(
-            &device,
-            &library,
-            "quads",
-            "quad_vertex",
-            "quad_fragment",
-            MTLPixelFormat::BGRA8Unorm,
-        )?;
-        let underlines_pipeline_state = build_pipeline_state(
-            &device,
-            &library,
-            "underlines",
-            "underline_vertex",
-            "underline_fragment",
-            MTLPixelFormat::BGRA8Unorm,
-        )?;
-        let monochrome_sprites_pipeline_state = build_pipeline_state(
-            &device,
-            &library,
-            "monochrome_sprites",
-            "monochrome_sprite_vertex",
-            "monochrome_sprite_fragment",
-            MTLPixelFormat::BGRA8Unorm,
-        )?;
-        let polychrome_sprites_pipeline_state = build_pipeline_state(
-            &device,
-            &library,
-            "polychrome_sprites",
-            "polychrome_sprite_vertex",
-            "polychrome_sprite_fragment",
-            MTLPixelFormat::BGRA8Unorm,
-        )?;
-        let surfaces_pipeline_state = build_pipeline_state(
-            &device,
-            &library,
-            "surfaces",
-            "surface_vertex",
-            "surface_fragment",
-            MTLPixelFormat::BGRA8Unorm,
-        )?;
+        let FramePipelines {
+            path_tiles_pipeline_state,
+            shadows_pipeline_state,
+            quads_pipeline_state,
+            underlines_pipeline_state,
+            monochrome_sprites_pipeline_state,
+            polychrome_sprites_pipeline_state,
+            surfaces_pipeline_state,
+        } = FramePipelines::new(&device, &library, MTLPixelFormat::BGRA8Unorm)?;
 
         let command_queue = device.newCommandQueue().context("creating command queue")?;
         if layer.is_some() {
@@ -446,7 +407,67 @@ impl MetalRenderer {
             #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
             headless_render_target: None,
             presents: 0,
+            target_format: MTLPixelFormat::BGRA8Unorm,
+            use_display_p3: false,
         })
+    }
+
+    /// vue-native: draws in half float into an extended-range layer while
+    /// `output` is set. The scene stays sRGB-encoded, so SDR content keeps its
+    /// values and 1.0 stays SDR white; the layer takes the colour space of
+    /// `display` (a `CGDirectDisplayID`), extended, unless the window asked
+    /// for Display P3. `HdrOutput::sdr_white` does not apply: EDR is relative
+    /// to SDR white.
+    pub fn set_hdr_output(&mut self, output: Option<HdrOutput>, display: Option<u32>) -> bool {
+        let format = if output.is_some() {
+            MTLPixelFormat::RGBA16Float
+        } else {
+            MTLPixelFormat::BGRA8Unorm
+        };
+        if format != self.target_format {
+            match FramePipelines::new(&self.device, &self.library, format) {
+                Ok(pipelines) => self.install_pipelines(pipelines),
+                Err(error) => {
+                    log::error!("HDR output is unavailable: {error:#}");
+                    return false;
+                }
+            }
+            self.target_format = format;
+            self.backdrop = backdrop::BackdropState::default();
+            self.vn_layers = vn_layer::VnLayerState::default();
+            #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
+            {
+                self.headless_render_target = None;
+            }
+        }
+        let Some(layer) = &self.layer else {
+            return true;
+        };
+        let named = |name: &objc2_core_foundation::CFString| CGColorSpace::with_name(Some(name));
+        // SAFETY: The constants are extern, from Core Graphics.
+        let color_space = match (output.is_some(), self.use_display_p3) {
+            (true, true) => named(unsafe { kCGColorSpaceExtendedDisplayP3 }),
+            (true, false) => display
+                .and_then(display_color_space)
+                .and_then(|space| space.extended())
+                .or_else(|| named(unsafe { kCGColorSpaceExtendedSRGB })),
+            (false, true) => named(unsafe { kCGColorSpaceDisplayP3 }),
+            (false, false) => None,
+        };
+        layer.setPixelFormat(format);
+        layer.setColorspace(color_space.as_deref());
+        layer.setWantsExtendedDynamicRangeContent(output.is_some());
+        true
+    }
+
+    fn install_pipelines(&mut self, pipelines: FramePipelines) {
+        self.path_tiles_pipeline_state = pipelines.path_tiles_pipeline_state;
+        self.shadows_pipeline_state = pipelines.shadows_pipeline_state;
+        self.quads_pipeline_state = pipelines.quads_pipeline_state;
+        self.underlines_pipeline_state = pipelines.underlines_pipeline_state;
+        self.monochrome_sprites_pipeline_state = pipelines.monochrome_sprites_pipeline_state;
+        self.polychrome_sprites_pipeline_state = pipelines.polychrome_sprites_pipeline_state;
+        self.surfaces_pipeline_state = pipelines.surfaces_pipeline_state;
     }
 
     pub fn layer(&self) -> Option<&CAMetalLayer> {
@@ -728,6 +749,15 @@ impl MetalRenderer {
     /// back, without presenting anything.
     // vue-native: ungated, `render_to_image` calls it.
     fn render_offscreen(&mut self, scene: &Scene, size: Size<DevicePixels>) -> Result<RgbaImage> {
+        let texture = self.render_offscreen_texture(scene, size)?;
+        read_texture_to_image(&texture)
+    }
+
+    fn render_offscreen_texture(
+        &mut self,
+        scene: &Scene,
+        size: Size<DevicePixels>,
+    ) -> Result<Retained<ProtocolObject<dyn MTLTexture>>> {
         if size.width.0 <= 0 || size.height.0 <= 0 {
             anyhow::bail!("Invalid size for render_offscreen: {:?}", size);
         }
@@ -738,7 +768,7 @@ impl MetalRenderer {
             texture_descriptor.setWidth(size.width.0 as usize);
             texture_descriptor.setHeight(size.height.0 as usize);
         }
-        texture_descriptor.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+        texture_descriptor.setPixelFormat(self.target_format);
         texture_descriptor.setUsage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
         // Like the atlas, only Apple GPUs can create shared textures on macOS;
         // Intel Macs cannot, even with unified memory. iOS has no managed storage.
@@ -768,8 +798,7 @@ impl MetalRenderer {
 
         command_buffer.commit();
         command_buffer.waitUntilCompleted();
-
-        read_texture_to_image(&target_texture)
+        Ok(target_texture)
     }
 
     /// Renders a scene to a reused offscreen texture without reading pixels
@@ -796,7 +825,7 @@ impl MetalRenderer {
                     texture_descriptor.setWidth(size.width.0 as usize);
                     texture_descriptor.setHeight(size.height.0 as usize);
                 }
-                texture_descriptor.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+                texture_descriptor.setPixelFormat(self.target_format);
                 texture_descriptor
                     .setUsage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
                 texture_descriptor.setStorageMode(MTLStorageMode::Private);
@@ -1481,6 +1510,14 @@ fn new_command_encoder_for_texture(
 fn read_texture_to_image(texture: &ProtocolObject<dyn MTLTexture>) -> Result<RgbaImage> {
     let width = texture.width() as u32;
     let height = texture.height() as u32;
+    if texture.pixelFormat() == MTLPixelFormat::RGBA16Float {
+        let pixels = read_texture_halves(texture)
+            .into_iter()
+            .map(|half| (gpui::half_to_f32(half).clamp(0.0, 1.0) * 255.0).round() as u8)
+            .collect();
+        return RgbaImage::from_raw(width, height, pixels)
+            .context("creating RGBA image from pixel data");
+    }
     let bytes_per_row = width as usize * 4;
     let mut pixels = vec![0u8; height as usize * bytes_per_row];
 
@@ -1507,6 +1544,133 @@ fn read_texture_to_image(texture: &ProtocolObject<dyn MTLTexture>) -> Result<Rgb
     }
 
     RgbaImage::from_raw(width, height, pixels).context("creating RGBA image from pixel data")
+}
+
+/// The colour space a display shows unmanaged content in.
+#[cfg(target_os = "macos")]
+fn display_color_space(display: u32) -> Option<CFRetained<CGColorSpace>> {
+    unsafe extern "C" {
+        fn CGDisplayCopyColorSpace(display: u32) -> *mut CGColorSpace;
+    }
+    // SAFETY: Any display ID is accepted; the result is a +1 reference or null.
+    let space = ptr::NonNull::new(unsafe { CGDisplayCopyColorSpace(display) })?;
+    // SAFETY: The copy transfers ownership of this non-null colour space.
+    Some(unsafe { CFRetained::from_raw(space) })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn display_color_space(_display: u32) -> Option<CFRetained<CGColorSpace>> {
+    None
+}
+
+/// An `RGBA16Float` texture's channels, as half-float bits.
+fn read_texture_halves(texture: &ProtocolObject<dyn MTLTexture>) -> Vec<u16> {
+    let (width, height) = (texture.width(), texture.height());
+    let mut halves = vec![0u16; width * height * 4];
+    let region = MTLRegion {
+        origin: MTLOrigin { x: 0, y: 0, z: 0 },
+        size: MTLSize {
+            width,
+            height,
+            depth: 1,
+        },
+    };
+    // SAFETY: `halves` holds every row of the region at 8 bytes a pixel, the
+    // format's size, and stays live for the copy.
+    unsafe {
+        texture.getBytes_bytesPerRow_fromRegion_mipmapLevel(
+            ptr::NonNull::from(halves.as_mut_slice()).cast(),
+            width * 8,
+            region,
+            0,
+        );
+    }
+    halves
+}
+
+/// The frame's own pipelines, built for the target's pixel format.
+struct FramePipelines {
+    path_tiles_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    shadows_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    quads_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    underlines_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    monochrome_sprites_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    polychrome_sprites_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    surfaces_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+}
+
+impl FramePipelines {
+    fn new(
+        device: &ProtocolObject<dyn MTLDevice>,
+        library: &ProtocolObject<dyn MTLLibrary>,
+        format: MTLPixelFormat,
+    ) -> Result<Self> {
+        let path_tiles_pipeline_state = build_pipeline_state(
+            device,
+            library,
+            "path_tiles",
+            "path_tile_vertex",
+            "path_tile_fragment",
+            format,
+        )?;
+        let shadows_pipeline_state = build_pipeline_state(
+            device,
+            library,
+            "shadows",
+            "shadow_vertex",
+            "shadow_fragment",
+            format,
+        )?;
+        let quads_pipeline_state = build_pipeline_state(
+            device,
+            library,
+            "quads",
+            "quad_vertex",
+            "quad_fragment",
+            format,
+        )?;
+        let underlines_pipeline_state = build_pipeline_state(
+            device,
+            library,
+            "underlines",
+            "underline_vertex",
+            "underline_fragment",
+            format,
+        )?;
+        let monochrome_sprites_pipeline_state = build_pipeline_state(
+            device,
+            library,
+            "monochrome_sprites",
+            "monochrome_sprite_vertex",
+            "monochrome_sprite_fragment",
+            format,
+        )?;
+        let polychrome_sprites_pipeline_state = build_pipeline_state(
+            device,
+            library,
+            "polychrome_sprites",
+            "polychrome_sprite_vertex",
+            "polychrome_sprite_fragment",
+            format,
+        )?;
+        let surfaces_pipeline_state = build_pipeline_state(
+            device,
+            library,
+            "surfaces",
+            "surface_vertex",
+            "surface_fragment",
+            format,
+        )?;
+        Ok(Self {
+            path_tiles_pipeline_state,
+            shadows_pipeline_state,
+            quads_pipeline_state,
+            underlines_pipeline_state,
+            monochrome_sprites_pipeline_state,
+            polychrome_sprites_pipeline_state,
+            surfaces_pipeline_state,
+        })
+    }
 }
 
 fn build_pipeline_state(
@@ -1963,6 +2127,85 @@ mod tests {
         CVPixelBufferUnlockBaseAddress, kCVPixelBufferIOSurfacePropertiesKey,
     };
     use objc2_metal::MTLCommandBufferStatus;
+
+    #[test]
+    fn calc_stops_place_a_hard_edge_at_a_fraction_plus_a_length() -> Result<()> {
+        let mut renderer = MetalRenderer::new_headless(Default::default())?;
+        let bounds = Bounds::new(
+            point(ScaledPixels(0.), ScaledPixels(0.)),
+            size(ScaledPixels(400.), ScaledPixels(8.)),
+        );
+        let mut scene = Scene::default();
+        scene.insert_primitive(gpui::Quad {
+            bounds,
+            content_mask: ContentMask {
+                bounds,
+                ..Default::default()
+            },
+            background: gpui::linear_gradient(
+                90.,
+                gpui::linear_color_stop(gpui::red(), 0.),
+                gpui::linear_color_stop(gpui::blue(), 1.),
+            )
+            .stop_at_calc(0, 1.0, -200.0)
+            .stop_at_calc(1, 1.0, -200.0),
+            ..Default::default()
+        });
+        scene.finish();
+        let image =
+            renderer.render_scene_to_image(&scene, size(DevicePixels(400), DevicePixels(8)))?;
+        let red = |x: u32| {
+            let [r, g, b, _] = image.get_pixel(x, 4).0;
+            r > 240 && g < 8 && b < 8
+        };
+        let blue = |x: u32| {
+            let [r, g, b, _] = image.get_pixel(x, 4).0;
+            r < 8 && g < 8 && b > 240
+        };
+        assert!((0..199).all(red), "red up to the stop");
+        assert!((201..400).all(blue), "blue from the stop on");
+        Ok(())
+    }
+
+    /// The layer's values are extended sRGB with 1.0 at SDR white; the check
+    /// takes scRGB at `SDR_WHITE`, so they are linearised and scaled to it.
+    #[test]
+    fn hdr_output_keeps_sdr_values_and_passes_hdr_tiles_to_their_headroom() -> Result<()> {
+        use gpui::hdr_test_scene::{self as hdr_tests, HEIGHT, SDR_WHITE, WIDTH};
+        let mut renderer = MetalRenderer::new_headless(Default::default())?;
+        let atlas = renderer.sprite_atlas().clone();
+        let scene = hdr_tests::scene(&*atlas)?;
+        let size = size(DevicePixels(WIDTH as i32), DevicePixels(HEIGHT as i32));
+        let sdr = renderer.render_scene_to_image(&scene, size)?;
+        assert!(renderer.set_hdr_output(Some(HdrOutput { sdr_white: 1.0 }), None));
+        let texture =
+            objc2::rc::autoreleasepool(|_| renderer.render_offscreen_texture(&scene, size))?;
+        assert_eq!(texture.pixelFormat(), MTLPixelFormat::RGBA16Float);
+        let encoded = read_texture_to_image(&texture)?;
+        let output: Vec<[f32; 4]> = hdr_tests::halves_to_pixels(&read_texture_halves(&texture))
+            .into_iter()
+            .map(|[r, g, b, a]| {
+                let light = |c: f32| {
+                    if c < 0.04045 {
+                        c / 12.92
+                    } else {
+                        ((c + 0.055) / 1.055).powf(2.4)
+                    }
+                };
+                [
+                    light(r) * SDR_WHITE,
+                    light(g) * SDR_WHITE,
+                    light(b) * SDR_WHITE,
+                    a,
+                ]
+            })
+            .collect();
+        hdr_tests::check(&sdr, &encoded, &output)?;
+        assert!(renderer.set_hdr_output(None, None));
+        let again = renderer.render_scene_to_image(&scene, size)?;
+        assert!(again == sdr, "back on SDR, every pixel is as before");
+        Ok(())
+    }
 
     /// Half-covered glyph pixels must match what DirectWrite's default gamma
     /// (1.8) and grayscale contrast (1.0) produce on the DirectX renderer.

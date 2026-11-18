@@ -2052,6 +2052,12 @@ float4 polychrome_sprite_fragment(PolychromeSpriteFragmentInput input): SV_Targe
     float distance = shaped_quad_sdf(input.local_position, sprite.bounds, sprite.corner_radii, sprite.corner_shapes);
 
     float4 color = sample;
+    // vue-native fork: an HDR tile (`pad` non-zero) holds linear values; they
+    // clamp to the sprite's headroom, `pad`'s float bits, and are encoded as
+    // the target blends.
+    if (sprite.pad != 0u) {
+        color = float4(linear_to_srgb(clamp(color.rgb, 0.0, asfloat(sprite.pad))), saturate(color.a));
+    }
     // vue-native fork: the tint takes the pixels by its alpha, keeping theirs
     // (canvas `source-atop`, in straight alpha).
     if (sprite.tint.a > 0.0) {

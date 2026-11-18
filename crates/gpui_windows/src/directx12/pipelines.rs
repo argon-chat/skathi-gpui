@@ -86,6 +86,8 @@ enum PipelineKind {
     AppHistory(u64),
     /// vue-native: the layer composite blended `plus-lighter`.
     VnPlusLighter,
+    /// vue-native: an HDR window's scene into its scRGB swap chain.
+    HdrOutput,
 }
 
 /// vue-native: an app effect's fragment stage, compiled when the app's effects
@@ -161,6 +163,19 @@ fn compile_punch() -> Result<Vec<u8>> {
 /// vue-native: compiles [`CONTENT_FRAGMENT`], at the first effect layer.
 fn compile_content() -> Result<Vec<u8>> {
     compile_fragment(CONTENT_FRAGMENT, c"gpui-d3d12-content", c"content_fragment")
+}
+
+/// vue-native: compiles `HDR_OUTPUT_HLSL`, the first time a window outputs HDR.
+fn compile_hdr_output() -> Result<(Vec<u8>, Vec<u8>)> {
+    let source = crate::directx_renderer::HDR_OUTPUT_HLSL;
+    let stage = |entry: &str, target: &str| -> Result<Vec<u8>> {
+        let blob = shader_resources::compile_hlsl_source(source, "hdr_output.hlsl", entry, target)?;
+        Ok(bytes(&blob).to_vec())
+    };
+    Ok((
+        stage("hdr_output_vertex\0", "vs_5_1\0")?,
+        stage("hdr_output_fragment\0", "ps_5_1\0")?,
+    ))
 }
 
 fn compile_fragment(
@@ -295,6 +310,15 @@ impl Pipelines {
     pub fn vn_plus_lighter(&mut self, format: DXGI_FORMAT) -> Result<ID3D12PipelineState> {
         self.get(PipelineKey {
             kind: PipelineKind::VnPlusLighter,
+            format,
+            samples: 1,
+        })
+    }
+
+    /// vue-native: the pass from an HDR window's scene target into its swap chain.
+    pub fn hdr_output(&mut self, format: DXGI_FORMAT) -> Result<ID3D12PipelineState> {
+        self.get(PipelineKey {
+            kind: PipelineKind::HdrOutput,
             format,
             samples: 1,
         })
@@ -484,6 +508,10 @@ impl Pipelines {
             PipelineKind::VnPlusLighter => {
                 let (vertex, fragment) = embedded::module(ShaderModule::VnLayer);
                 (Cow::Borrowed(vertex), Cow::Borrowed(fragment), Blend::PlusLighter)
+            }
+            PipelineKind::HdrOutput => {
+                let (vertex, fragment) = compile_hdr_output()?;
+                (Cow::Owned(vertex), Cow::Owned(fragment), Blend::Replace)
             }
             PipelineKind::AppEffect(id) | PipelineKind::AppHistory(id) => {
                 let fragment = self

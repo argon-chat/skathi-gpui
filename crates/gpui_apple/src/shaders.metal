@@ -953,6 +953,13 @@ fragment float4 polychrome_sprite_fragment(
                       sprite.corner_shapes);
 
   float4 color = sample;
+  // vue-native fork: an HDR tile (`pad` non-zero) holds linear values; they
+  // clamp to the sprite's headroom, `pad`'s float bits, and are encoded as the
+  // target blends.
+  if (sprite.pad != 0) {
+    color = float4(linear_to_srgb(clamp(color.rgb, float3(0.0), float3(as_type<float>(sprite.pad)))),
+                   saturate(color.a));
+  }
   // vue-native fork: the tint takes the pixels by its alpha, keeping theirs
   // (canvas `source-atop`, in straight alpha). `PolychromeSprite` comes from
   // cbindgen (build.rs), so its `tint` is already there.

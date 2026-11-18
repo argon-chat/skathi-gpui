@@ -19,6 +19,10 @@ mod test;
 #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
 mod visual_test;
 
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod hdr_test_scene;
+
 #[cfg(all(
     feature = "screen-capture",
     any(target_os = "windows", target_os = "linux", target_os = "freebsd",)
@@ -1513,6 +1517,11 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     }
     /// vue-native fork: [`crate::Window::set_draws_while_occluded`].
     fn set_draws_while_occluded(&self, _on: bool) {}
+    /// vue-native fork: [`crate::Window::set_hdr_output`]. False where the renderer has no HDR
+    /// output.
+    fn set_hdr_output(&self, _output: Option<HdrOutput>) -> bool {
+        false
+    }
 
     // Linux specific methods
     fn inner_window_bounds(&self) -> WindowBounds {
@@ -2059,6 +2068,18 @@ pub trait PlatformAtlas {
         Ok(None)
     }
 
+    /// vue-native fork: [`PlatformAtlas::write_bytes`] into an
+    /// [`AtlasTextureKind::PolychromeHdr`] tile: `bytes` are RGBA half floats, 8 a pixel.
+    /// `Ok(None)` from a backend without HDR tiles.
+    fn write_hdr_bytes(
+        &self,
+        _key: &AtlasKey,
+        _size: Size<DevicePixels>,
+        _bytes: &[u8],
+    ) -> Result<Option<AtlasTile>> {
+        Ok(None)
+    }
+
     #[cfg(any(test, feature = "test-support", feature = "bench-support"))]
     fn contains(&self, _key: &AtlasKey) -> bool {
         false
@@ -2087,11 +2108,11 @@ pub struct AtlasKindStats {
 }
 
 /// vue-native fork: a sprite atlas's footprint, indexed by
-/// `AtlasTextureKind as usize` (monochrome, polychrome, subpixel).
+/// `AtlasTextureKind as usize` (monochrome, polychrome, subpixel, polychrome HDR).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AtlasStats {
     /// Per kind.
-    pub kinds: [AtlasKindStats; 3],
+    pub kinds: [AtlasKindStats; 4],
     /// Keys mapped to a tile (glyphs, SVG rasters, image frames).
     pub keys: u32,
     /// Of those, image frames (`AtlasKey::Image`) and their tile pixels.
@@ -2176,6 +2197,34 @@ pub fn publish_renderer_metal_device(
         generation,
         keep_alive,
     });
+}
+
+/// vue-native fork: a window drawing high dynamic range. The scene still blends in sRGB-encoded
+/// space, into a half-float target where [`AtlasTextureKind::PolychromeHdr`] sprites can exceed
+/// 1.0; the output is that linearised and multiplied by `sdr_white`.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct HdrOutput {
+    /// SDR white in the swap chain's linear unit: SDR white nits / 80 for Windows' scRGB, 1.0 for
+    /// macOS EDR.
+    pub sdr_white: f32,
+}
+
+/// vue-native fork: IEEE binary16 bits to `f32`, for the renderers' half-float readbacks.
+#[doc(hidden)]
+pub fn half_to_f32(bits: u16) -> f32 {
+    let exponent = (bits >> 10) & 0x1f;
+    let mantissa = u32::from(bits & 0x3ff);
+    let magnitude = match exponent {
+        0 => mantissa as f32 / 16_777_216.0,
+        31 if mantissa == 0 => f32::INFINITY,
+        31 => f32::NAN,
+        _ => f32::from_bits(((u32::from(exponent) + 112) << 23) | (mantissa << 13)),
+    };
+    if bits & 0x8000 != 0 {
+        -magnitude
+    } else {
+        magnitude
+    }
 }
 
 /// vue-native fork: where [`crate::Window::write_image_tile`] takes a frame's
@@ -2452,6 +2501,12 @@ pub enum AtlasTextureKind {
     Monochrome = 0,
     Polychrome = 1,
     Subpixel = 2,
+    /// vue-native fork: RGBA half floats in linear extended sRGB (1.0 is SDR white), straight
+    /// alpha. A sprite encodes them to sRGB after clamping to its [`PolychromeSprite`]'s
+    /// headroom, so values above 1.0 reach an HDR target ([`HdrOutput`]).
+    ///
+    /// [`PolychromeSprite`]: crate::PolychromeSprite
+    PolychromeHdr = 3,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

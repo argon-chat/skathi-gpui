@@ -1246,6 +1246,10 @@ impl PlatformWindow for WindowsWindow {
         self.state.renderer.borrow().sprite_atlas()
     }
 
+    fn set_hdr_output(&self, output: Option<gpui::HdrOutput>) -> bool {
+        self.state.renderer.borrow_mut().set_hdr_output(output)
+    }
+
     #[cfg(feature = "native-dx12")]
     fn vn_composition_underlay(&self) -> Option<(usize, usize)> {
         self.state.renderer.borrow().vn_composition_underlay()
