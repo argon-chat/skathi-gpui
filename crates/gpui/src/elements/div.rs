@@ -2721,7 +2721,16 @@ impl Interactivity {
             .padding
             .to_pixels(bounds.size.into(), rem_size)
             .map(|edge| window.pixel_snap(*edge));
-        let padding_size = size(padding.left + padding.right, padding.top + padding.bottom);
+        let scale = window.scale_factor();
+        let border = style
+            .border_widths
+            .to_pixels(rem_size)
+            .map(|w| px(crate::util::round_stroke_to_device_pixel(w.0, scale) / scale));
+        // The scrollport is the padding box, inside the borders.
+        let padding_size = size(
+            padding.left + padding.right + border.left + border.right,
+            padding.top + padding.bottom + border.top + border.bottom,
+        );
         // The floating point values produced by Taffy and ours often vary
         // slightly after ~5 decimal places. This can lead to cases where after
         // subtracting these, the container becomes scrollable for less than
@@ -2730,8 +2739,12 @@ impl Interactivity {
         // places here.
         let padded_content_size = self.content_size + padding_size;
         let padded_content_size = size(
-            padded_content_size.width.max(self.out_of_flow_extent.width),
-            padded_content_size.height.max(self.out_of_flow_extent.height),
+            padded_content_size
+                .width
+                .max(self.out_of_flow_extent.width + border.right),
+            padded_content_size
+                .height
+                .max(self.out_of_flow_extent.height + border.bottom),
         );
         Point::from(padded_content_size - bounds.size)
             .map(round_to_two_decimals)
