@@ -150,6 +150,11 @@ impl AppCell {
         AppRef(borrow)
     }
 
+    /// Whether a borrow is live: a platform callback arriving now re-entered an App update.
+    pub(crate) fn is_borrowed(&self) -> bool {
+        self.app.try_borrow_mut().is_err()
+    }
+
     #[doc(hidden)]
     #[track_caller]
     pub fn borrow_mut(&self) -> AppRefMut<'_> {

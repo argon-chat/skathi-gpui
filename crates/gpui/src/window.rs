@@ -2209,6 +2209,40 @@ fn default_bounds(
     window_bounds_ctor(Bounds::new(final_origin, base_size))
 }
 
+/// Windows sends `WM_SIZE`/`WM_MOVE` synchronously from `SetWindowPos` and the other calls that
+/// move or size a window, so a report can arrive while App is borrowed by the code that made that
+/// call. It then runs on the next foreground turn rather than being dropped.
+fn report_bounds_changed(
+    handle: AnyWindowHandle,
+    cx: &mut crate::AsyncApp,
+    deferred: &Rc<Cell<bool>>,
+    what: &'static str,
+) {
+    let borrowed = cx.app.upgrade().is_some_and(|app| app.is_borrowed());
+    if !borrowed {
+        handle
+            .update(cx, |_, window, cx| window.bounds_changed(cx))
+            .with_context(|| format!("handling {what} for window {:?}", handle.window_id()))
+            .log_err();
+        return;
+    }
+    if deferred.replace(true) {
+        return;
+    }
+    let deferred = deferred.clone();
+    let mut cx = cx.clone();
+    cx.foreground_executor()
+        .clone()
+        .spawn(async move {
+            deferred.set(false);
+            // Fails only when the window closed meanwhile; then there is nothing to report.
+            handle
+                .update(&mut cx, |_, window, cx| window.bounds_changed(cx))
+                .ok();
+        })
+        .detach();
+}
+
 impl Window {
     pub(crate) fn new(
         handle: AnyWindowHandle,
@@ -2759,23 +2793,17 @@ impl Window {
                     .log_err();
             }
         }));
+        // One deferred report covers both: `bounds_changed` reads the bounds when it runs.
+        let bounds_deferred = Rc::new(Cell::new(false));
         platform_window.on_resize(Box::new({
             let mut cx = cx.to_async();
-            move |_, _| {
-                handle
-                    .update(&mut cx, |_, window, cx| window.bounds_changed(cx))
-                    .with_context(|| format!("handling resize for window {:?}", handle.window_id()))
-                    .log_err();
-            }
+            let deferred = bounds_deferred.clone();
+            move |_, _| report_bounds_changed(handle, &mut cx, &deferred, "resize")
         }));
         platform_window.on_moved(Box::new({
             let mut cx = cx.to_async();
-            move || {
-                handle
-                    .update(&mut cx, |_, window, cx| window.bounds_changed(cx))
-                    .with_context(|| format!("handling move for window {:?}", handle.window_id()))
-                    .log_err();
-            }
+            let deferred = bounds_deferred;
+            move || report_bounds_changed(handle, &mut cx, &deferred, "move")
         }));
         platform_window.on_display_changed(Box::new({
             let cx = cx.to_async();
