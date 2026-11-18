@@ -160,8 +160,13 @@ pub struct MetalRenderer {
     headless_render_target: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
     /// vue-native: presents made while present feedback was wanted.
     presents: u64,
-    /// vue-native: `BGRA8Unorm`, or `RGBA16Float` while the layer shows EDR.
+    /// vue-native: the format the pipelines draw, the layer's (`BGRA8Unorm`, or `RGBA16Float`
+    /// in EDR) or that of a drawable handed out before the layer switched.
     target_format: MTLPixelFormat,
+    /// vue-native: the pipelines of the other format, kept for the frames around a switch.
+    spare_pipelines: Option<(MTLPixelFormat, FramePipelines)>,
+    /// vue-native: in EDR, the colour space the layer had before, restored when it leaves.
+    sdr_color_space: Option<Option<Retained<CGColorSpace>>>,
     use_display_p3: bool,
 }
 
@@ -409,57 +414,43 @@ impl MetalRenderer {
             headless_render_target: None,
             presents: 0,
             target_format: MTLPixelFormat::BGRA8Unorm,
+            spare_pipelines: None,
+            sdr_color_space: None,
             use_display_p3: false,
         })
     }
 
     /// vue-native: draws in half float into an extended-range layer while
     /// `output` is set. The scene stays sRGB-encoded, so SDR content keeps its
-    /// values and 1.0 stays SDR white; the layer takes the colour space of
-    /// `display` (a `CGDirectDisplayID`), extended, unless the window asked
-    /// for Display P3. `HdrOutput::sdr_white` does not apply: EDR is relative
-    /// to SDR white. A call that only changes `content_headroom` retags the layer.
-    pub fn set_hdr_output(&mut self, output: Option<HdrOutput>, display: Option<u32>) -> bool {
+    /// values and 1.0 stays SDR white, and the layer is tagged with what it
+    /// holds: extended sRGB, or extended Display P3 for a window that asked
+    /// for Display P3. Leaving EDR restores the colour space the layer had.
+    /// `HdrOutput::sdr_white` does not apply: EDR is relative to SDR white. A
+    /// call that only changes `content_headroom` retags the layer.
+    pub fn set_hdr_output(&mut self, output: Option<HdrOutput>) -> bool {
         let format = if output.is_some() {
             MTLPixelFormat::RGBA16Float
         } else {
             MTLPixelFormat::BGRA8Unorm
         };
-        let switching = format != self.target_format;
-        if switching {
-            match FramePipelines::new(&self.device, &self.library, format) {
-                Ok(pipelines) => self.install_pipelines(pipelines),
-                Err(error) => {
-                    log::error!("HDR output is unavailable: {error:#}");
-                    return false;
-                }
-            }
-            self.target_format = format;
-            self.backdrop = backdrop::BackdropState::default();
-            self.vn_layers = vn_layer::VnLayerState::default();
-            #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
-            {
-                self.headless_render_target = None;
-            }
+        if let Err(error) = self.use_format(format) {
+            log::error!("HDR output is unavailable: {error:#}");
+            return false;
         }
         let Some(layer) = &self.layer else {
             return true;
         };
-        if switching {
-            let named =
-                |name: &objc2_core_foundation::CFString| CGColorSpace::with_name(Some(name));
-            // SAFETY: The constants are extern, from Core Graphics.
-            let color_space = match (output.is_some(), self.use_display_p3) {
-                (true, true) => named(unsafe { kCGColorSpaceExtendedDisplayP3 }),
-                (true, false) => display
-                    .and_then(display_color_space)
-                    .and_then(|space| space.extended())
-                    .or_else(|| named(unsafe { kCGColorSpaceExtendedSRGB })),
-                (false, true) => named(unsafe { kCGColorSpaceDisplayP3 }),
-                (false, false) => None,
-            };
-            layer.setPixelFormat(format);
-            layer.setColorspace(color_space.as_deref());
+        match (output.is_some(), self.sdr_color_space.is_some()) {
+            (true, false) => {
+                self.sdr_color_space = Some(layer.colorspace());
+                layer.setPixelFormat(format);
+                layer.setColorspace(edr_color_space(self.use_display_p3).as_deref());
+            }
+            (false, true) => {
+                layer.setPixelFormat(format);
+                layer.setColorspace(self.sdr_color_space.take().flatten().as_deref());
+            }
+            _ => {}
         }
         edr::request(
             layer,
@@ -469,14 +460,59 @@ impl MetalRenderer {
         true
     }
 
-    fn install_pipelines(&mut self, pipelines: FramePipelines) {
-        self.path_tiles_pipeline_state = pipelines.path_tiles_pipeline_state;
-        self.shadows_pipeline_state = pipelines.shadows_pipeline_state;
-        self.quads_pipeline_state = pipelines.quads_pipeline_state;
-        self.underlines_pipeline_state = pipelines.underlines_pipeline_state;
-        self.monochrome_sprites_pipeline_state = pipelines.monochrome_sprites_pipeline_state;
-        self.polychrome_sprites_pipeline_state = pipelines.polychrome_sprites_pipeline_state;
-        self.surfaces_pipeline_state = pipelines.surfaces_pipeline_state;
+    /// vue-native: builds or swaps in the pipelines for `format`. Scratch
+    /// targets of the other format are dropped.
+    fn use_format(&mut self, format: MTLPixelFormat) -> Result<()> {
+        if format == self.target_format {
+            return Ok(());
+        }
+        let pipelines = match self.spare_pipelines.take() {
+            Some((spare, pipelines)) if spare == format => pipelines,
+            _ => FramePipelines::new(&self.device, &self.library, format)?,
+        };
+        let previous = self.swap_pipelines(pipelines);
+        self.spare_pipelines = Some((self.target_format, previous));
+        self.target_format = format;
+        self.backdrop = backdrop::BackdropState::default();
+        self.vn_layers = vn_layer::VnLayerState::default();
+        #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
+        {
+            self.headless_render_target = None;
+        }
+        Ok(())
+    }
+
+    fn swap_pipelines(&mut self, pipelines: FramePipelines) -> FramePipelines {
+        FramePipelines {
+            path_tiles_pipeline_state: mem::replace(
+                &mut self.path_tiles_pipeline_state,
+                pipelines.path_tiles_pipeline_state,
+            ),
+            shadows_pipeline_state: mem::replace(
+                &mut self.shadows_pipeline_state,
+                pipelines.shadows_pipeline_state,
+            ),
+            quads_pipeline_state: mem::replace(
+                &mut self.quads_pipeline_state,
+                pipelines.quads_pipeline_state,
+            ),
+            underlines_pipeline_state: mem::replace(
+                &mut self.underlines_pipeline_state,
+                pipelines.underlines_pipeline_state,
+            ),
+            monochrome_sprites_pipeline_state: mem::replace(
+                &mut self.monochrome_sprites_pipeline_state,
+                pipelines.monochrome_sprites_pipeline_state,
+            ),
+            polychrome_sprites_pipeline_state: mem::replace(
+                &mut self.polychrome_sprites_pipeline_state,
+                pipelines.polychrome_sprites_pipeline_state,
+            ),
+            surfaces_pipeline_state: mem::replace(
+                &mut self.surfaces_pipeline_state,
+                pipelines.surfaces_pipeline_state,
+            ),
+        }
     }
 
     pub fn layer(&self) -> Option<&CAMetalLayer> {
@@ -602,6 +638,11 @@ impl MetalRenderer {
             (texture.width() as i32).into(),
             (texture.height() as i32).into(),
         );
+        // vue-native: likewise its format, before a switch to or from EDR.
+        if let Err(error) = self.use_format(texture.pixelFormat()) {
+            log::error!("failed to render: {error:#}");
+            return;
+        }
 
         let command_buffer = match self.render_frame(scene, &drawable.texture(), viewport_size) {
             Ok(command_buffer) => command_buffer,
@@ -1555,21 +1596,18 @@ fn read_texture_to_image(texture: &ProtocolObject<dyn MTLTexture>) -> Result<Rgb
     RgbaImage::from_raw(width, height, pixels).context("creating RGBA image from pixel data")
 }
 
-/// The colour space a display shows unmanaged content in.
-#[cfg(target_os = "macos")]
-fn display_color_space(display: u32) -> Option<CFRetained<CGColorSpace>> {
-    unsafe extern "C" {
-        fn CGDisplayCopyColorSpace(display: u32) -> *mut CGColorSpace;
-    }
-    // SAFETY: Any display ID is accepted; the result is a +1 reference or null.
-    let space = ptr::NonNull::new(unsafe { CGDisplayCopyColorSpace(display) })?;
-    // SAFETY: The copy transfers ownership of this non-null colour space.
-    Some(unsafe { CFRetained::from_raw(space) })
-}
-
-#[cfg(not(target_os = "macos"))]
-fn display_color_space(_display: u32) -> Option<CFRetained<CGColorSpace>> {
-    None
+/// What the scene's half floats are in: sRGB-encoded, extended past 1.0, in
+/// sRGB primaries or, for a window that asked for it, Display P3's.
+fn edr_color_space(display_p3: bool) -> Option<CFRetained<CGColorSpace>> {
+    // SAFETY: The constants are extern, from Core Graphics.
+    let name = unsafe {
+        if display_p3 {
+            kCGColorSpaceExtendedDisplayP3
+        } else {
+            kCGColorSpaceExtendedSRGB
+        }
+    };
+    CGColorSpace::with_name(Some(name))
 }
 
 /// An `RGBA16Float` texture's channels, as half-float bits.
@@ -2190,7 +2228,7 @@ mod tests {
             sdr_white: 1.0,
             content_headroom: 4.0,
         };
-        assert!(renderer.set_hdr_output(Some(output), None));
+        assert!(renderer.set_hdr_output(Some(output)));
         let texture =
             objc2::rc::autoreleasepool(|_| renderer.render_offscreen_texture(&scene, size))?;
         assert_eq!(texture.pixelFormat(), MTLPixelFormat::RGBA16Float);
@@ -2214,7 +2252,7 @@ mod tests {
             })
             .collect();
         hdr_tests::check(&sdr, &encoded, &output)?;
-        assert!(renderer.set_hdr_output(None, None));
+        assert!(renderer.set_hdr_output(None));
         let again = renderer.render_scene_to_image(&scene, size)?;
         assert!(again == sdr, "back on SDR, every pixel is as before");
         Ok(())
@@ -2246,17 +2284,17 @@ mod tests {
             "preferredDynamicRange is used exactly where the OS has it"
         );
 
-        assert!(renderer.set_hdr_output(output(4.0), None));
+        assert!(renderer.set_hdr_output(output(4.0)));
         assert_eq!(layer.pixelFormat(), MTLPixelFormat::RGBA16Float);
         if modern {
             assert_eq!(tag(&layer)?, (true, 4.0, false));
-            assert!(renderer.set_hdr_output(output(2.5), None));
+            assert!(renderer.set_hdr_output(output(2.5)));
             assert_eq!(tag(&layer)?, (true, 2.5, false), "retagged in place");
             assert_eq!(layer.pixelFormat(), MTLPixelFormat::RGBA16Float);
         } else {
             assert!(layer.wantsExtendedDynamicRangeContent());
         }
-        assert!(renderer.set_hdr_output(None, None));
+        assert!(renderer.set_hdr_output(None));
         assert_eq!(layer.pixelFormat(), MTLPixelFormat::BGRA8Unorm);
         if modern {
             assert_eq!(tag(&layer)?, (false, 0.0, false));
@@ -2276,6 +2314,109 @@ mod tests {
         }
         edr::request(&legacy, None, edr::EdrApi::Legacy);
         assert!(!legacy.wantsExtendedDynamicRangeContent());
+        Ok(())
+    }
+
+    #[test]
+    fn in_edr_the_layer_is_tagged_with_what_it_holds_and_gets_its_colour_space_back() -> Result<()>
+    {
+        use objc2_core_graphics::kCGColorSpaceSRGB;
+        let output = |content_headroom| {
+            Some(HdrOutput {
+                sdr_white: 1.0,
+                content_headroom,
+            })
+        };
+        let name = |layer: &CAMetalLayer| {
+            layer
+                .colorspace()
+                .and_then(|space| CGColorSpace::name(Some(&space)))
+                .map(|name| name.to_string())
+        };
+        // SAFETY: The constants are extern, from Core Graphics.
+        let [srgb, p3, extended_srgb, extended_p3] = unsafe {
+            [
+                kCGColorSpaceSRGB,
+                kCGColorSpaceDisplayP3,
+                kCGColorSpaceExtendedSRGB,
+                kCGColorSpaceExtendedDisplayP3,
+            ]
+        };
+        for (display_p3, before, in_edr) in [
+            (false, Some(srgb), extended_srgb),
+            (false, None, extended_srgb),
+            (true, Some(p3), extended_p3),
+        ] {
+            let mut renderer = MetalRenderer::new(Default::default(), false, display_p3)?;
+            let layer = renderer.layer().context("no layer")?.retain();
+            if !display_p3 {
+                let space = before.and_then(|name| CGColorSpace::with_name(Some(name)));
+                layer.setColorspace(space.as_deref());
+            }
+            let before = before.map(|name| name.to_string());
+            assert_eq!(name(&layer), before);
+            for _ in 0..2 {
+                for headroom in [4.0, 2.5] {
+                    assert!(renderer.set_hdr_output(output(headroom)));
+                    assert_eq!(name(&layer), Some(in_edr.to_string()));
+                }
+                assert!(renderer.set_hdr_output(None));
+                assert_eq!(name(&layer), before, "restored on leaving EDR");
+            }
+        }
+        Ok(())
+    }
+
+    /// A display link hands out the frame's drawable before the frame decides
+    /// to switch, so the frame that switches draws into the other format.
+    #[test]
+    fn a_drawable_handed_out_before_a_switch_is_drawn_in_its_own_format() -> Result<()> {
+        use gpui::hdr_test_scene::{self as hdr_tests, HEIGHT, WIDTH};
+        let mut renderer = MetalRenderer::new(Default::default(), false, false)?;
+        let layer = renderer.layer().context("no layer")?.retain();
+        layer.setFramebufferOnly(false);
+        layer.setAllowsNextDrawableTimeout(true);
+        let size = size(DevicePixels(WIDTH as i32), DevicePixels(HEIGHT as i32));
+        renderer.update_drawable_size(size);
+        let atlas = renderer.sprite_atlas().clone();
+        let scene = hdr_tests::scene(&*atlas)?;
+        let sdr = renderer.render_scene_to_image(&scene, size)?;
+        let hdr = Some(HdrOutput {
+            sdr_white: 1.0,
+            content_headroom: 4.0,
+        });
+        renderer.set_display_link_attached(true);
+        for (output, handed_out) in [
+            (hdr, MTLPixelFormat::BGRA8Unorm),
+            (None, MTLPixelFormat::RGBA16Float),
+        ] {
+            let drawn = objc2::rc::autoreleasepool(|_| {
+                let drawable = layer.nextDrawable().context("no drawable")?;
+                let texture = drawable.texture();
+                assert_eq!(texture.pixelFormat(), handed_out);
+                assert!(renderer.set_hdr_output(output));
+                renderer.set_frame_drawable(Some(drawable));
+                renderer.draw(&scene);
+                assert!(renderer.set_frame_drawable(None).is_none(), "drawn");
+                let done = renderer
+                    .command_queue
+                    .commandBuffer()
+                    .context("no command buffer")?;
+                done.commit();
+                done.waitUntilCompleted();
+                read_texture_to_image(&texture)
+            })?;
+            let off = sdr
+                .pixels()
+                .zip(drawn.pixels())
+                .map(|(a, b)| (0..3).map(|c| a[c].abs_diff(b[c])).max().unwrap_or(0))
+                .max()
+                .unwrap_or(0);
+            assert!(
+                off <= 1,
+                "{handed_out:?} drawable: the page is off by {off} code values"
+            );
+        }
         Ok(())
     }
 
