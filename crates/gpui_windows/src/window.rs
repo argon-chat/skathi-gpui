@@ -1596,6 +1596,10 @@ type Color = (u8, u8, u8, u8);
 pub(crate) struct WindowBorderOffset {
     pub(crate) width_offset: Cell<i32>,
     pub(crate) height_offset: Cell<i32>,
+    /// Where the client area starts inside the window rect. Not half the offsets: a caption sits
+    /// above the client only, and a hidden title bar leaves resize borders on three sides.
+    pub(crate) left_offset: Cell<i32>,
+    pub(crate) top_offset: Cell<i32>,
 }
 
 impl WindowBorderOffset {
@@ -1610,10 +1614,14 @@ impl WindowBorderOffset {
             GetClientRect(hwnd, &mut rect)?;
             rect
         };
+        let mut client_origin = POINT::default();
+        unsafe { ClientToScreen(hwnd, &mut client_origin) }.ok()?;
         self.width_offset
             .set((window_rect.right - window_rect.left) - (client_rect.right - client_rect.left));
         self.height_offset
             .set((window_rect.bottom - window_rect.top) - (client_rect.bottom - client_rect.top));
+        self.left_offset.set(client_origin.x - window_rect.left);
+        self.top_offset.set(client_origin.y - window_rect.top);
         Ok(())
     }
 }
@@ -1772,8 +1780,8 @@ fn calculate_window_rect(bounds: Bounds<DevicePixels>, border_offset: &WindowBor
         right: bounds.right().0,
         bottom: bounds.bottom().0,
     };
-    let left_offset = border_offset.width_offset.get() / 2;
-    let top_offset = border_offset.height_offset.get() / 2;
+    let left_offset = border_offset.left_offset.get();
+    let top_offset = border_offset.top_offset.get();
     let right_offset = border_offset.width_offset.get() - left_offset;
     let bottom_offset = border_offset.height_offset.get() - top_offset;
     rect.left -= left_offset;
@@ -1788,8 +1796,8 @@ fn calculate_client_rect(
     border_offset: &WindowBorderOffset,
     scale_factor: f32,
 ) -> Bounds<Pixels> {
-    let left_offset = border_offset.width_offset.get() / 2;
-    let top_offset = border_offset.height_offset.get() / 2;
+    let left_offset = border_offset.left_offset.get();
+    let top_offset = border_offset.top_offset.get();
     let right_offset = border_offset.width_offset.get() - left_offset;
     let bottom_offset = border_offset.height_offset.get() - top_offset;
     let left = rect.left + left_offset;
