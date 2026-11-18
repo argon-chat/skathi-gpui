@@ -1,6 +1,6 @@
 use std::{borrow::Cow, sync::Arc};
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use etagere::BucketedAtlasAllocator;
 use gpui::{
     AtlasBackend, AtlasKey, AtlasState, AtlasStats, AtlasTextureId, AtlasTextureKind,
@@ -24,6 +24,8 @@ pub(super) const ATLAS_STATE: D3D12_RESOURCE_STATES = D3D12_RESOURCE_STATES(
     D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE.0 | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE.0,
 );
 
+const NO_DEVICE: &str = "the renderer's D3D12 device was removed and no new one is ready yet";
+
 pub(crate) struct Atlas(Mutex<AtlasState<Textures>>);
 
 /// A snapshot owns the resource even if its last tile is removed before the
@@ -37,7 +39,8 @@ pub(super) struct AtlasTexture {
 }
 
 struct Textures {
-    device: Arc<Device>,
+    /// `None` once the device was removed, until the renderer has a new one.
+    device: Option<Arc<Device>>,
     uploads: UploadBatch,
     monochrome: AtlasTextureList<Page>,
     polychrome: AtlasTextureList<Page>,
@@ -55,7 +58,12 @@ struct Page {
 
 impl Atlas {
     pub(super) fn new(device: Arc<Device>) -> Self {
-        Self(Mutex::new(AtlasState::new(Textures::new(device))))
+        Self(Mutex::new(AtlasState::new(Textures::new(Some(device)))))
+    }
+
+    /// An atlas with no device, for a window opened while the device is removed.
+    pub(super) fn without_device() -> Self {
+        Self(Mutex::new(AtlasState::new(Textures::new(None))))
     }
 
     pub(super) fn get_texture(&self, id: AtlasTextureId) -> Result<Option<AtlasTexture>> {
@@ -69,7 +77,15 @@ impl Atlas {
     pub(super) fn handle_device_lost(&self, device: Arc<Device>) {
         self.0
             .lock()
-            .clear(|textures| *textures = Textures::new(device));
+            .clear(|textures| *textures = Textures::new(Some(device)));
+    }
+
+    /// Drops every page and the device: D3D12 makes no new device while anything holds the
+    /// removed one.
+    pub(super) fn release_device(&self) {
+        self.0
+            .lock()
+            .clear(|textures| *textures = Textures::new(None));
     }
 
     fn upload_d3d12(
@@ -99,15 +115,14 @@ impl Atlas {
             return Ok(None);
         }
         let mut state = self.0.lock();
+        let device = state.backend.device()?.clone();
+        if let Err(error) = unsafe { device.device.GetDeviceRemovedReason() } {
+            bail!("the renderer's D3D12 device was removed ({error})");
+        }
         // A producer can temporarily retain the preceding device generation.
         // Refuse it before allocating a destination tile so callers may rebuild.
-        if state
-            .backend
-            .device
-            .validate_resource_device(resource)
-            .is_err()
-        {
-            return Ok(None);
+        if let Err(error) = device.validate_resource_device(resource) {
+            return Err(error.context("the texture is not on the renderer's D3D12 device"));
         }
         // An immediate GPU/video writer must follow every earlier CPU write,
         // including a pending cached tile that occupies the same atlas page.
@@ -118,7 +133,7 @@ impl Atlas {
             .backend
             .texture(tile.texture_id)
             .context("Allocated atlas page disappeared")?;
-        let copy = state.backend.device.copy_texture(
+        let copy = device.copy_texture(
             resource,
             source_state,
             &page.texture.resource,
@@ -212,7 +227,7 @@ impl PlatformAtlas for Atlas {
             return Ok(None);
         };
         let producer_native: ID3D12Device = unsafe { on12.GetD3D12Device()? };
-        let native = self.0.lock().backend.device.clone();
+        let native = self.0.lock().backend.device()?.clone();
         if producer_native.cast::<IUnknown>()? != native.device.cast::<IUnknown>()? {
             return Ok(None);
         }
@@ -370,7 +385,7 @@ impl AtlasBackend for Textures {
 }
 
 impl Textures {
-    fn new(device: Arc<Device>) -> Self {
+    fn new(device: Option<Arc<Device>>) -> Self {
         Self {
             device,
             uploads: Default::default(),
@@ -379,6 +394,10 @@ impl Textures {
             subpixel: Default::default(),
             polychrome_hdr: Default::default(),
         }
+    }
+
+    fn device(&self) -> Result<&Arc<Device>> {
+        self.device.as_ref().context(NO_DEVICE)
     }
 
     fn list(&self, kind: AtlasTextureKind) -> &AtlasTextureList<Page> {
@@ -444,7 +463,7 @@ impl Textures {
         let width = size.width.0.max(smallest) as u32;
         let height = size.height.0.max(smallest) as u32;
         let (format, bytes_per_pixel) = pixel_layout(kind);
-        let resource = self.device.create_texture(
+        let resource = self.device()?.create_texture(
             width,
             height,
             format,
@@ -480,13 +499,15 @@ impl Textures {
     }
 
     fn flush_uploads(&mut self) -> Result<()> {
-        self.uploads.flush(&self.device)
+        let device = self.device.as_ref().context(NO_DEVICE)?;
+        self.uploads.flush(device)
     }
 
     fn stage(&mut self, tile: AtlasTile, bytes: &[u8]) -> Result<()> {
         let _profile = gpui::native_profiling::current_span("native", "D3D12 stage atlas tile");
         let texture = self.texture(tile.texture_id).context("Atlas page missing")?.texture.clone();
-        self.uploads.queue(&self.device, tile, &texture.resource, pixel_layout(tile.texture_id.kind).1, bytes)
+        let device = self.device.as_ref().context(NO_DEVICE)?;
+        self.uploads.queue(device, tile, &texture.resource, pixel_layout(tile.texture_id.kind).1, bytes)
     }
 
     fn upload(&mut self, tile: AtlasTile, bytes: &[u8]) -> Result<()> {
@@ -495,7 +516,7 @@ impl Textures {
         let page = self
             .texture(tile.texture_id)
             .context("Atlas tile refers to a missing page")?;
-        self.device.upload_texture(
+        self.device()?.upload_texture(
             &page.texture.resource,
             (tile.bounds.left().0 as u32, tile.bounds.top().0 as u32),
             (

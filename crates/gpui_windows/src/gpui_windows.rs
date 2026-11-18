@@ -2,6 +2,7 @@
 
 mod clipboard;
 mod destination_list;
+mod device_loss;
 mod dialog;
 mod direct_manipulation;
 mod direct_write;
@@ -65,6 +66,7 @@ pub use directx_devices::renderer_d3d11_device;
 pub use directx12::{RendererD3D11Handle, renderer_d3d11_device, ensure_renderer_d3d11_device};
 #[cfg(feature = "native-dx12")]
 pub use directx12::{RendererD3D12Handle, renderer_d3d12_device, install_renderer_d3d12_generation_observer};
+pub use device_loss::{DeviceLoss, install_device_loss_observer};
 pub use platform::WindowsPlatform;
 pub use profiling::{FrameProfilerCallbacks, set_frame_profiler};
 pub use frame_pacing::{pace_frames, pace_frames_from_frame, wake_frames};

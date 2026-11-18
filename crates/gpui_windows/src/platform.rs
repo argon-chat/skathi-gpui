@@ -105,6 +105,9 @@ pub(crate) struct WindowsPlatformState {
     /// thread; see [`DrawCoordinator`].
     pub(crate) draw_coordinator: Rc<DrawCoordinator>,
     directx_devices: RefCell<Option<DirectXDevices>>,
+    /// The GPU device was removed and the vsync thread is making a new one: windowed, with no
+    /// devices to hand out.
+    devices_removed: Cell<bool>,
     low_power_mode_enabled: Cell<bool>,
 }
 
@@ -136,6 +139,7 @@ impl WindowsPlatformState {
             cursor_visible: Arc::new(AtomicBool::new(true)),
             draw_coordinator: Rc::new(DrawCoordinator::new()),
             directx_devices: RefCell::new(directx_devices),
+            devices_removed: Cell::new(false),
             low_power_mode_enabled: Cell::new(false),
             menus: RefCell::new(Vec::new()),
         }
@@ -332,7 +336,7 @@ impl WindowsPlatform {
             main_receiver: self.inner.main_receiver.clone(),
             platform_window_handle: self.handle,
             disable_direct_composition: self.disable_direct_composition.get(),
-            directx_devices: self.inner.state.directx_devices.borrow().clone().unwrap(),
+            directx_devices: self.inner.state.directx_devices.borrow().clone(),
             invalidate_devices: self.invalidate_devices.clone(),
             draw_coordinator: self.inner.state.draw_coordinator.clone(),
         }
@@ -400,7 +404,9 @@ impl WindowsPlatform {
     }
 
     fn is_windowed(&self) -> bool {
-        self.attach_pending.get() || self.inner.state.directx_devices.borrow().is_some()
+        self.attach_pending.get()
+            || self.inner.state.directx_devices.borrow().is_some()
+            || self.inner.state.devices_removed.get()
     }
 
     /// Connects in the initial windowing mode, before the app finishes launching. The devices
@@ -466,6 +472,7 @@ impl WindowsPlatform {
             crate::frame_pacing::wake_frames();
         }
         self.inner.state.directx_devices.borrow_mut().take();
+        self.inner.state.devices_removed.set(false);
     }
 
     fn begin_vsync_thread(&self) {
@@ -474,7 +481,7 @@ impl WindowsPlatform {
         };
         let stop = Arc::new(AtomicBool::new(false));
         *self.vsync_stop.borrow_mut() = Some(stop.clone());
-        let mut directx_device = directx_devices;
+        let mut directx_device = Some(directx_devices);
         let platform_window: SafeHwnd = self.handle.into();
         let validation_number = self.inner.validation_number;
         let all_windows = Arc::downgrade(&self.raw_window_handles);
@@ -492,16 +499,37 @@ impl WindowsPlatform {
                     if stop.load(Ordering::Acquire) {
                         break;
                     }
-                    if check_device_lost(&directx_device.device)
-                        || invalidate_devices.fetch_and(false, Ordering::Acquire)
+                    let removed = directx_device
+                        .as_ref()
+                        .and_then(|devices| removed_reason(&devices.device))
+                        .or_else(|| {
+                            invalidate_devices
+                                .fetch_and(false, Ordering::Acquire)
+                                .then(|| "the renderer asked for new devices".to_string())
+                        });
+                    if let Some(reason) = removed
+                        && let Some(old) = directx_device.take()
                     {
-                        if let Err(err) = handle_gpu_device_lost(
-                            &mut directx_device,
+                        match handle_gpu_device_lost(
+                            old,
+                            &reason,
                             platform_window.as_raw(),
                             validation_number,
                             &all_windows,
                         ) {
-                            panic!("Device lost: {err}");
+                            Ok(devices) => directx_device = Some(devices),
+                            Err(error) => {
+                                let error = format!("{error:#}");
+                                unsafe {
+                                    SendMessageW(
+                                        platform_window.as_raw(),
+                                        WM_GPUI_GPU_DEVICE_FAILED,
+                                        Some(WPARAM(validation_number)),
+                                        Some(LPARAM(&error as *const String as isize)),
+                                    );
+                                }
+                                break;
+                            }
                         }
                     }
                     let Some(all_windows) = all_windows.upgrade() else {
@@ -1278,7 +1306,9 @@ impl WindowsPlatformInner {
             | WM_GPUI_DOCK_MENU_ACTION
             | WM_GPUI_KEYBOARD_LAYOUT_CHANGED
             | WM_GPUI_DISPLAYS_CHANGED
-            | WM_GPUI_GPU_DEVICE_LOST => self.handle_gpui_events(msg, wparam, lparam),
+            | WM_GPUI_GPU_DEVICE_LOST
+            | WM_GPUI_GPU_DEVICE_REMOVED
+            | WM_GPUI_GPU_DEVICE_FAILED => self.handle_gpui_events(msg, wparam, lparam),
             WM_POWERBROADCAST => self.handle_power_broadcast(wparam, lparam),
             WM_DISPLAYCHANGE => self.handle_display_change(handle),
             WM_QUERYENDSESSION => Some(1),
@@ -1307,6 +1337,8 @@ impl WindowsPlatformInner {
             WM_GPUI_KEYBOARD_LAYOUT_CHANGED => self.handle_keyboard_layout_change(),
             WM_GPUI_DISPLAYS_CHANGED => self.handle_displays_changed(),
             WM_GPUI_GPU_DEVICE_LOST => self.handle_device_lost(lparam),
+            WM_GPUI_GPU_DEVICE_REMOVED => self.handle_device_removed(lparam),
+            WM_GPUI_GPU_DEVICE_FAILED => self.handle_device_failed(lparam),
             _ => unreachable!(),
         }
     }
@@ -1489,10 +1521,34 @@ impl WindowsPlatformInner {
         let directx_devices = unsafe { &*directx_devices };
         let mut current = self.state.directx_devices.borrow_mut();
         // The platform may have switched to headless while the device was being recovered.
-        if current.is_some() {
+        if current.is_some() || self.state.devices_removed.replace(false) {
             *current = Some(directx_devices.clone());
+            drop(current);
+            crate::device_loss::report(crate::device_loss::DeviceLoss::Recovered);
         }
 
+        Some(0)
+    }
+
+    /// Asked again while no new device can be made yet; the embedder hears the first time.
+    fn handle_device_removed(&self, lparam: LPARAM) -> Option<isize> {
+        let devices = self.state.directx_devices.borrow_mut().take();
+        if devices.is_none() {
+            return Some(0);
+        }
+        drop(devices);
+        self.state.devices_removed.set(true);
+        #[cfg(feature = "native-dx12")]
+        crate::directx12::retire_current();
+        let reason = unsafe { *(lparam.0 as *const &str) };
+        crate::device_loss::report(crate::device_loss::DeviceLoss::Removed { reason });
+        Some(0)
+    }
+
+    fn handle_device_failed(&self, lparam: LPARAM) -> Option<isize> {
+        let error = unsafe { &*(lparam.0 as *const String) };
+        crate::device_loss::report(crate::device_loss::DeviceLoss::Failed { error });
+        unsafe { PostQuitMessage(1) };
         Some(0)
     }
 }
@@ -1546,7 +1602,7 @@ pub(crate) struct WindowCreationInfo {
     pub(crate) main_receiver: PriorityQueueReceiver<RunnableVariant>,
     pub(crate) platform_window_handle: HWND,
     pub(crate) disable_direct_composition: bool,
-    pub(crate) directx_devices: DirectXDevices,
+    pub(crate) directx_devices: Option<DirectXDevices>,
     /// Flag to instruct the `VSyncProvider` thread to invalidate the directx devices
     /// as resizing them has failed, causing us to have lost at least the render target.
     pub(crate) invalidate_devices: Arc<AtomicBool>,
@@ -1774,15 +1830,11 @@ type RendererDevice = windows::Win32::Graphics::Direct3D12::ID3D12Device;
 #[cfg(not(feature = "native-dx12"))]
 type RendererDevice = windows::Win32::Graphics::Direct3D11::ID3D11Device;
 
-fn check_device_lost(device: &RendererDevice) -> bool {
-    let device_state = unsafe { device.GetDeviceRemovedReason() };
-    match device_state {
-        Ok(_) => false,
-        Err(err) => {
-            log::error!("DirectX device lost detected: {:?}", err);
-            true
-        }
-    }
+/// Why the device was removed, once it was.
+fn removed_reason(device: &RendererDevice) -> Option<String> {
+    let error = unsafe { device.GetDeviceRemovedReason() }.err()?;
+    log::error!("the GPU device was removed: {error}");
+    Some(error.to_string())
 }
 
 struct PreparedDevices {
@@ -1856,22 +1908,49 @@ fn is_window_station_visible() -> bool {
     result.is_ok() && flags.dwFlags & WSF_VISIBLE as u32 != 0
 }
 
+/// Has every window, the platform and the embedder let go of the removed device, then makes new
+/// devices: D3D12 refuses a new device for the adapter while anything references the old one.
 fn handle_gpu_device_lost(
-    directx_devices: &mut DirectXDevices,
+    removed: DirectXDevices,
+    reason: &str,
     platform_window: HWND,
     validation_number: usize,
     all_windows: &std::sync::Weak<RwLock<SmallVec<[TrackedWindow; 4]>>>,
-) -> Result<()> {
+) -> Result<DirectXDevices> {
+    drop(removed);
+    let release = || unsafe {
+        SendMessageW(
+            platform_window,
+            WM_GPUI_GPU_DEVICE_REMOVED,
+            Some(WPARAM(validation_number)),
+            Some(LPARAM(&reason as *const &str as isize)),
+        );
+        if let Some(all_windows) = all_windows.upgrade() {
+            for window in all_windows.read().iter() {
+                SendMessageW(
+                    window.as_raw(),
+                    WM_GPUI_GPU_DEVICE_REMOVED,
+                    Some(WPARAM(validation_number)),
+                    None,
+                );
+            }
+        }
+    };
+    release();
+    // What the removal dropped is reported from this thread, as every frame's outcome is.
+    crate::present_feedback::poll();
+
     // Here we wait a bit to ensure the system has time to recover from the device lost state.
     // If we don't wait, the final drawing result will be blank.
     std::thread::sleep(std::time::Duration::from_millis(350));
 
     // A driver update or a GPU that is being re-plugged leaves no usable
     // adapter for several seconds, far longer than one round of retries, and
-    // the caller panics without devices. Keep asking for about a minute.
+    // an embedder may take a while to release what it made on the old device.
+    // Keep asking for about a minute.
     const RECOVERY_ROUNDS: usize = 60;
     let mut round = 0;
-    *directx_devices = loop {
+    let directx_devices = loop {
         round += 1;
         match try_to_recover_from_device_lost(|| {
             DirectXDevices::new()
@@ -1880,6 +1959,7 @@ fn handle_gpu_device_lost(
             Ok(devices) => break devices,
             Err(error) if round < RECOVERY_ROUNDS => {
                 log::warn!("DirectX devices are not back yet ({error:#}); retrying");
+                release();
                 std::thread::sleep(std::time::Duration::from_millis(500));
             }
             Err(error) => return Err(error),
@@ -1887,7 +1967,7 @@ fn handle_gpu_device_lost(
     };
     log::info!("DirectX devices successfully recreated.");
 
-    let lparam = LPARAM(directx_devices as *const _ as _);
+    let lparam = LPARAM(&directx_devices as *const _ as _);
     unsafe {
         SendMessageW(
             platform_window,
@@ -1920,7 +2000,7 @@ fn handle_gpu_device_lost(
             }
         }
     }
-    Ok(())
+    Ok(directx_devices)
 }
 
 const PLATFORM_WINDOW_CLASS_NAME: PCWSTR = w!("Zed::PlatformWindow");

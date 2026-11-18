@@ -27,6 +27,10 @@ pub(crate) const WM_GPUI_DOCK_MENU_ACTION: u32 = WM_USER + 4;
 pub(crate) const WM_GPUI_FORCE_UPDATE_WINDOW: u32 = WM_USER + 5;
 pub(crate) const WM_GPUI_KEYBOARD_LAYOUT_CHANGED: u32 = WM_USER + 6;
 pub(crate) const WM_GPUI_GPU_DEVICE_LOST: u32 = WM_USER + 7;
+/// The GPU device was removed: let go of everything on it.
+pub(crate) const WM_GPUI_GPU_DEVICE_REMOVED: u32 = WM_USER + 8;
+/// To the platform window: no new GPU device could be made.
+pub(crate) const WM_GPUI_GPU_DEVICE_FAILED: u32 = WM_USER + 9;
 pub(crate) const WM_GPUI_DISPLAYS_CHANGED: u32 = WM_USER + 10;
 
 const SIZE_MOVE_LOOP_TIMER_ID: usize = 1;
@@ -174,7 +178,8 @@ impl WindowsWindowInner {
             }
             WM_GPUI_CURSOR_STYLE_CHANGED
             | WM_GPUI_FORCE_UPDATE_WINDOW
-            | WM_GPUI_GPU_DEVICE_LOST => self.handle_gpui_events(handle, msg, wparam, lparam),
+            | WM_GPUI_GPU_DEVICE_LOST
+            | WM_GPUI_GPU_DEVICE_REMOVED => self.handle_gpui_events(handle, msg, wparam, lparam),
             _ => None,
         };
         if let Some(n) = handled {
@@ -1472,8 +1477,20 @@ impl WindowsWindowInner {
             WM_GPUI_CURSOR_STYLE_CHANGED => self.handle_cursor_changed(lparam),
             WM_GPUI_FORCE_UPDATE_WINDOW => self.draw_window(handle, true),
             WM_GPUI_GPU_DEVICE_LOST => self.handle_device_lost(lparam),
+            WM_GPUI_GPU_DEVICE_REMOVED => self.handle_device_removed(),
             _ => unreachable!(),
         }
+    }
+
+    fn handle_device_removed(&self) -> Option<isize> {
+        match self.state.renderer.try_borrow_mut() {
+            Ok(mut renderer) => renderer.release_device(),
+            // Asked again on the next attempt to make a device.
+            Err(_) => log::warn!(
+                "the window's renderer is busy; it lets go of the removed GPU device later"
+            ),
+        }
+        Some(0)
     }
 
     fn handle_device_lost(&self, lparam: LPARAM) -> Option<isize> {

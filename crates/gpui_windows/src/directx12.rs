@@ -59,6 +59,14 @@ pub fn renderer_d3d12_device() -> Option<RendererD3D12Handle> {
     })
 }
 
+/// The device was removed: it is handed out no more, so nothing new holds it while it is replaced.
+pub(crate) fn retire_current() {
+    CURRENT
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .device = Weak::new();
+}
+
 #[derive(Clone)]
 pub(crate) struct DirectXDevices {
     pub(super) gpu: Arc<device::Device>,

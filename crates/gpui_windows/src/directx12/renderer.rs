@@ -545,7 +545,7 @@ impl Drop for FrameLatency {
     }
 }
 
-impl Drop for DirectXRenderer {
+impl Drop for Renderer {
     fn drop(&mut self) {
         if self.swap_chain.is_some() {
             crate::present_feedback::forget(self.hwnd);
@@ -553,7 +553,7 @@ impl Drop for DirectXRenderer {
     }
 }
 
-pub(crate) struct DirectXRenderer {
+struct Renderer {
     hwnd: HWND,
     gpu: Arc<Device>,
     atlas: Arc<Atlas>,
@@ -617,7 +617,7 @@ struct DrawHistory {
     fresh: bool,
 }
 
-impl DirectXRenderer {
+impl Renderer {
     /// vue-native: the composition device and the container drawn under the
     /// app's surface, each as an owned COM pointer (the caller releases them).
     /// `None` without DirectComposition. A lost device rebuilds the tree, so
@@ -796,9 +796,6 @@ impl DirectXRenderer {
             self.pipelines.prewarm(HDR_FORMAT);
         }
         Ok(())
-    }
-    pub(crate) fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
-        self.atlas.clone()
     }
     pub(crate) fn set_present_no_wait(&mut self, enabled: bool) {
         self.present_no_wait = enabled;
@@ -2792,6 +2789,163 @@ fn upload_effect_texture(
     })
 }
 
+/// A window's renderer, which can let go of its device: D3D12 makes no new device for an adapter
+/// while anything still references the removed one.
+pub(crate) struct DirectXRenderer {
+    live: Option<Renderer>,
+    hwnd: HWND,
+    atlas: Arc<Atlas>,
+    disable_direct_composition: bool,
+    /// What the renderer had when it let go, applied when it is rebuilt.
+    width: u32,
+    height: u32,
+    present_no_wait: bool,
+    hdr_wanted: Option<HdrOutput>,
+}
+
+impl DirectXRenderer {
+    pub(crate) fn new(
+        hwnd: HWND,
+        devices: &DirectXDevices,
+        disable_direct_composition: bool,
+    ) -> Result<Self> {
+        let live = Renderer::new(hwnd, devices, disable_direct_composition)?;
+        Ok(Self {
+            atlas: live.atlas.clone(),
+            live: Some(live),
+            hwnd,
+            disable_direct_composition,
+            width: 1,
+            height: 1,
+            present_no_wait: false,
+            hdr_wanted: None,
+        })
+    }
+
+    /// A window opened while the device is removed; it draws once the renderer has a new one.
+    pub(crate) fn without_device(hwnd: HWND, disable_direct_composition: bool) -> Result<Self> {
+        Ok(Self {
+            live: None,
+            hwnd,
+            atlas: Arc::new(Atlas::without_device()),
+            disable_direct_composition,
+            width: 1,
+            height: 1,
+            present_no_wait: false,
+            hdr_wanted: None,
+        })
+    }
+
+    pub(crate) fn get_font_info() -> &'static FontInfo {
+        Renderer::get_font_info()
+    }
+
+    pub(crate) fn vn_composition_underlay(&self) -> Option<(usize, usize)> {
+        self.live.as_ref()?.vn_composition_underlay()
+    }
+
+    pub(crate) fn set_hdr_output(&mut self, output: Option<HdrOutput>) -> bool {
+        self.hdr_wanted = output;
+        self.live
+            .as_mut()
+            .is_none_or(|live| live.set_hdr_output(output))
+    }
+
+    pub(crate) fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
+        self.atlas.clone()
+    }
+
+    pub(crate) fn set_present_no_wait(&mut self, enabled: bool) {
+        self.present_no_wait = enabled;
+        if let Some(live) = self.live.as_mut() {
+            live.set_present_no_wait(enabled);
+        }
+    }
+
+    pub(crate) fn mark_drawable(&mut self) {
+        if let Some(live) = self.live.as_mut() {
+            live.mark_drawable();
+        }
+    }
+
+    /// Drops the swap chain, every target, pipeline and atlas page, and the device.
+    pub(crate) fn release_device(&mut self) {
+        let Some(live) = self.live.take() else {
+            return;
+        };
+        if unsafe { live.gpu.device.GetDeviceRemovedReason() }.is_ok()
+            && let Err(error) = live.gpu.wait_idle()
+        {
+            log::error!("waiting for the GPU before releasing the renderer: {error:#}");
+        }
+        (self.width, self.height) = (live.width, live.height);
+        self.hdr_wanted = live.hdr_wanted;
+        drop(live);
+        self.atlas.release_device();
+    }
+
+    pub(crate) fn handle_device_lost(&mut self, devices: &DirectXDevices) -> Result<()> {
+        if let Some(live) = self.live.as_mut() {
+            return live.handle_device_lost(devices);
+        }
+        let mut live = crate::try_to_recover_from_device_lost(|| {
+            let mut live = Renderer::new(self.hwnd, devices, self.disable_direct_composition)?;
+            live.resize(size(
+                DevicePixels(self.width as i32),
+                DevicePixels(self.height as i32),
+            ))?;
+            Ok(live)
+        })?;
+        self.atlas.handle_device_lost(devices.gpu.clone());
+        live.atlas = self.atlas.clone();
+        live.skip_draws = true;
+        live.present_no_wait = self.present_no_wait;
+        live.hdr_wanted = self.hdr_wanted;
+        self.live = Some(live);
+        Ok(())
+    }
+
+    pub(crate) fn resize(&mut self, new_size: Size<DevicePixels>) -> Result<()> {
+        match self.live.as_mut() {
+            Some(live) => live.resize(new_size),
+            None => {
+                self.width = new_size.width.0.max(1) as u32;
+                self.height = new_size.height.0.max(1) as u32;
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) fn draw(
+        &mut self,
+        scene: &Scene,
+        appearance: WindowBackgroundAppearance,
+    ) -> Result<()> {
+        match self.live.as_mut() {
+            Some(live) => live.draw(scene, appearance),
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn render_to_image(
+        &mut self,
+        scene: &Scene,
+        appearance: WindowBackgroundAppearance,
+    ) -> Result<image::RgbaImage> {
+        self.live
+            .as_mut()
+            .context("the renderer's D3D12 device was removed and no new one is ready yet")?
+            .render_to_image(scene, appearance)
+    }
+
+    pub(crate) fn gpu_specs(&self) -> Result<GpuSpecs> {
+        self.live
+            .as_ref()
+            .context("the renderer's D3D12 device was removed and no new one is ready yet")?
+            .gpu_specs()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2903,9 +3057,9 @@ mod tests {
         Ok(())
     }
 
-    fn offscreen(width: u32, height: u32) -> Result<DirectXRenderer> {
+    fn offscreen(width: u32, height: u32) -> Result<Renderer> {
         let gpu = Device::new()?;
-        Ok(DirectXRenderer {
+        Ok(Renderer {
             hwnd: HWND(ptr::null_mut()),
             atlas: Arc::new(Atlas::new(gpu.clone())),
             pipelines: Pipelines::new(&gpu.device)?,
@@ -3550,7 +3704,7 @@ mod tests {
             scene
         };
         let mut renderer = offscreen(64, 64)?;
-        let center = |renderer: &mut DirectXRenderer| -> Result<[u8; 4]> {
+        let center = |renderer: &mut Renderer| -> Result<[u8; 4]> {
             let image = renderer.render_to_image(&scene(), WindowBackgroundAppearance::Opaque)?;
             assert_eq!(image.get_pixel(2, 2).0, [0, 0, 0, 255]);
             Ok(image.get_pixel(32, 32).0)
@@ -3712,7 +3866,7 @@ mod tests {
         Ok(())
     }
 
-    fn draw_repeatedly(renderer: &mut DirectXRenderer, scene: &Scene, frames: u32) -> Result<()> {
+    fn draw_repeatedly(renderer: &mut Renderer, scene: &Scene, frames: u32) -> Result<()> {
         for _ in 0..frames {
             renderer.render_to_image(scene, WindowBackgroundAppearance::Transparent)?;
         }

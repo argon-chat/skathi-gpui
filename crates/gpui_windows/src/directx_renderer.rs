@@ -553,6 +553,13 @@ impl DirectXRenderer {
         Ok(())
     }
 
+    /// D3D11 makes a new device while the removed one is referenced, so this keeps it.
+    pub(crate) fn release_device(&mut self) {}
+
+    pub(crate) fn without_device(_hwnd: HWND, _disable_direct_composition: bool) -> Result<Self> {
+        anyhow::bail!("the GPU device was removed and no new one is ready yet")
+    }
+
     pub(crate) fn handle_device_lost(&mut self, directx_devices: &DirectXDevices) -> Result<()> {
         try_to_recover_from_device_lost(|| {
             self.handle_device_lost_impl(directx_devices)

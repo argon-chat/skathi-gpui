@@ -117,7 +117,7 @@ pub(crate) struct WindowsWindowInner {
 impl WindowsWindowState {
     fn new(
         hwnd: HWND,
-        directx_devices: &DirectXDevices,
+        directx_devices: Option<&DirectXDevices>,
         window_params: &CREATESTRUCTW,
         current_cursor: Option<HCURSOR>,
         cursor_visible: Arc<AtomicBool>,
@@ -146,8 +146,11 @@ impl WindowsWindowState {
         };
         let border_offset = WindowBorderOffset::default();
         let restore_from_minimized = None;
-        let renderer = DirectXRenderer::new(hwnd, directx_devices, disable_direct_composition)
-            .context("Creating DirectX renderer")?;
+        let renderer = match directx_devices {
+            Some(devices) => DirectXRenderer::new(hwnd, devices, disable_direct_composition),
+            None => DirectXRenderer::without_device(hwnd, disable_direct_composition),
+        }
+        .context("Creating DirectX renderer")?;
         let callbacks = Callbacks::default();
         let input_handler = None;
         let pending_surrogate = None;
@@ -278,7 +281,7 @@ impl WindowsWindowInner {
     fn new(context: &mut WindowCreateContext, hwnd: HWND, cs: &CREATESTRUCTW) -> Result<Rc<Self>> {
         let state = WindowsWindowState::new(
             hwnd,
-            &context.directx_devices,
+            context.directx_devices.as_ref(),
             cs,
             context.current_cursor,
             context.cursor_visible.clone(),
@@ -436,7 +439,7 @@ struct WindowCreateContext {
     platform_window_handle: HWND,
     appearance: WindowAppearance,
     disable_direct_composition: bool,
-    directx_devices: DirectXDevices,
+    directx_devices: Option<DirectXDevices>,
     invalidate_devices: Arc<AtomicBool>,
     draw_coordinator: Rc<DrawCoordinator>,
     parent_hwnd: Option<HWND>,
