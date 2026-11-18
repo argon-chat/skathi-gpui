@@ -483,7 +483,8 @@ impl WindowsPlatform {
         std::thread::Builder::new()
             .name("VSyncProvider".to_owned())
             .spawn(move || {
-                let vsync_provider = VSyncProvider::new();
+                let windows = all_windows.clone();
+                let mut vsync_provider = VSyncProvider::new(move || vsync_monitor(&windows));
                 loop {
                     crate::frame_pacing::wait_while_paced();
                     let signal_source = vsync_provider.wait_for_vsync();
@@ -532,6 +533,18 @@ impl WindowsPlatform {
             })
             .unwrap();
     }
+}
+
+/// The monitor showing the first window that is shown, or the primary one.
+fn vsync_monitor(windows: &std::sync::Weak<RwLock<SmallVec<[TrackedWindow; 4]>>>) -> HMONITOR {
+    let shown = windows.upgrade().and_then(|windows| {
+        windows
+            .read()
+            .iter()
+            .map(TrackedWindow::as_raw)
+            .find(|&hwnd| unsafe { IsWindowVisible(hwnd).as_bool() && !IsIconic(hwnd).as_bool() })
+    });
+    unsafe { MonitorFromWindow(shown.unwrap_or_default(), MONITOR_DEFAULTTOPRIMARY) }
 }
 
 fn encode_restart_arguments(arguments: &[OsString]) -> OsString {
