@@ -1,5 +1,6 @@
 mod backdrop;
 mod edr;
+mod presented;
 mod vn_effect;
 mod vn_layer;
 
@@ -160,6 +161,12 @@ pub struct MetalRenderer {
     headless_render_target: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
     /// vue-native: presents made while present feedback was wanted.
     presents: u64,
+    /// vue-native: those whose presented handler has not run yet.
+    presented: Arc<Mutex<presented::Presents>>,
+    /// vue-native: when the display link's drawable for this frame is to reach the screen.
+    frame_target: Option<f64>,
+    /// vue-native: the screen's refresh interval, in nanoseconds.
+    refresh_ns: u64,
     /// vue-native: the format the pipelines draw, the layer's (`BGRA8Unorm`, or `RGBA16Float`
     /// in EDR) or that of a drawable handed out before the layer switched.
     target_format: MTLPixelFormat,
@@ -413,6 +420,9 @@ impl MetalRenderer {
             #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
             headless_render_target: None,
             presents: 0,
+            presented: Arc::default(),
+            frame_target: None,
+            refresh_ns: 16_666_667,
             target_format: MTLPixelFormat::BGRA8Unorm,
             spare_pipelines: None,
             sdr_color_space: None,
@@ -560,6 +570,19 @@ impl MetalRenderer {
         }
     }
 
+    /// vue-native: the display link's `targetPresentationTimestamp` for the drawable last handed
+    /// to [`Self::set_frame_drawable`].
+    pub fn set_frame_target(&mut self, at: f64) {
+        self.frame_target = Some(at);
+    }
+
+    /// vue-native: the refresh interval of the screen the layer is on.
+    pub fn set_refresh_interval(&mut self, interval: std::time::Duration) {
+        if !interval.is_zero() {
+            self.refresh_ns = interval.as_nanos() as u64;
+        }
+    }
+
     /// Record whether a `CAMetalDisplayLink` drives the layer. While one
     /// does, frames are drawn only into the drawables it hands out.
     pub fn set_display_link_attached(&mut self, attached: bool) {
@@ -612,6 +635,7 @@ impl MetalRenderer {
                 return;
             }
         };
+        let target = self.frame_target.take();
         let drawable = match &mut self.display_link_mode {
             DisplayLinkMode::Attached { drawable } => {
                 let Some(drawable) = drawable.take() else {
@@ -652,7 +676,11 @@ impl MetalRenderer {
             }
         };
 
-        self.report_present(&layer, &drawable);
+        let target = match (&self.display_link_mode, target) {
+            (DisplayLinkMode::Attached { .. }, Some(target)) => host_ns(target),
+            _ => host_ns(current_media_time()) + self.refresh_ns,
+        };
+        self.report_present(&layer, &drawable, target);
         if self.presents_with_transaction {
             command_buffer.commit();
             command_buffer.waitUntilScheduled();
@@ -663,39 +691,45 @@ impl MetalRenderer {
         }
     }
 
-    /// vue-native: tells `gpui::present_feedback` when the drawable reached the screen. The
-    /// layer is the window's view's backing layer, so it names the window.
+    /// vue-native: tells `gpui::present_feedback` when the drawable, aimed at `target`, reached
+    /// the screen. The layer is the window's view's backing layer, so it names the window.
     fn report_present(
         &mut self,
         layer: &CAMetalLayer,
         drawable: &ProtocolObject<dyn CAMetalDrawable>,
+        target: u64,
     ) {
-        use gpui::present_feedback::{PresentOutcome, present_feedback_wanted, present_listener};
-        if !present_feedback_wanted() {
-            return;
+        use gpui::present_feedback::{present_feedback_wanted, present_listener};
+        let listener = present_listener().filter(|_| present_feedback_wanted());
+        {
+            let mut presented = self.presented.lock();
+            presented.presenting(target);
+            if listener.is_some() {
+                self.presents += 1;
+                presented.queued(self.presents, target);
+            }
         }
-        let Some(listener) = present_listener() else {
+        let Some(listener) = listener else {
             return;
         };
         let window = ptr::from_ref(layer) as u64;
-        self.presents += 1;
         let present = self.presents;
         listener.queued(window, present);
+        let (presented, refresh_ns) = (self.presented.clone(), self.refresh_ns);
         type Shown = ptr::NonNull<ProtocolObject<dyn MTLDrawable>>;
         let handler = RcBlock::new(move |shown: Shown| {
             // SAFETY: Metal passes the drawable the handler was added to, alive for the call;
             // `presentedTime` is a CFTimeInterval getter (macOS 10.15.4+).
             let at: f64 = unsafe { objc2::msg_send![shown.as_ref(), presentedTime] };
-            let outcome = if at > 0.0 {
-                PresentOutcome::Displayed {
-                    at_ns: (at * 1e9) as u64,
-                    refresh_ns: 0,
-                    exact: true,
+            let at = if at > 0.0 { host_ns(at) } else { 0 };
+            // Held while reporting, so handlers on different threads report in present order.
+            let mut presented = presented.lock();
+            for (present, outcome) in presented.presented(present, at, refresh_ns) {
+                if at == 0 {
+                    log::debug!("present {present} had no presentedTime: {outcome:?}");
                 }
-            } else {
-                PresentOutcome::Discarded
-            };
-            listener.resolved(window, present, outcome);
+                listener.resolved(window, present, outcome);
+            }
         });
         // SAFETY: Metal copies the block and calls it once, after the drawable was shown or skipped.
         unsafe { drawable.addPresentedHandler(RcBlock::as_ptr(&handler)) };
@@ -1518,6 +1552,20 @@ impl MetalRenderer {
         }
         Ok(())
     }
+}
+
+/// A Core Animation host time in seconds, as nanoseconds.
+fn host_ns(seconds: f64) -> u64 {
+    (seconds * 1e9) as u64
+}
+
+fn current_media_time() -> f64 {
+    #[link(name = "QuartzCore", kind = "framework")]
+    unsafe extern "C" {
+        fn CACurrentMediaTime() -> f64;
+    }
+    // SAFETY: no arguments; reads the host clock.
+    unsafe { CACurrentMediaTime() }
 }
 
 fn new_command_encoder_for_texture(

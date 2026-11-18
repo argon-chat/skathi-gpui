@@ -911,6 +911,14 @@ impl MacWindowState {
         if !self.draws() {
             return;
         }
+        let screen: *mut AnyObject = unsafe { msg_send![self.native_window, screen] };
+        // SAFETY: AppKit's `screen` is a live NSScreen or nil.
+        if let Some(screen) = unsafe { screen.as_ref() } {
+            let fps: isize = unsafe { msg_send![screen, maximumFramesPerSecond] };
+            if fps > 0 {
+                self.renderer.set_refresh_interval(Duration::from_secs_f64(1.0 / fps as f64));
+            }
+        }
         let covered = !self.on_screen();
         match &mut self.frame_source {
             FrameSource::Metal(_) if covered => {
@@ -4078,6 +4086,7 @@ fn metal_frame(
         return;
     };
     lock.renderer.set_frame_drawable(Some(update.drawable()));
+    lock.renderer.set_frame_target(update.targetPresentationTimestamp());
     drop(lock);
     metal_frames.begin_frame();
     callback(RequestFrameOptions {
