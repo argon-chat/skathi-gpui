@@ -488,10 +488,19 @@ impl TaffyLayoutEngine {
                         probe.max_size.height = none;
                     }
                 }
-                if let (Some(basis), Some(_)) = (node.flex_basis, self.main_axis(node.id)) {
-                    probe.flex_basis = basis_dimension(basis.basis);
-                    probe.flex_grow = 0.;
-                    probe.flex_shrink = 0.;
+                if let Some(main) = self.main_axis(node.id) {
+                    // `size` is the box's own size at the basis, not what the flex line makes of
+                    // it: a container laid out again at last frame's size would shrink it.
+                    let sized = [&node.width, &node.height][main].iter().any(Option::is_some);
+                    if let Some(basis) = node.flex_basis {
+                        probe.flex_basis = basis_dimension(basis.basis);
+                    } else if sized {
+                        probe.flex_basis = taffy::style::Dimension::auto();
+                    }
+                    if node.flex_basis.is_some() || sized {
+                        probe.flex_grow = 0.;
+                        probe.flex_shrink = 0.;
+                    }
                 }
                 if probe != requested {
                     self.taffy.set_style(node.id.0, probe).expect(EXPECT_MESSAGE);
