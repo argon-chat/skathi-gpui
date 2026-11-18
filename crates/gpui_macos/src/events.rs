@@ -27,6 +27,8 @@ use objc2_app_kit::{
     NSHomeFunctionKey, NSLeftArrowFunctionKey, NSModeSwitchFunctionKey, NSPageDownFunctionKey,
     NSPageUpFunctionKey, NSPointingDeviceType, NSRightArrowFunctionKey, NSUpArrowFunctionKey,
 };
+use objc2_foundation::NSProcessInfo;
+use std::time::{Duration, Instant};
 use std::{borrow::Cow, ffi::c_void};
 
 pub(crate) const ESCAPE_KEY: u16 = 0x1b;
@@ -410,7 +412,14 @@ pub(crate) fn pen_sample(
         twist: rotation.rem_euclid(360.0),
         width: 0.0,
         height: 0.0,
+        time: None,
     }
+}
+
+/// When the hardware reported `event`: its `timestamp` and `systemUptime` share a clock.
+fn event_time(event: &NSEvent) -> Option<Instant> {
+    let age = NSProcessInfo::processInfo().systemUptime() - event.timestamp();
+    Instant::now().checked_sub(Duration::from_secs_f64(age.max(0.0)))
 }
 
 /// `input` as a [`PenEvent`] when a tablet's pen made it (a mouse event of the tablet-point
@@ -445,7 +454,7 @@ pub(crate) unsafe fn with_pen(native_event: *mut AnyObject, input: PlatformInput
             _ => return input,
         };
         let tilt = native_event.tilt();
-        let sample = pen_sample(
+        let mut sample = pen_sample(
             position,
             if contact {
                 native_event.pressure()
@@ -456,6 +465,7 @@ pub(crate) unsafe fn with_pen(native_event: *mut AnyObject, input: PlatformInput
             (tilt.x, tilt.y),
             native_event.rotation(),
         );
+        sample.time = event_time(native_event);
         let side = native_event.buttonMask().0
             & (NSEventButtonMask::PenLowerSide.0 | NSEventButtonMask::PenUpperSide.0)
             != 0;

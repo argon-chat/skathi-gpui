@@ -278,7 +278,7 @@ static FREQUENCY: LazyLock<i64> = LazyLock::new(|| {
     f.max(1)
 });
 
-fn qpc() -> i64 {
+pub(crate) fn qpc() -> i64 {
     let mut now = 0;
     // SAFETY: always succeeds on XP and later.
     unsafe { QueryPerformanceCounter(&mut now).ok() };

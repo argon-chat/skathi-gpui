@@ -3,12 +3,14 @@
 //! the system's pen gestures (press-and-hold right click, flicks) on top of the stroke.
 
 use std::cell::Cell;
+use std::time::{Duration, Instant};
 
 use gpui::{MouseButton, PenSample, Point, point, px};
 use windows::{
     Win32::{
         Foundation::{HWND, POINT, RECT},
         Graphics::Gdi::ClientToScreen,
+        System::SystemInformation::GetTickCount,
         UI::{Controls::*, Input::Pointer::*, WindowsAndMessaging::*},
     },
     core::BOOL,
@@ -72,6 +74,7 @@ pub(crate) struct PenReading {
     pub(crate) rotation: u32,
     pub(crate) tilt_x: i32,
     pub(crate) tilt_y: i32,
+    pub(crate) time: Option<Instant>,
 }
 
 impl PenReading {
@@ -116,7 +119,43 @@ impl PenReading {
             },
             width: 0.0,
             height: 0.0,
+            time: self.time,
         }
+    }
+}
+
+/// The clocks a reading's time is measured against, read together.
+struct Now {
+    instant: Instant,
+    qpc: i64,
+    tick: u32,
+}
+
+impl Now {
+    fn read() -> Self {
+        Self {
+            instant: Instant::now(),
+            qpc: crate::present_feedback::qpc(),
+            // SAFETY: no arguments.
+            tick: unsafe { GetTickCount() },
+        }
+    }
+
+    /// When `info` was read: its `PerformanceCount` (QPC) when the device fills it in, else its
+    /// `dwTime` (`GetTickCount` milliseconds).
+    fn of(&self, info: &POINTER_INFO) -> Option<Instant> {
+        let age = if info.PerformanceCount != 0 {
+            Duration::from_nanos(crate::present_feedback::qpc_ns(
+                self.qpc - info.PerformanceCount as i64,
+            ))
+        } else if info.dwTime != 0 {
+            // A time after `tick` wraps past `i32::MAX`.
+            let ms = self.tick.wrapping_sub(info.dwTime);
+            Duration::from_millis(if ms > i32::MAX as u32 { 0 } else { ms.into() })
+        } else {
+            return None;
+        };
+        self.instant.checked_sub(age)
     }
 }
 
@@ -233,6 +272,7 @@ pub(crate) fn read(hwnd: HWND, pointer_id: u32) -> Option<Vec<PenReading>> {
     }
     .ok()
     .map(|_| (device, display));
+    let now = Now::read();
     // The history is newest first.
     Some(
         infos
@@ -251,6 +291,7 @@ pub(crate) fn read(hwnd: HWND, pointer_id: u32) -> Option<Vec<PenReading>> {
                     rotation: info.rotation,
                     tilt_x: info.tiltX,
                     tilt_y: info.tiltY,
+                    time: now.of(p),
                 }
             })
             .collect(),
@@ -276,6 +317,7 @@ mod tests {
             rotation: 370,
             tilt_x: 30,
             tilt_y: -95,
+            time: None,
         }
     }
 

@@ -83,7 +83,7 @@ pub(super) struct Tool {
 }
 
 impl Tool {
-    fn sample(&self, contact: bool) -> PenSample {
+    fn sample(&self, contact: bool, time: Option<Instant>) -> PenSample {
         PenSample {
             position: self.position,
             pressure: if contact { self.pressure } else { 0.0 },
@@ -93,8 +93,29 @@ impl Tool {
             twist: self.twist.rem_euclid(360.0),
             width: 0.0,
             height: 0.0,
+            time,
         }
     }
+}
+
+/// The `Instant` of a frame's `time`: milliseconds with an unspecified base, which compositors
+/// take from `CLOCK_MONOTONIC`, the clock `Instant` reads. A time that does not fit that is dropped.
+fn frame_instant(time: u32) -> Option<Instant> {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `now` is a valid out-parameter.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) } != 0 {
+        return None;
+    }
+    let instant = Instant::now();
+    let now_ms = (now.tv_sec as u64 * 1000 + now.tv_nsec as u64 / 1_000_000) as u32;
+    let age = now_ms.wrapping_sub(time);
+    if age > 10_000 {
+        return None;
+    }
+    instant.checked_sub(std::time::Duration::from_millis(age.into()))
 }
 
 pub(super) fn tablet_seat(
@@ -208,7 +229,7 @@ impl Dispatch<zwp_tablet_tool_v2::ZwpTabletToolV2, ()> for WaylandClientStatePtr
             }
             return;
         }
-        if let Event::Frame { .. } = event {
+        if let Event::Frame { time } = event {
             let modifiers = state.modifiers;
             let Some(tool) = state.tablet_tools.get_mut(&id) else {
                 return;
@@ -225,7 +246,8 @@ impl Dispatch<zwp_tablet_tool_v2::ZwpTabletToolV2, ()> for WaylandClientStatePtr
             }
             let position = tool.position;
             let eraser = tool.eraser;
-            let (hovering, touching) = (tool.sample(false), tool.sample(true));
+            let time = frame_instant(time);
+            let (hovering, touching) = (tool.sample(false, time), tool.sample(true, time));
             let mut inputs = Vec::with_capacity(steps.len());
             for step in steps {
                 let contact = matches!(step, Step::Down(_) | Step::Move(Some(_)));

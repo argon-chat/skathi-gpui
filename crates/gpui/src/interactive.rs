@@ -278,6 +278,8 @@ pub struct PenSample {
     pub width: f32,
     /// Contact size in logical pixels; 0 when the hardware does not say.
     pub height: f32,
+    /// When the hardware took the reading; `None` when the platform does not say.
+    pub time: Option<std::time::Instant>,
 }
 
 /// What a pen adds to the mouse event it stands for.
