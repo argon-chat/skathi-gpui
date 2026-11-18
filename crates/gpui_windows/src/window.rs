@@ -903,7 +903,7 @@ impl PlatformWindow for WindowsWindow {
             if activate && !unsafe { IsIconic(window.hwnd) }.as_bool() {
                 // Unlike activate(), this path never injects a synthetic key.
                 // Windows may decline the foreground request; showing is still valid.
-                unsafe { SetForegroundWindow(window.hwnd) }.ok().log_err();
+                win32_call(|| unsafe { SetForegroundWindow(window.hwnd) }.ok()).log_err();
             }
         }).detach();
         true
@@ -979,7 +979,7 @@ impl PlatformWindow for WindowsWindow {
                     uCount: 1,
                     dwTimeout: 0,
                 };
-                unsafe { FlashWindowEx(&info).ok().log_err() };
+                win32_call(|| unsafe { FlashWindowEx(&info) }.ok()).log_err();
             })
             .detach();
     }

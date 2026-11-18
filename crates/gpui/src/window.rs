@@ -366,6 +366,13 @@ pub(crate) fn draw_in_progress() -> bool {
     CURRENT_ELEMENT_ARENA.with(|current| current.get().is_some())
 }
 
+/// A frame's callbacks or draw can close its window, leaving nothing to present or schedule.
+fn window_closed(cx: &crate::AsyncApp, id: WindowId) -> bool {
+    cx.app
+        .upgrade()
+        .is_some_and(|app| !app.is_borrowed() && !app.borrow().windows.contains_key(id))
+}
+
 /// vue-native fork: how a window's frame request went, for an embedder's frame meter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameOutcome {
@@ -2684,6 +2691,9 @@ impl Window {
                             )
                         })
                         .log_err();
+                    if window_closed(&cx, handle.window_id()) {
+                        return;
+                    }
                 }
 
                 let should_draw = invalidator.is_dirty() || force_render;
@@ -2727,6 +2737,9 @@ impl Window {
                             format!("presenting frame for window {:?}", handle.window_id())
                         })
                         .log_err();
+                }
+                if window_closed(&cx, handle.window_id()) {
+                    return;
                 }
 
                 handle
@@ -11779,6 +11792,42 @@ mod tests {
         }
         cx.run_until_parked();
         assert!(!cx.app.borrow().windows.contains_key(window.window_id()));
+    }
+
+    #[gpui::test]
+    fn test_a_window_closed_by_its_own_frame_logs_no_error(cx: &mut TestAppContext) {
+        struct Errors;
+        thread_local!(static ERRORS: Cell<usize> = const { Cell::new(0) });
+        impl log::Log for Errors {
+            fn enabled(&self, metadata: &log::Metadata) -> bool {
+                metadata.level() == log::Level::Error
+            }
+            fn log(&self, record: &log::Record) {
+                if self.enabled(record.metadata()) {
+                    ERRORS.with(|errors| errors.set(errors.get() + 1));
+                }
+            }
+            fn flush(&self) {}
+        }
+        if log::set_logger(&Errors).is_ok() {
+            log::set_max_level(log::LevelFilter::Error);
+        }
+
+        let window = cx.add_window(|_, _| EmptyView);
+        let platform_window = cx.test_window(window.into());
+        window
+            .update(cx, |_, window, _| {
+                window.refresh();
+                window.on_next_frame(|window, _| window.remove_window());
+            })
+            .expect("window exists");
+        let before = ERRORS.with(Cell::get);
+        platform_window.simulate_frame_request(RequestFrameOptions {
+            require_presentation: true,
+            ..Default::default()
+        });
+        assert!(!cx.app.borrow().windows.contains_key(window.window_id()));
+        assert_eq!(ERRORS.with(Cell::get), before);
     }
 
     #[cfg(feature = "profiler")]

@@ -552,10 +552,8 @@ impl WindowsPlatform {
                                     hwnd.frame_signal.take();
                                 }
                             }
-                            RedrawWindow(Some(hwnd.as_raw()), None, None, RDW_INVALIDATE)
-                                .ok()
-                                .log_err();
                         }
+                        redraw_window(hwnd.as_raw()).log_err();
                     }
                 }
             })

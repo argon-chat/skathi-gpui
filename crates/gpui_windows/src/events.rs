@@ -322,7 +322,7 @@ impl WindowsWindowInner {
     fn handle_size_move_loop_exit(&self, handle: HWND) -> Option<isize> {
         self.state.renderer.borrow_mut().set_present_no_wait(false);
         unsafe {
-            KillTimer(Some(handle), SIZE_MOVE_LOOP_TIMER_ID).log_err();
+            win32_call(|| KillTimer(Some(handle), SIZE_MOVE_LOOP_TIMER_ID)).log_err();
         }
         // A frame dropped by the no-wait mode may have left stale content on
         // screen. The renderer reports a dropped frame as drawn, so the window

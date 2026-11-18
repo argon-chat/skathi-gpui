@@ -86,6 +86,28 @@ pub(crate) unsafe fn set_window_long(
     }
 }
 
+/// A Win32 call whose zero return is not always a failure (a timer already gone, a declined
+/// foreground request), checked by the error it set rather than the return alone.
+pub(crate) fn win32_call(
+    call: impl FnOnce() -> windows::core::Result<()>,
+) -> windows::core::Result<()> {
+    unsafe { SetLastError(ERROR_SUCCESS) };
+    match call() {
+        Err(error) if error.code().is_ok() => Ok(()),
+        result => result,
+    }
+}
+
+/// Invalidates `hwnd` from another thread. A window destroyed on its own thread stays listed
+/// until that thread drops it, so a handle gone meanwhile is not an error.
+pub(crate) fn redraw_window(hwnd: HWND) -> windows::core::Result<()> {
+    use windows::Win32::Graphics::Gdi::{RDW_INVALIDATE, RedrawWindow};
+    match unsafe { RedrawWindow(Some(hwnd), None, None, RDW_INVALIDATE) }.ok() {
+        Err(error) if error.code() == ERROR_INVALID_WINDOW_HANDLE.to_hresult() => Ok(()),
+        result => result,
+    }
+}
+
 pub(crate) fn windows_credentials_target_name(url: &str) -> String {
     format!("zed:url={}", url)
 }
@@ -199,4 +221,42 @@ where
             .log_err();
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use windows::Win32::{Foundation::HWND, UI::WindowsAndMessaging::*};
+    use windows::core::w;
+
+    use super::{redraw_window, win32_call};
+
+    fn hidden_window() -> HWND {
+        unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("STATIC"),
+                None,
+                WS_POPUP,
+                0,
+                0,
+                1,
+                1,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .expect("a window")
+    }
+
+    #[test]
+    fn a_zero_return_without_an_error_and_redrawing_a_destroyed_window_are_not_failures() {
+        let hwnd = hidden_window();
+        let kill = || win32_call(|| unsafe { KillTimer(Some(hwnd), 1) });
+        assert!(kill().is_ok());
+        unsafe { DestroyWindow(hwnd) }.expect("destroyed");
+        assert!(redraw_window(hwnd).is_ok());
+        assert!(kill().is_err());
+    }
 }
