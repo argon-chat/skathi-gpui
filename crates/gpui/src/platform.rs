@@ -2207,6 +2207,9 @@ pub struct HdrOutput {
     /// SDR white in the swap chain's linear unit: SDR white nits / 80 for Windows' scRGB, 1.0 for
     /// macOS EDR.
     pub sdr_white: f32,
+    /// The brightest value the content needs, in units of SDR white. macOS tags the layer with it
+    /// so the system raises the screen's headroom no further; Windows and wgpu ignore it.
+    pub content_headroom: f32,
 }
 
 /// vue-native fork: IEEE binary16 bits to `f32`, for the renderers' half-float readbacks.

@@ -2949,6 +2949,7 @@ mod tests {
         let sdr = renderer.render_to_image(&scene, opaque)?;
         renderer.set_hdr_output(Some(HdrOutput {
             sdr_white: SDR_WHITE,
+            content_headroom: 4.0,
         }));
         renderer.apply_hdr_output()?;
         let output = Target::new_in(&renderer.gpu, HDR_FORMAT, WIDTH, HEIGHT, 1)?;

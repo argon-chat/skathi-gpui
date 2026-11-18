@@ -1274,6 +1274,7 @@ impl DirectXRenderer {
         resources.render_target_view.take();
         let output = resources.hdr.take().map(|hdr| HdrOutput {
             sdr_white: hdr.sdr_white,
+            content_headroom: 1.0,
         });
 
         // Resizing the swap chain requires a call to the underlying DXGI adapter, which can return the device removed error.
@@ -4477,7 +4478,8 @@ pub(crate) mod effect_layer_tests {
             let opaque = WindowBackgroundAppearance::Opaque;
             let sdr = renderer.render_to_image(&scene, opaque)?;
             assert!(renderer.set_hdr_output(Some(HdrOutput {
-                sdr_white: SDR_WHITE
+                sdr_white: SDR_WHITE,
+                content_headroom: 4.0,
             })));
             let encoded = renderer.render_to_image(&scene, opaque)?;
             hdr_tests::check(&sdr, &encoded, &renderer.read_hdr_output()?)?;

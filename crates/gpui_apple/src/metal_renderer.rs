@@ -1,4 +1,5 @@
 mod backdrop;
+mod edr;
 mod vn_effect;
 mod vn_layer;
 
@@ -417,14 +418,15 @@ impl MetalRenderer {
     /// values and 1.0 stays SDR white; the layer takes the colour space of
     /// `display` (a `CGDirectDisplayID`), extended, unless the window asked
     /// for Display P3. `HdrOutput::sdr_white` does not apply: EDR is relative
-    /// to SDR white.
+    /// to SDR white. A call that only changes `content_headroom` retags the layer.
     pub fn set_hdr_output(&mut self, output: Option<HdrOutput>, display: Option<u32>) -> bool {
         let format = if output.is_some() {
             MTLPixelFormat::RGBA16Float
         } else {
             MTLPixelFormat::BGRA8Unorm
         };
-        if format != self.target_format {
+        let switching = format != self.target_format;
+        if switching {
             match FramePipelines::new(&self.device, &self.library, format) {
                 Ok(pipelines) => self.install_pipelines(pipelines),
                 Err(error) => {
@@ -443,20 +445,27 @@ impl MetalRenderer {
         let Some(layer) = &self.layer else {
             return true;
         };
-        let named = |name: &objc2_core_foundation::CFString| CGColorSpace::with_name(Some(name));
-        // SAFETY: The constants are extern, from Core Graphics.
-        let color_space = match (output.is_some(), self.use_display_p3) {
-            (true, true) => named(unsafe { kCGColorSpaceExtendedDisplayP3 }),
-            (true, false) => display
-                .and_then(display_color_space)
-                .and_then(|space| space.extended())
-                .or_else(|| named(unsafe { kCGColorSpaceExtendedSRGB })),
-            (false, true) => named(unsafe { kCGColorSpaceDisplayP3 }),
-            (false, false) => None,
-        };
-        layer.setPixelFormat(format);
-        layer.setColorspace(color_space.as_deref());
-        layer.setWantsExtendedDynamicRangeContent(output.is_some());
+        if switching {
+            let named =
+                |name: &objc2_core_foundation::CFString| CGColorSpace::with_name(Some(name));
+            // SAFETY: The constants are extern, from Core Graphics.
+            let color_space = match (output.is_some(), self.use_display_p3) {
+                (true, true) => named(unsafe { kCGColorSpaceExtendedDisplayP3 }),
+                (true, false) => display
+                    .and_then(display_color_space)
+                    .and_then(|space| space.extended())
+                    .or_else(|| named(unsafe { kCGColorSpaceExtendedSRGB })),
+                (false, true) => named(unsafe { kCGColorSpaceDisplayP3 }),
+                (false, false) => None,
+            };
+            layer.setPixelFormat(format);
+            layer.setColorspace(color_space.as_deref());
+        }
+        edr::request(
+            layer,
+            output.map(|output| output.content_headroom),
+            edr::EdrApi::of(layer),
+        );
         true
     }
 
@@ -2177,7 +2186,11 @@ mod tests {
         let scene = hdr_tests::scene(&*atlas)?;
         let size = size(DevicePixels(WIDTH as i32), DevicePixels(HEIGHT as i32));
         let sdr = renderer.render_scene_to_image(&scene, size)?;
-        assert!(renderer.set_hdr_output(Some(HdrOutput { sdr_white: 1.0 }), None));
+        let output = HdrOutput {
+            sdr_white: 1.0,
+            content_headroom: 4.0,
+        };
+        assert!(renderer.set_hdr_output(Some(output), None));
         let texture =
             objc2::rc::autoreleasepool(|_| renderer.render_offscreen_texture(&scene, size))?;
         assert_eq!(texture.pixelFormat(), MTLPixelFormat::RGBA16Float);
@@ -2204,6 +2217,65 @@ mod tests {
         assert!(renderer.set_hdr_output(None, None));
         let again = renderer.render_scene_to_image(&scene, size)?;
         assert!(again == sdr, "back on SDR, every pixel is as before");
+        Ok(())
+    }
+
+    #[test]
+    fn the_layer_asks_for_edr_up_to_the_content_headroom() -> Result<()> {
+        let mut renderer = MetalRenderer::new(Default::default(), false, false)?;
+        let layer = renderer.layer().context("no layer")?.retain();
+        let output = |content_headroom| {
+            Some(HdrOutput {
+                sdr_white: 1.0,
+                content_headroom,
+            })
+        };
+        let tag = |layer: &CAMetalLayer| {
+            let high = edr::dynamic_range(true).context("no CADynamicRangeHigh")?;
+            let range = layer.preferredDynamicRange();
+            anyhow::Ok((
+                &*range == high,
+                layer.contentsHeadroom(),
+                layer.wantsExtendedDynamicRangeContent(),
+            ))
+        };
+        let modern = edr::EdrApi::of(&layer) == edr::EdrApi::DynamicRange;
+        assert_eq!(
+            modern,
+            objc2::available!(macos = 26.0, ios = 26.0),
+            "preferredDynamicRange is used exactly where the OS has it"
+        );
+
+        assert!(renderer.set_hdr_output(output(4.0), None));
+        assert_eq!(layer.pixelFormat(), MTLPixelFormat::RGBA16Float);
+        if modern {
+            assert_eq!(tag(&layer)?, (true, 4.0, false));
+            assert!(renderer.set_hdr_output(output(2.5), None));
+            assert_eq!(tag(&layer)?, (true, 2.5, false), "retagged in place");
+            assert_eq!(layer.pixelFormat(), MTLPixelFormat::RGBA16Float);
+        } else {
+            assert!(layer.wantsExtendedDynamicRangeContent());
+        }
+        assert!(renderer.set_hdr_output(None, None));
+        assert_eq!(layer.pixelFormat(), MTLPixelFormat::BGRA8Unorm);
+        if modern {
+            assert_eq!(tag(&layer)?, (false, 0.0, false));
+        } else {
+            assert!(!layer.wantsExtendedDynamicRangeContent());
+        }
+
+        let legacy = CAMetalLayer::new();
+        edr::request(&legacy, Some(4.0), edr::EdrApi::Legacy);
+        assert!(legacy.wantsExtendedDynamicRangeContent());
+        if modern {
+            assert_eq!(
+                tag(&legacy)?,
+                (false, 0.0, true),
+                "the fallback leaves the new properties alone"
+            );
+        }
+        edr::request(&legacy, None, edr::EdrApi::Legacy);
+        assert!(!legacy.wantsExtendedDynamicRangeContent());
         Ok(())
     }
 

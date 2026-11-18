@@ -2954,6 +2954,7 @@ mod tests {
             size,
             HdrOutput {
                 sdr_white: SDR_WHITE,
+                content_headroom: 4.0,
             },
         )?;
         hdr_tests::check(&sdr, &encoded, &output)?;
