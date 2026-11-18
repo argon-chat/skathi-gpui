@@ -227,6 +227,16 @@ fn to_tile_position(unit_vertex: vec2<f32>, tile: AtlasTile) -> vec2<f32> {
   return (vec2<f32>(tile.bounds.origin) + unit_vertex * vec2<f32>(tile.bounds.size)) / atlas_size;
 }
 
+// vue-native fork: the UV rect of the tile's outermost texel centres. Tiles sit edge to edge in the
+// atlas, so a transformed or scaled sprite clamps its samples to this rect, or the bilinear filter
+// blends in the neighbouring tile's edge.
+fn to_tile_clamp(tile: AtlasTile) -> vec4<f32> {
+  let atlas_size = vec2<f32>(textureDimensions(t_sprite, 0));
+  let origin = vec2<f32>(tile.bounds.origin);
+  let size = vec2<f32>(tile.bounds.size);
+  return vec4<f32>((origin + 0.5) / atlas_size, (origin + size - 0.5) / atlas_size);
+}
+
 fn distance_from_clip_rect_impl(position: vec2<f32>, clip_bounds: Bounds) -> vec4<f32> {
     let tl = position - clip_bounds.origin;
     let br = clip_bounds.origin + clip_bounds.size - position;
@@ -1793,6 +1803,7 @@ struct MonoSpriteVarying {
     @builtin(position) position: vec4<f32>,
     @location(0) tile_position: vec2<f32>,
     @location(1) @interpolate(flat) color: vec4<f32>,
+    @location(2) @interpolate(flat) tile_clamp: vec4<f32>,
     @location(3) clip_distances: vec4<f32>,
     @location(4) @interpolate(flat) mask_bounds: vec4<f32>,
     @location(5) @interpolate(flat) mask_radii: vec4<f32>,
@@ -1827,12 +1838,14 @@ fn vs_mono_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index
     out.mask_shapes = vec4<u32>(sprite.content_mask_shapes.top_left, sprite.content_mask_shapes.top_right,
                                 sprite.content_mask_shapes.bottom_right, sprite.content_mask_shapes.bottom_left);
     out.raw_coverage = sprite.raw_coverage;
+    out.tile_clamp = to_tile_clamp(sprite.tile);
     return out;
 }
 
 @fragment
 fn fs_mono_sprite(input: MonoSpriteVarying) -> @location(0) vec4<f32> {
-    let sample = textureSample(t_sprite, s_sprite, input.tile_position).r;
+    let uv = clamp(input.tile_position, input.tile_clamp.xy, input.tile_clamp.zw);
+    let sample = textureSample(t_sprite, s_sprite, uv).r;
     var alpha_corrected = sample;
     if (input.raw_coverage == 0u) {
         alpha_corrected = apply_contrast_and_gamma_correction(sample, input.color.rgb, gamma_params.grayscale_enhanced_contrast, gamma_params.gamma_ratios);
@@ -1877,6 +1890,7 @@ struct PolySpriteVarying {
     @builtin(position) position: vec4<f32>,
     @location(0) tile_position: vec2<f32>,
     @location(1) @interpolate(flat) sprite_id: u32,
+    @location(2) @interpolate(flat) tile_clamp: vec4<f32>,
     @location(3) clip_distances: vec4<f32>,
     // vue-native fork: the pixel in the sprite's untransformed frame, where its
     // rounded corners are.
@@ -1892,6 +1906,7 @@ fn vs_poly_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index
     out.position = to_device_position_transformed(unit_vertex, sprite.bounds, sprite.transformation);
     out.local_position = unit_vertex * sprite.bounds.size + sprite.bounds.origin;
     out.tile_position = to_tile_position(unit_vertex, sprite.tile);
+    out.tile_clamp = to_tile_clamp(sprite.tile);
     out.sprite_id = instance_id;
     out.clip_distances = distance_from_clip_rect_transformed(unit_vertex, sprite.bounds, sprite.content_mask, sprite.transformation);
     return out;
@@ -1899,7 +1914,8 @@ fn vs_poly_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index
 
 @fragment
 fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
-    let sample = textureSample(t_sprite, s_sprite, input.tile_position);
+    let uv = clamp(input.tile_position, input.tile_clamp.xy, input.tile_clamp.zw);
+    let sample = textureSample(t_sprite, s_sprite, uv);
     // Alpha clip after using the derivatives.
     if (any(input.clip_distances < vec4<f32>(0.0))) {
         return vec4<f32>(0.0);

@@ -7544,7 +7544,7 @@ impl Window {
 
         let element_opacity = self.element_opacity();
         let scale_factor = self.scale_factor();
-        let glyph_origin = origin.scale(scale_factor);
+        let (glyph_origin, transformation) = self.glyph_placement(origin);
 
         let quantized_origin = Point::new(
             round_half_toward_zero(glyph_origin.x.0 * SUBPIXEL_VARIANTS_X as f32)
@@ -7593,7 +7593,7 @@ impl Window {
                     content_mask,
                     color: color.opacity(element_opacity),
                     tile,
-                    transformation: self.element_transform,
+                    transformation,
                 });
             } else {
                 self.next_frame.scene.insert_primitive(MonochromeSprite {
@@ -7605,11 +7605,30 @@ impl Window {
                     content_mask,
                     color: color.opacity(element_opacity),
                     tile,
-                    transformation: self.element_transform,
+                    transformation,
                 });
             }
         }
         Ok(())
+    }
+
+    /// vue-native fork: a glyph's origin in device pixels and the transform left to draw it with.
+    /// A transform that only translates moves the origin instead, so the glyph is rasterized at
+    /// its subpixel position like untransformed text rather than resampled between pixels.
+    fn glyph_placement(
+        &self,
+        origin: Point<Pixels>,
+    ) -> (Point<ScaledPixels>, TransformationMatrix) {
+        let origin = origin.scale(self.scale_factor());
+        let transform = self.element_transform;
+        if transform.rotation_scale != TransformationMatrix::unit().rotation_scale {
+            return (origin, transform);
+        }
+        let [x, y] = transform.translation;
+        (
+            point(origin.x + ScaledPixels(x), origin.y + ScaledPixels(y)),
+            TransformationMatrix::unit(),
+        )
     }
 
     /// vue-native fork: paints a glyph's CSS `text-shadow`, its coverage in `color` blurred by
@@ -7630,7 +7649,7 @@ impl Window {
         }
 
         let scale_factor = self.scale_factor();
-        let glyph_origin = origin.scale(scale_factor);
+        let (glyph_origin, transformation) = self.glyph_placement(origin);
         let (integer_origin, subpixel_variant) = if is_emoji {
             (
                 glyph_origin.map(|c| ScaledPixels(round_half_toward_zero(c.0))),
@@ -7702,7 +7721,7 @@ impl Window {
             content_mask,
             color: color.opacity(self.element_opacity()),
             tile,
-            transformation: self.element_transform,
+            transformation,
         });
         Ok(())
     }
@@ -7752,7 +7771,7 @@ impl Window {
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
-        let glyph_origin = origin.scale(scale_factor);
+        let (glyph_origin, transformation) = self.glyph_placement(origin);
         let integer_origin = glyph_origin.map(|c| ScaledPixels(round_half_toward_zero(c.0)));
         let params = RenderGlyphParams {
             font_id,
@@ -7791,7 +7810,7 @@ impl Window {
                 content_mask,
                 tile,
                 opacity,
-                transformation: self.element_transform,
+                transformation,
                 tint: Hsla::transparent_black(),
                 corner_shapes: CornerShapes::default(),
             });

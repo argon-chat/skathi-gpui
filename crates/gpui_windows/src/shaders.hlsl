@@ -302,6 +302,16 @@ float2 to_tile_position(float2 unit_vertex, AtlasTile tile) {
     return (float2(tile.bounds.origin) + unit_vertex * float2(tile.bounds.size)) / atlas_size;
 }
 
+// vue-native fork: the UV rect of the tile's outermost texel centres. Tiles sit edge to edge in the
+// atlas, so a transformed or scaled sprite clamps its samples to this rect, or the bilinear filter
+// blends in the neighbouring tile's edge.
+float4 to_tile_clamp(AtlasTile tile) {
+    float2 atlas_size;
+    t_sprite.GetDimensions(atlas_size.x, atlas_size.y);
+    float2 origin = float2(tile.bounds.origin);
+    return float4(origin + 0.5, origin + float2(tile.bounds.size) - 0.5) / atlas_size.xyxy;
+}
+
 // Selects corner radius based on quadrant.
 float pick_corner_radius(float2 center_to_point, Corners corner_radii) {
     if (center_to_point.x < 0.) {
@@ -1865,6 +1875,7 @@ struct MonochromeSpriteVertexOutput {
     nointerpolation float4 mask_radii: TEXCOORD2;
     nointerpolation uint raw_coverage: TEXCOORD3;
     nointerpolation uint4 mask_shapes: TEXCOORD4;
+    nointerpolation float4 tile_clamp: TEXCOORD5;
     float4 clip_distance: SV_ClipDistance;
 };
 
@@ -1876,6 +1887,7 @@ struct MonochromeSpriteFragmentInput {
     nointerpolation float4 mask_radii: TEXCOORD2;
     nointerpolation uint raw_coverage: TEXCOORD3;
     nointerpolation uint4 mask_shapes: TEXCOORD4;
+    nointerpolation float4 tile_clamp: TEXCOORD5;
     float4 clip_distance: SV_ClipDistance;
 };
 
@@ -1915,12 +1927,14 @@ MonochromeSpriteVertexOutput monochrome_sprite_vertex(uint vertex_id: SV_VertexI
     output.mask_shapes = uint4(sprite.content_mask_shapes.top_left, sprite.content_mask_shapes.top_right,
                                sprite.content_mask_shapes.bottom_right, sprite.content_mask_shapes.bottom_left);
     output.raw_coverage = sprite.raw_coverage;
+    output.tile_clamp = to_tile_clamp(sprite.tile);
     output.clip_distance = clip_distance;
     return output;
 }
 
 float4 monochrome_sprite_fragment(MonochromeSpriteFragmentInput input): SV_Target {
-    float sample = t_sprite.Sample(s_sprite, input.tile_position).r;
+    float2 uv = clamp(input.tile_position, input.tile_clamp.xy, input.tile_clamp.zw);
+    float sample = t_sprite.Sample(s_sprite, uv).r;
     float alpha_corrected = input.raw_coverage != 0u
         ? sample
         : apply_contrast_and_gamma_correction(sample, input.color.rgb, grayscale_enhanced_contrast, gamma_ratios);
@@ -1959,13 +1973,15 @@ MonochromeSpriteVertexOutput subpixel_sprite_vertex(uint vertex_id: SV_VertexID,
     output.mask_shapes = uint4(sprite.content_mask_shapes.top_left, sprite.content_mask_shapes.top_right,
                                sprite.content_mask_shapes.bottom_right, sprite.content_mask_shapes.bottom_left);
     output.raw_coverage = 0u;
+    output.tile_clamp = to_tile_clamp(sprite.tile);
     output.clip_distance = distance_from_clip_rect_transformed(
         unit_vertex, sprite.bounds, sprite.content_mask, sprite.transformation);
     return output;
 }
 
 SubpixelSpriteFragmentOutput subpixel_sprite_fragment(MonochromeSpriteFragmentInput input) {
-    float3 sample = t_sprite.Sample(s_sprite, input.tile_position).rgb;
+    float2 uv = clamp(input.tile_position, input.tile_clamp.xy, input.tile_clamp.zw);
+    float3 sample = t_sprite.Sample(s_sprite, uv).rgb;
     if (is_bgr) {
         sample = sample.bgr;
     }
@@ -2048,7 +2064,8 @@ PolychromeSpriteVertexOutput polychrome_sprite_vertex(uint vertex_id: SV_VertexI
 
 float4 polychrome_sprite_fragment(PolychromeSpriteFragmentInput input): SV_Target {
     PolychromeSprite sprite = poly_sprites[input.sprite_id];
-    float4 sample = t_sprite.Sample(s_sprite, input.tile_position);
+    float4 tile_clamp = to_tile_clamp(sprite.tile);
+    float4 sample = t_sprite.Sample(s_sprite, clamp(input.tile_position, tile_clamp.xy, tile_clamp.zw));
     float distance = shaped_quad_sdf(input.local_position, sprite.bounds, sprite.corner_radii, sprite.corner_shapes);
 
     float4 color = sample;

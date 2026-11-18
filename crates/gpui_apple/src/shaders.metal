@@ -801,6 +801,19 @@ fragment float4 underline_fragment(UnderlineFragmentInput input [[stage_in]],
   }
 }
 
+// vue-native fork: clamps an atlas UV to the tile's outermost texel centres.
+// Tiles sit edge to edge in the atlas, so without it the bilinear filter blends
+// the neighbouring tile's edge into a transformed or scaled sprite.
+float2 clamp_to_tile(float2 tile_position, AtlasTile tile,
+                     texture2d<float> atlas_texture) {
+  float2 atlas_size =
+      float2(atlas_texture.get_width(), atlas_texture.get_height());
+  float2 origin = float2(tile.bounds.origin.x, tile.bounds.origin.y);
+  float2 size = float2(tile.bounds.size.width, tile.bounds.size.height);
+  return clamp(tile_position, (origin + 0.5) / atlas_size,
+               (origin + size - 0.5) / atlas_size);
+}
+
 // vue-native fork: `sprite_id` carries the sprite to the fragment shader for
 // its content mask's rounded corners. (gpui_windows and gpui_wgpu pass the
 // mask as flat varyings instead; here the sprites buffer is already bound to
@@ -877,11 +890,12 @@ fragment float4 monochrome_sprite_fragment(
 
   constexpr sampler atlas_texture_sampler(mag_filter::linear,
                                           min_filter::linear);
-  float4 sample =
-      atlas_texture.sample(atlas_texture_sampler, input.tile_position);
+  MonochromeSprite sprite = sprites[input.sprite_id];
+  float4 sample = atlas_texture.sample(
+      atlas_texture_sampler,
+      clamp_to_tile(input.tile_position, sprite.tile, atlas_texture));
   float4 color = input.color;
   // vue-native fork: the content mask's rounded corners, in screen space.
-  MonochromeSprite sprite = sprites[input.sprite_id];
   float coverage = sprite.raw_coverage
                        ? sample.a
                        : glyph_alpha_correction(sample.a, color.rgb, gamma_params);
@@ -945,8 +959,9 @@ fragment float4 polychrome_sprite_fragment(
   PolychromeSprite sprite = sprites[input.sprite_id];
   constexpr sampler atlas_texture_sampler(mag_filter::linear,
                                           min_filter::linear);
-  float4 sample =
-      atlas_texture.sample(atlas_texture_sampler, input.tile_position);
+  float4 sample = atlas_texture.sample(
+      atlas_texture_sampler,
+      clamp_to_tile(input.tile_position, sprite.tile, atlas_texture));
   // vue-native fork: the sprite's own corners in its untransformed frame.
   float distance =
       shaped_quad_sdf(input.local_position, sprite.bounds, sprite.corner_radii,
