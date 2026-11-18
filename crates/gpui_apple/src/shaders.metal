@@ -1621,6 +1621,7 @@ GradientColor prepare_fill_color(uint tag, uint color_space, Hsla solid,
 #define BG_TILE_X_FRACTION  512u
 #define BG_TILE_Y_FRACTION  1024u
 #define BG_STOP_PX_SHIFT    16u
+#define BG_STOP_CALC_SHIFT  24u
 
 float4 gradient_stop_color(Background background, uint i) {
   float4 c = hsla_to_rgba(background.colors[i].color);
@@ -1637,6 +1638,10 @@ float gradient_stop_position(Background background, uint i, float line_length) {
   float p = background.colors[i].percentage;
   if (background.flags & (1u << (BG_STOP_PX_SHIFT + i))) {
     p = (line_length > 1e-6) ? (p / line_length) : 0.0;
+  } else if (background.flags & (1u << (BG_STOP_CALC_SHIFT + i))) {
+    // Two packed halves: pixels (low, .x) plus a fraction of the line (high, .y).
+    float2 parts = float2(as_type<half2>(as_type<uint>(p)));
+    p = parts.y + ((line_length > 1e-6) ? (parts.x / line_length) : 0.0);
   }
   return p;
 }

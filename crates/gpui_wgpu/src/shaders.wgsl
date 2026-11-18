@@ -161,6 +161,7 @@ const BG_TILE_Y_FRACTION: u32 = 1024u;
 // vue-native fork: the background fills only the quad's border area.
 const BG_RING: u32 = 2048u;
 const BG_STOP_PX_SHIFT: u32 = 16u;
+const BG_STOP_CALC_SHIFT: u32 = 24u;
 
 struct Background {
     // 0u is Solid
@@ -565,6 +566,17 @@ fn gradient_stop_color(background: Background, i: u32) -> vec4<f32> {
     return c;
 }
 
+// IEEE half-precision bits as a float, without the f16 capability unpack2x16float needs.
+fn half_to_f32(h: u32) -> f32 {
+    let sign = select(1.0, -1.0, (h & 0x8000u) != 0u);
+    let e = (h >> 10u) & 0x1fu;
+    let m = f32(h & 0x3ffu);
+    if (e == 0u) {
+        return sign * m * exp2(-24.0);
+    }
+    return sign * (1.0 + m / 1024.0) * exp2(f32(e) - 15.0);
+}
+
 // One colour stop's position, as a fraction of the gradient line. A stop
 // flagged BG_STOP_PX carries an absolute length instead — `white 1px,
 // transparent 1px` has no percentage form and the line's length is only known
@@ -577,6 +589,15 @@ fn gradient_stop_position(background: Background, i: u32, line_length: f32) -> f
             return p / line_length;
         }
         return 0.0;
+    }
+    if ((background.flags & (1u << (BG_STOP_CALC_SHIFT + i))) != 0u) {
+        // Two packed halves: a fraction of the line (high) plus pixels (low).
+        let bits = bitcast<u32>(p);
+        let fraction = half_to_f32(bits >> 16u);
+        if (line_length > 1e-6) {
+            return fraction + half_to_f32(bits & 0xffffu) / line_length;
+        }
+        return fraction;
     }
     return p;
 }

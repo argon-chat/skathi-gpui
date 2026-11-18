@@ -86,6 +86,7 @@ struct LinearColorStop {
 // vue-native fork: the background fills only the quad's border area.
 #define BG_RING             2048u
 #define BG_STOP_PX_SHIFT    16u
+#define BG_STOP_CALC_SHIFT  24u
 
 struct Background {
     // 0u is Solid
@@ -508,6 +509,11 @@ float gradient_stop_position(Background background, uint i, float line_length) {
     float p = background.colors[i].percentage;
     if (background.flags & (1u << (BG_STOP_PX_SHIFT + i))) {
         p = (line_length > 1e-6) ? (p / line_length) : 0.0;
+    } else if (background.flags & (1u << (BG_STOP_CALC_SHIFT + i))) {
+        // Two packed halves: a fraction of the line (high) plus pixels (low).
+        uint bits = asuint(p);
+        float px = f16tof32(bits);
+        p = f16tof32(bits >> 16) + ((line_length > 1e-6) ? (px / line_length) : 0.0);
     }
     return p;
 }

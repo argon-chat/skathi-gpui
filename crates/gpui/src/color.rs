@@ -819,6 +819,39 @@ pub(crate) const BG_RING: u32 = 1 << 11;
 /// hard-stop idiom every CSS grid pattern is built from — has no percentage
 /// form, and the gradient line's length is a shader-side quantity.
 pub(crate) const BG_STOP_PX_SHIFT: u32 = 16;
+/// `Background::flags` — bit `BG_STOP_CALC_SHIFT + i` marks stop `i`'s
+/// `percentage` as two packed halves, a fraction of the gradient line (high)
+/// plus a length in pixels (low): `calc(100% - 20px)`.
+pub(crate) const BG_STOP_CALC_SHIFT: u32 = 24;
+
+/// `v` as IEEE half-precision bits, rounded to nearest even; out-of-range
+/// values clamp to the largest finite half.
+fn f16_bits(v: f32) -> u16 {
+    let x = v.to_bits();
+    let sign = ((x >> 16) & 0x8000) as u16;
+    let exp = ((x >> 23) & 0xff) as i32 - 127 + 15;
+    let man = x & 0x7f_ffff;
+    let round = |bits: u32, shift: u32| {
+        let kept = bits >> shift;
+        let rest = bits & ((1 << shift) - 1);
+        let mid = 1 << (shift - 1);
+        if rest > mid || (rest == mid && kept & 1 == 1) {
+            kept + 1
+        } else {
+            kept
+        }
+    };
+    if !v.is_finite() || exp >= 31 {
+        return sign | 0x7bff;
+    }
+    if exp <= 0 {
+        if exp < -10 {
+            return sign;
+        }
+        return sign | round(man | 0x80_0000, (14 - exp) as u32) as u16;
+    }
+    sign | round(((exp as u32) << 23) | man, 13).min(0x7bff) as u16
+}
 
 /// A color space for color interpolation.
 ///
@@ -1184,6 +1217,18 @@ impl Background {
         self
     }
 
+    /// Places stop `index` at `fraction` of the gradient line plus `pixels`,
+    /// both kept at half precision.
+    pub fn stop_at_calc(mut self, index: usize, fraction: f32, pixels: f32) -> Self {
+        if index < GRADIENT_STOPS {
+            let bits = (u32::from(f16_bits(fraction)) << 16) | u32::from(f16_bits(pixels));
+            self.colors[index].percentage = f32::from_bits(bits);
+            self.flags &= !(1 << (BG_STOP_PX_SHIFT + index as u32));
+            self.flags |= 1 << (BG_STOP_CALC_SHIFT + index as u32);
+        }
+        self
+    }
+
     /// Moves a radial or conic gradient's centre — `at <position>`. The pair is
     /// a fraction of the box unless `in_pixels`, when it is an offset from the
     /// box's top left corner.
@@ -1221,7 +1266,7 @@ impl Background {
         self.stop_count = replacement.stop_count;
         // A stop list is packed together with its units, so any previous
         // per-stop pixel flags belong to the list being replaced.
-        self.flags &= !(0xffu32 << BG_STOP_PX_SHIFT);
+        self.flags &= !(0xffu32 << BG_STOP_PX_SHIFT) & !(0xffu32 << BG_STOP_CALC_SHIFT);
         self
     }
 }
@@ -1259,6 +1304,22 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn f16_bits_rounds_to_nearest_and_clamps() {
+        let cases = [
+            (1.0, 0x3c00),
+            (0.5, 0x3800),
+            (1.0 / 3.0, 0x3555),
+            (-200.0, 0xda40),
+            (1e-6, 0x0011),
+            (70000.0, 0x7bff),
+            (-70000.0, 0xfbff),
+        ];
+        for (value, bits) in cases {
+            assert_eq!(f16_bits(value), bits, "{value}");
+        }
+    }
 
     #[test]
     fn test_deserialize_three_value_hex_to_rgba() {
