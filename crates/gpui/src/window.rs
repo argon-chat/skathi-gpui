@@ -12221,6 +12221,38 @@ mod tests {
     }
 
     #[gpui::test]
+    fn test_resize_reported_while_app_is_borrowed_runs_later(cx: &mut TestAppContext) {
+        use crate::Subscription;
+
+        struct BoundsObserver {
+            _subscription: Subscription,
+        }
+
+        impl Render for BoundsObserver {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                Empty
+            }
+        }
+
+        let observed = Rc::new(Cell::new(None));
+        let window = cx.add_window({
+            let observed = observed.clone();
+            move |window, cx| BoundsObserver {
+                _subscription: cx.observe_window_bounds(window, move |_, window, _| {
+                    observed.set(Some(window.bounds().size));
+                }),
+            }
+        });
+        let mut platform_window = cx.test_window(window.into());
+
+        let new_size = size(px(420.), px(310.));
+        cx.update(|_| platform_window.simulate_resize(new_size));
+        cx.run_until_parked();
+
+        assert_eq!(observed.get(), Some(new_size));
+    }
+
+    #[gpui::test]
     fn test_fully_visible_bounds_preserve_layout_viewport(cx: &mut TestAppContext) {
         let window = cx.add_window(|_, _| EmptyView);
         let mut platform_window = cx.test_window(window.into());
