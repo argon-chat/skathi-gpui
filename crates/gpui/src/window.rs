@@ -8424,6 +8424,11 @@ impl Window {
             .is_some_and(|engine| engine.is_absolute(layout_id))
     }
 
+    /// The containing block's percentage basis for a box in the current prepaint, in logical pixels.
+    pub fn vn_percentage_basis(&self, layout_id: LayoutId) -> Option<Size<Pixels>> {
+        self.layout_engine.as_ref()?.percentage_basis(layout_id, self.scale_factor())
+    }
+
     /// Obtain the bounds computed for the given LayoutId relative to the window. This method will usually be invoked by
     /// GPUI itself automatically in order to pass your element its `Bounds` automatically.
     ///

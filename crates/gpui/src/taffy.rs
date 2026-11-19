@@ -684,6 +684,79 @@ impl TaffyLayoutEngine {
             .is_ok_and(|style| style.position == taffy::style::Position::Absolute)
     }
 
+    pub(crate) fn percentage_basis(&self, id: LayoutId, scale: f32) -> Option<Size<Pixels>> {
+        use taffy::{style::CoreStyle as _, tree::DetailedLayoutInfo};
+        // The bounds cache validates the slot generation and the current layout pass.
+        self.absolute_layout_bounds.get(&id)?;
+        let node = id.0;
+        let child = self.taffy.style(node).ok()?;
+        let mut parent = self.taffy.parent(node)?;
+        let absolute = child.position.is_out_of_flow();
+        if absolute {
+            while !self
+                .taffy
+                .style(parent)
+                .ok()?
+                .is_containing_block()
+                .for_position(child.position)
+            {
+                let Some(ancestor) = self.taffy.parent(parent) else {
+                    break;
+                };
+                parent = ancestor;
+            }
+        }
+        let layout = self.taffy.unrounded_layout(parent);
+        let grid = match self.taffy.detailed_layout_info(parent) {
+            DetailedLayoutInfo::Grid(grid) => Some(grid),
+            _ => None,
+        };
+        let (w, h) = if absolute {
+            let rtl = self.taffy.style(parent).ok()?.direction.is_rtl();
+            let padding = TaffyRect {
+                left: layout.border.left + if rtl { layout.scrollbar_size.width } else { 0. },
+                right: layout.size.width
+                    - layout.border.right
+                    - if rtl { 0. } else { layout.scrollbar_size.width },
+                top: layout.border.top,
+                bottom: layout.size.height - layout.border.bottom - layout.scrollbar_size.height,
+            };
+            let area = if let Some(grid) = grid {
+                grid.resolve_absolute_grid_area(
+                    child.grid_row.clone(),
+                    child.grid_column.clone(),
+                    self.taffy.style(parent).ok()?.direction,
+                    padding,
+                )
+            } else {
+                padding
+            };
+            (area.right - area.left, area.bottom - area.top)
+        } else if let Some(grid) = grid {
+            // Taffy stores grid areas in the source order of its visible, in-flow children.
+            let index = self
+                .taffy
+                .child_ids(parent)
+                .filter(|&id| {
+                    self.taffy.style(id).is_ok_and(|s| {
+                        s.display != taffy::style::Display::None && !s.position.is_out_of_flow()
+                    })
+                })
+                .position(|id| id == node)?;
+            let (_, area) = grid.item_grid_area(index)?;
+            (area.width, area.height)
+        } else {
+            (
+                layout.content_box_width() - layout.scrollbar_size.width,
+                layout.content_box_height() - layout.scrollbar_size.height,
+            )
+        };
+        Some(crate::size(
+            Pixels(w.max(0.) / scale),
+            Pixels(h.max(0.) / scale),
+        ))
+    }
+
     pub fn layout_bounds(&mut self, id: LayoutId, scale_factor: f32) -> Bounds<Pixels> {
         if let Some(layout) = self.absolute_layout_bounds.get(&id).cloned() {
             return layout;
@@ -1324,6 +1397,51 @@ impl From<Size<Pixels>> for Size<AvailableSpace> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn percentage_basis_uses_unscaled_content_and_padding_boxes() {
+        use taffy::prelude::TaffyMaxContent;
+
+        let mut engine = TaffyLayoutEngine::new();
+        let mut make =
+            |style, children: &[LayoutId]| engine.request_layout(style, Pixels(20.), 2., children);
+        let child = make(Style::default(), &[]);
+        let abs = make(
+            Style {
+                position: crate::Position::Absolute,
+                ..Default::default()
+            },
+            &[],
+        );
+        let parent = make(
+            Style {
+                display: Display::Block,
+                size: size(Pixels(160.).into(), Pixels(100.).into()),
+                padding: Edges::all(crate::rems(1.).into()),
+                border_widths: Edges::all(Pixels(3.).into()),
+                ..Default::default()
+            },
+            &[child, abs],
+        );
+        engine
+            .taffy
+            .compute_layout(parent.into(), TaffySize::MAX_CONTENT)
+            .unwrap();
+        assert_eq!(engine.percentage_basis(child, 2.), None);
+        engine.layout_bounds(child, 2.);
+        engine.layout_bounds(abs, 2.);
+        assert_eq!(
+            engine.percentage_basis(child, 2.),
+            Some(size(Pixels(114.), Pixels(54.)))
+        );
+        assert_eq!(
+            engine.percentage_basis(abs, 2.),
+            Some(size(Pixels(154.), Pixels(94.)))
+        );
+        assert_eq!(engine.percentage_basis(parent, 2.), None);
+        engine.clear();
+        assert_eq!(engine.percentage_basis(child, 2.), None);
+    }
 
     #[test]
     fn flex_and_grid_lay_their_children_out_in_order_modified_document_order() {
