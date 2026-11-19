@@ -537,7 +537,9 @@ impl WindowsPlatform {
                     };
                     // The windows first: what runs between the vblank and their paint requests
                     // delays the tick. Idle windows wait for demand (src/frame_pacing.rs).
-                    if crate::frame_pacing::take_due(std::time::Instant::now()) {
+                    let due = crate::frame_pacing::take_due(std::time::Instant::now());
+                    log::trace!(target: "gpui_windows::vsync", "{} refresh source={signal_source:?} due={due}", crate::present_feedback::qpc_ns(crate::present_feedback::qpc()));
+                    if due {
                         for hwnd in all_windows.read().iter() {
                             unsafe {
                                 if let Some(signal_at) = signal_at {

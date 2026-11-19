@@ -1527,6 +1527,7 @@ impl WindowsWindowInner {
 
     #[inline]
     fn draw_window(&self, handle: HWND, force_render: bool) -> Option<isize> {
+        log::trace!(target: "gpui_windows::vsync", "{} paint-begin hwnd={:?}", crate::present_feedback::qpc_ns(crate::present_feedback::qpc()), handle);
         let Some(_guard) = self.state.draw_coordinator.try_begin_draw() else {
             log::debug!("deferring re-entrant draw of window {handle:?}");
             if force_render {
@@ -1574,6 +1575,7 @@ impl WindowsWindowInner {
 
         self.state.callbacks.request_frame.set(Some(request_frame));
         self.update_ime_enabled(handle);
+        log::trace!(target: "gpui_windows::vsync", "{} paint-end hwnd={:?}", crate::present_feedback::qpc_ns(crate::present_feedback::qpc()), handle);
         unsafe { ValidateRect(Some(handle), None).ok().log_err() };
 
         Some(0)

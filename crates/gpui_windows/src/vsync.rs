@@ -96,7 +96,10 @@ impl VSyncProvider {
 
 fn waited<T>(wait: &mut Box<dyn FnMut() -> Option<T>>) -> Option<T> {
     let start = Instant::now();
-    wait().filter(|_| start.elapsed() >= VSYNC_INTERVAL_THRESHOLD)
+    let result = wait();
+    let elapsed = start.elapsed();
+    log::trace!(target: "gpui_windows::vsync", "{} waited us={} output={}", qpc_ns(qpc()), elapsed.as_micros(), result.is_some());
+    result.filter(|_| elapsed >= VSYNC_INTERVAL_THRESHOLD)
 }
 
 /// Waits kept to measure a display's refreshes by, and how many refreshes back they may go.
