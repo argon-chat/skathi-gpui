@@ -6,7 +6,7 @@ use windows::{
     Win32::{
         Foundation::*,
         Graphics::Gdi::*,
-        System::SystemServices::*,
+        System::{Ole::RevokeDragDrop, SystemServices::*},
         UI::{
             Controls::*,
             HiDpi::*,
@@ -358,6 +358,11 @@ impl WindowsWindowInner {
 
     fn handle_destroy_msg(&self, handle: HWND) -> Option<isize> {
         self.state.pointer_lock.unlock();
+        // The handle is invalid once this returns, while gpui may still ask for the bounds.
+        self.state
+            .destroyed
+            .set(Some(self.state.calculate_window_bounds()));
+        unsafe { RevokeDragDrop(handle).log_err() };
         let callback = { self.state.callbacks.close.take() };
         // Re-enable parent window if this was a modal dialog
         if let Some(parent_hwnd) = self.parent_hwnd {

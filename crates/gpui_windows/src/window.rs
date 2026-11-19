@@ -94,6 +94,8 @@ pub struct WindowsWindowState {
     pub(crate) mouse_position: Cell<Option<Point<Pixels>>>,
     pub(crate) pointer_lock: crate::pointer_lock::PointerLock,
     pub(crate) pen: crate::pen::PenTracker,
+    /// The placement read as `WM_DESTROY` arrived, once the window is being destroyed.
+    pub(crate) destroyed: Cell<Option<(Bounds<Pixels>, bool)>>,
 }
 
 pub(crate) struct WindowsWindowInner {
@@ -202,6 +204,7 @@ impl WindowsWindowState {
             mouse_position: Cell::new(None),
             pointer_lock: Default::default(),
             pen: Default::default(),
+            destroyed: Cell::new(None),
         })
     }
 
@@ -222,7 +225,10 @@ impl WindowsWindowState {
     }
 
     // Calculate the bounds used for saving and whether the window is maximized.
-    fn calculate_window_bounds(&self) -> (Bounds<Pixels>, bool) {
+    pub(crate) fn calculate_window_bounds(&self) -> (Bounds<Pixels>, bool) {
+        if let Some(last) = self.destroyed.get() {
+            return last;
+        }
         let placement = unsafe {
             let mut placement = WINDOWPLACEMENT {
                 length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
@@ -652,20 +658,29 @@ impl rwh::HasDisplayHandle for WindowsWindow {
 impl Drop for WindowsWindow {
     fn drop(&mut self) {
         self.0.dialog_owner.close();
+        // gpui has let go of the window: what destroying it reports has nothing to notify.
+        let callbacks = &self.0.state.callbacks;
+        callbacks.request_frame.take();
+        callbacks.input.take();
+        callbacks.active_status_change.take();
+        callbacks.visibility_change.take();
+        callbacks.hovered_status_change.take();
+        callbacks.resize.take();
+        callbacks.moved.take();
+        callbacks.display_changed.take();
+        callbacks.appearance_changed.take();
+        if self.0.state.destroyed.get().is_some() {
+            return;
+        }
         unsafe { ShowWindowAsync(self.0.hwnd, SW_HIDE).ok().log_err() };
-        // `DestroyWindow` below sends `WM_SHOWWINDOW`; without a callback the
-        // resulting visibility report has nothing to notify.
-        self.0.state.callbacks.visibility_change.take();
         // clone this `Rc` to prevent early release of the pointer
         let this = self.0.clone();
         self.0
             .executor
             .spawn(async move {
                 this.dialog_owner.when_idle().await;
-                let handle = this.hwnd;
-                unsafe {
-                    RevokeDragDrop(handle).log_err();
-                    DestroyWindow(handle).log_err();
+                if this.state.destroyed.get().is_none() {
+                    unsafe { DestroyWindow(this.hwnd).log_err() };
                 }
             })
             .detach();
