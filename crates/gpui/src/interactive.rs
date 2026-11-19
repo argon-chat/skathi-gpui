@@ -20,11 +20,67 @@ pub trait MouseEvent: InputEvent {}
 /// A gesture event from the platform.
 pub trait GestureEvent: InputEvent {}
 
+/// The hardware position supplied by a desktop keyboard driver.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeKeyCode {
+    /// Set 1 scan code, including the E0 prefix for extended keys.
+    Windows(u16),
+    /// AppKit virtual key code.
+    Mac(u16),
+    /// Linux kernel input key code, before XKB's offset.
+    Evdev(u16),
+}
+
+/// Layout text and modifiers before normalization for shortcut matching.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NativeKey {
+    /// Physical key position.
+    pub code: NativeKeyCode,
+    /// Layout text or a named key when the platform supplies one.
+    pub key: Option<String>,
+    /// Modifiers at the key event.
+    pub modifiers: Modifiers,
+}
+
+impl NativeKey {
+    /// A physical modifier transition, independent of gpui's modifier-only shortcut gesture.
+    pub fn modifier_event(
+        code: NativeKeyCode,
+        key: &'static str,
+        modifiers: Modifiers,
+        down: bool,
+        repeat: bool,
+    ) -> PlatformInput {
+        let native = Some(Self {
+            code,
+            key: Some(key.into()),
+            modifiers,
+        });
+        let keystroke = Keystroke {
+            key: key.into(),
+            modifiers,
+            key_char: None,
+        };
+        if down {
+            PlatformInput::KeyDown(KeyDownEvent {
+                keystroke,
+                native,
+                is_held: repeat,
+                prefer_character_input: false,
+            })
+        } else {
+            PlatformInput::KeyUp(KeyUpEvent { keystroke, native })
+        }
+    }
+}
+
 /// The key down event equivalent for the platform.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KeyDownEvent {
     /// The keystroke that was generated.
     pub keystroke: Keystroke,
+    /// Original desktop input, when this event came from a physical key.
+    pub native: Option<NativeKey>,
 
     /// Whether the key is currently held down.
     pub is_held: bool,
@@ -47,6 +103,8 @@ impl KeyEvent for KeyDownEvent {}
 pub struct KeyUpEvent {
     /// The keystroke that was released.
     pub keystroke: Keystroke,
+    /// Original desktop input, when this event came from a physical key.
+    pub native: Option<NativeKey>,
 }
 
 impl Sealed for KeyUpEvent {}

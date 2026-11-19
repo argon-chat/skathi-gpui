@@ -1470,6 +1470,82 @@ fn guess_ascii(keycode: Keycode, shift: bool) -> Option<char> {
 }
 
 #[cfg(any(feature = "wayland", feature = "x11"))]
+#[derive(Default)]
+pub(super) struct PressedKeys(std::collections::HashMap<u32, Option<&'static str>>);
+
+#[cfg(any(feature = "wayland", feature = "x11"))]
+impl PressedKeys {
+    pub(super) fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    pub(super) fn update(
+        &mut self,
+        code: Keycode,
+        sym: Keysym,
+        mut mods: gpui::Modifiers,
+        down: bool,
+    ) -> (bool, Option<gpui::PlatformInput>) {
+        let modifier = match sym {
+            Keysym::Shift_L | Keysym::Shift_R => Some("Shift"),
+            Keysym::Control_L | Keysym::Control_R => Some("Control"),
+            Keysym::Alt_L | Keysym::Alt_R => Some("Alt"),
+            Keysym::ISO_Level3_Shift | Keysym::Mode_switch => Some("AltGraph"),
+            Keysym::Meta_L | Keysym::Meta_R | Keysym::Super_L | Keysym::Super_R => Some("Meta"),
+            Keysym::Caps_Lock => Some("CapsLock"),
+            Keysym::Num_Lock => Some("NumLock"),
+            Keysym::Scroll_Lock => Some("ScrollLock"),
+            _ => None,
+        };
+        let previous = if down {
+            self.0.insert(code.raw(), modifier)
+        } else {
+            self.0.remove(&code.raw())
+        };
+        let repeat = down && previous.is_some();
+        let key = modifier.map(|key| {
+            let held = down || self.0.values().any(|other| *other == Some(key));
+            match key {
+                "Shift" => mods.shift = held,
+                "Control" => mods.control = held,
+                "Alt" => mods.alt = held,
+                "Meta" => mods.platform = held,
+                _ => {}
+            }
+            gpui::NativeKey::modifier_event(evdev(code), key, mods, down, repeat)
+        });
+        (repeat, key)
+    }
+}
+
+#[cfg(any(feature = "wayland", feature = "x11"))]
+fn evdev(code: Keycode) -> gpui::NativeKeyCode {
+    gpui::NativeKeyCode::Evdev(code.raw().saturating_sub(8).try_into().unwrap_or(0))
+}
+
+#[cfg(any(feature = "wayland", feature = "x11"))]
+pub(super) fn native_key_from_xkb(
+    state: &State,
+    modifiers: gpui::Modifiers,
+    code: Keycode,
+) -> gpui::NativeKey {
+    let sym = state.key_get_one_sym(code);
+    let text = xkb::keysym_to_utf8(sym);
+    let key = if !text.is_empty() && !text.chars().any(char::is_control) {
+        Some(text)
+    } else if xkb::keysym_get_name(sym).starts_with("dead_") {
+        Some("Dead".into())
+    } else {
+        None
+    };
+    gpui::NativeKey {
+        code: evdev(code),
+        key,
+        modifiers,
+    }
+}
+
+#[cfg(any(feature = "wayland", feature = "x11"))]
 pub(super) fn keystroke_from_xkb(
     state: &State,
     mut modifiers: gpui::Modifiers,

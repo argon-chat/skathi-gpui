@@ -3757,6 +3757,8 @@ pub enum InputPreference {
 pub struct KeystrokeEvent {
     /// The keystroke that occurred
     pub keystroke: Keystroke,
+    /// Original key down delivered to a keystroke interceptor.
+    pub key_down: Option<crate::KeyDownEvent>,
 
     /// Whether this keystroke should prefer character input or key bindings.
     /// This is [`InputPreference::CharacterInput`] when the platform prefers text for the key

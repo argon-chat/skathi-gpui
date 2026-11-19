@@ -546,8 +546,11 @@ impl WindowsWindowInner {
     }
 
     fn handle_syskeyup_msg(&self, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
-        let input = handle_key_event(wparam, lparam, &self.state, |keystroke, _| {
-            PlatformInput::KeyUp(KeyUpEvent { keystroke })
+        let input = handle_key_event(wparam, lparam, &self.state, |keystroke, native, _| {
+            PlatformInput::KeyUp(KeyUpEvent {
+                keystroke,
+                native: Some(native),
+            })
         })?;
         let mut func = self.state.callbacks.input.take()?;
 
@@ -565,9 +568,10 @@ impl WindowsWindowInner {
             wparam,
             lparam,
             &self.state,
-            |keystroke, prefer_character_input| {
+            |keystroke, native, prefer_character_input| {
                 PlatformInput::KeyDown(KeyDownEvent {
                     keystroke,
+                    native: Some(native),
                     is_held: lparam.0 & (0x1 << 30) > 0,
                     prefer_character_input,
                 })
@@ -580,7 +584,23 @@ impl WindowsWindowInner {
             return Some(1);
         };
 
-        let handled = !func(input).propagate;
+        let repeat_count = lparam.loword().max(1);
+        let repeats = match &input {
+            PlatformInput::KeyDown(first) if repeat_count > 1 => {
+                Some(PlatformInput::KeyDown(KeyDownEvent {
+                    is_held: true,
+                    ..first.clone()
+                }))
+            }
+            _ => None,
+        };
+        let mut handled = !func(input).propagate;
+        if let Some(repeat) = repeats {
+            // Windows may combine consecutive key downs into a single queued message.
+            for _ in 1..repeat_count {
+                handled |= !func(repeat.clone()).propagate;
+            }
+        }
 
         self.state.callbacks.input.set(Some(func));
 
@@ -588,8 +608,11 @@ impl WindowsWindowInner {
     }
 
     fn handle_keyup_msg(&self, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
-        let Some(input) = handle_key_event(wparam, lparam, &self.state, |keystroke, _| {
-            PlatformInput::KeyUp(KeyUpEvent { keystroke })
+        let Some(input) = handle_key_event(wparam, lparam, &self.state, |keystroke, native, _| {
+            PlatformInput::KeyUp(KeyUpEvent {
+                keystroke,
+                native: Some(native),
+            })
         }) else {
             return Some(1);
         };
@@ -949,6 +972,7 @@ impl WindowsWindowInner {
 
         if !activated {
             this.state.pointer_lock.unlock();
+            this.state.dead_keys.borrow_mut().clear();
             this.state.cursor_visible.store(true, Ordering::Relaxed);
         }
 
@@ -1420,6 +1444,7 @@ impl WindowsWindowInner {
     }
 
     fn handle_input_language_changed(&self) -> Option<isize> {
+        self.state.dead_keys.borrow_mut().clear();
         unsafe {
             PostMessageW(
                 Some(self.platform_window_handle),
@@ -1704,47 +1729,101 @@ fn handle_key_event<F>(
     f: F,
 ) -> Option<PlatformInput>
 where
-    F: FnOnce(Keystroke, bool) -> PlatformInput,
+    F: FnOnce(Keystroke, gpui::NativeKey, bool) -> PlatformInput,
 {
     let virtual_key = VIRTUAL_KEY(wparam.loword());
     let modifiers = current_modifiers();
 
-    match virtual_key {
-        VK_SHIFT | VK_CONTROL | VK_MENU | VK_LMENU | VK_RMENU | VK_LWIN | VK_RWIN => {
-            if state
-                .last_reported_modifiers
-                .get()
-                .is_some_and(|prev_modifiers| prev_modifiers == modifiers)
-            {
-                return None;
-            }
-            state.last_reported_modifiers.set(Some(modifiers));
-            Some(PlatformInput::ModifiersChanged(ModifiersChangedEvent {
-                modifiers,
-                capslock: current_capslock(),
-            }))
+    let scan = lparam.hiword() & 0xff;
+    let code = gpui::NativeKeyCode::Windows(match virtual_key {
+        VK_PAUSE => 0x45,
+        VK_NUMLOCK => 0xe045,
+        VK_SNAPSHOT => 0xe037,
+        _ if lparam.hiword() & 0x100 != 0 => 0xe000 | scan,
+        _ => scan,
+    });
+    let modifier = match virtual_key {
+        VK_SHIFT | VK_LSHIFT | VK_RSHIFT => Some("Shift"),
+        VK_CONTROL | VK_LCONTROL | VK_RCONTROL => Some("Control"),
+        VK_MENU | VK_RMENU if lparam.hiword() & 0x100 != 0 && layout_has_alt_graph() => {
+            Some("AltGraph")
         }
-        VK_PACKET => None,
-        VK_CAPITAL => {
-            let capslock = current_capslock();
-            if state
-                .last_reported_capslock
-                .get()
-                .is_some_and(|prev_capslock| prev_capslock == capslock)
-            {
-                return None;
-            }
-            state.last_reported_capslock.set(Some(capslock));
-            Some(PlatformInput::ModifiersChanged(ModifiersChangedEvent {
+        VK_MENU | VK_LMENU | VK_RMENU => Some("Alt"),
+        VK_LWIN | VK_RWIN => Some("Meta"),
+        VK_CAPITAL => Some("CapsLock"),
+        _ => None,
+    };
+    if let Some(key) = modifier {
+        let capslock = current_capslock();
+        let changed = if virtual_key == VK_CAPITAL {
+            state.last_reported_capslock.replace(Some(capslock)) != Some(capslock)
+        } else {
+            state.last_reported_modifiers.replace(Some(modifiers)) != Some(modifiers)
+        };
+        if changed && let Some(mut callback) = state.callbacks.input.take() {
+            callback(PlatformInput::ModifiersChanged(ModifiersChangedEvent {
                 modifiers,
                 capslock,
-            }))
+            }));
+            state.callbacks.input.set(Some(callback));
         }
-        vkey => {
-            let keystroke = parse_normal_key(vkey, lparam, modifiers)?;
-            Some(f(keystroke.0, keystroke.1))
-        }
+        return Some(gpui::NativeKey::modifier_event(
+            code,
+            key,
+            modifiers,
+            lparam.hiword() & 0x8000 == 0,
+            lparam.hiword() & 0x4000 != 0,
+        ));
     }
+    if virtual_key == VK_PACKET {
+        return None;
+    }
+    let (stroke, prefer, mut key) = parse_normal_key(virtual_key, scan, modifiers);
+    let mut dead = state.dead_keys.borrow_mut();
+    if lparam.hiword() & 0x8000 != 0 {
+        if let Some(i) = dead.iter().position(|(c, _)| *c == code) {
+            // A second ToUnicode on an armed dead key can return its spacing accent twice.
+            if dead.swap_remove(i).1 == modifiers {
+                key = Some("Dead".into());
+            }
+        }
+    } else if key.as_deref() == Some("Dead") && !dead.contains(&(code, modifiers)) {
+        dead.push((code, modifiers));
+    }
+    Some(f(
+        stroke,
+        gpui::NativeKey {
+            code,
+            key,
+            modifiers,
+        },
+        prefer,
+    ))
+}
+
+fn layout_has_alt_graph() -> bool {
+    thread_local! { static CACHE: Cell<Option<(HKL, bool)>> = const { Cell::new(None) }; }
+    let layout = unsafe { GetKeyboardLayout(0) };
+    CACHE.with(|cache| {
+        if let Some((id, present)) = cache.get()
+            && id == layout
+        {
+            return present;
+        }
+        let mut state = [0; 256];
+        state[VK_CONTROL.0 as usize] = 0x80;
+        state[VK_MENU.0 as usize] = 0x80;
+        let present = [0, 0x80].into_iter().any(|shift| {
+            state[VK_SHIFT.0 as usize] = shift;
+            (0x30..=0x5a).chain(0xba..=0xe2).any(|vk| {
+                let mut out = [0u16; 8];
+                let n = unsafe { ToUnicodeEx(vk, 0, &state, &mut out, 4, Some(layout)) };
+                n < 0 || (n > 0 && out[0] >= 0x20 && out[0] != 0x7f)
+            })
+        });
+        cache.set(Some((layout, present)));
+        present
+    })
 }
 
 fn parse_immutable(vkey: VIRTUAL_KEY) -> Option<String> {
@@ -1767,6 +1846,11 @@ fn parse_immutable(vkey: VIRTUAL_KEY) -> Option<String> {
             VK_ESCAPE => "escape",
             VK_INSERT => "insert",
             VK_DELETE => "delete",
+            VK_NUMLOCK => "numlock",
+            VK_SCROLL => "scrolllock",
+            VK_PAUSE => "pause",
+            VK_CLEAR => "clear",
+            VK_SNAPSHOT => "printscreen",
             VK_APPS => "menu",
             VK_F1 => "f1",
             VK_F2 => "f2",
@@ -1800,31 +1884,32 @@ fn parse_immutable(vkey: VIRTUAL_KEY) -> Option<String> {
 
 fn parse_normal_key(
     vkey: VIRTUAL_KEY,
-    lparam: LPARAM,
+    scan: u16,
     mut modifiers: Modifiers,
-) -> Option<(Keystroke, bool)> {
-    let (key_char, prefer_character_input) = process_key(vkey, lparam.hiword());
+) -> (Keystroke, bool, Option<String>) {
+    let (key_char, prefer_character_input, logical) = process_key(vkey, scan);
 
-    let key = parse_immutable(vkey).or_else(|| {
-        let scan_code = lparam.hiword() & 0xFF;
-        get_keystroke_key(vkey, scan_code as u32, &mut modifiers)
-    })?;
+    let key = parse_immutable(vkey)
+        .or_else(|| get_keystroke_key(vkey, scan as u32, &mut modifiers))
+        .or_else(|| logical.clone())
+        .unwrap_or_else(|| "Unidentified".into());
 
-    Some((
+    (
         Keystroke {
             modifiers,
             key,
             key_char,
         },
         prefer_character_input,
-    ))
+        logical,
+    )
 }
 
-fn process_key(vkey: VIRTUAL_KEY, scan_code: u16) -> (Option<String>, bool) {
+fn process_key(vkey: VIRTUAL_KEY, scan_code: u16) -> (Option<String>, bool, Option<String>) {
     let mut keyboard_state = [0u8; 256];
     unsafe {
         if GetKeyboardState(&mut keyboard_state).is_err() {
-            return (None, false);
+            return (None, false, None);
         }
     }
 
@@ -1839,21 +1924,13 @@ fn process_key(vkey: VIRTUAL_KEY, scan_code: u16) -> (Option<String>, bool) {
         )
     };
 
-    if result_c == 0 {
-        return (None, false);
-    }
-
     let c = &buffer_c[..result_c.unsigned_abs() as usize];
     let key_char = String::from_utf16(c)
         .ok()
         .filter(|s| !s.is_empty() && !s.chars().next().unwrap().is_control());
 
     if result_c < 0 {
-        return (key_char, true);
-    }
-
-    if key_char.is_none() {
-        return (None, false);
+        return (key_char, true, Some("Dead".into()));
     }
 
     // Workaround for some bug that makes the compiler think keyboard_state is still zeroed out
@@ -1865,7 +1942,7 @@ fn process_key(vkey: VIRTUAL_KEY, scan_code: u16) -> (Option<String>, bool) {
 
     let has_modifiers = ctrl_down || alt_down || win_down;
     if !has_modifiers {
-        return (key_char, false);
+        return (key_char.clone(), false, key_char);
     }
 
     let mut state_no_modifiers = keyboard_state;
@@ -1890,10 +1967,13 @@ fn process_key(vkey: VIRTUAL_KEY, scan_code: u16) -> (Option<String>, bool) {
     };
 
     let c_no_modifiers = &buffer_c_no_modifiers[..result_c_no_modifiers.unsigned_abs() as usize];
-    (
-        key_char,
-        result_c != result_c_no_modifiers || c != c_no_modifiers,
-    )
+    let prefer = key_char.is_some() && (result_c != result_c_no_modifiers || c != c_no_modifiers);
+    let logical = key_char.clone().or_else(|| {
+        String::from_utf16(c_no_modifiers)
+            .ok()
+            .filter(|s| !s.is_empty() && !s.chars().any(char::is_control))
+    });
+    (key_char, prefer, logical)
 }
 
 fn parse_ime_composition_string(ctx: HIMC, comp_type: IME_COMPOSITION_STRING) -> Option<Vec<u16>> {

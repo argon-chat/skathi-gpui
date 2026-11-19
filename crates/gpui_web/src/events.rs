@@ -549,11 +549,15 @@ impl WebWindowInner {
             key_char: None,
         };
         self.dispatch_input(PlatformInput::KeyDown(KeyDownEvent {
+            native: None,
             keystroke: keystroke.clone(),
             is_held: false,
             prefer_character_input: false,
         }));
-        self.dispatch_input(PlatformInput::KeyUp(KeyUpEvent { keystroke }));
+        self.dispatch_input(PlatformInput::KeyUp(KeyUpEvent {
+            keystroke,
+            native: None,
+        }));
     }
 
     fn register_pointer_move(self: &Rc<Self>) -> EventListenerHandle {
@@ -745,6 +749,7 @@ impl WebWindowInner {
             };
 
             let result = this.dispatch_input(PlatformInput::KeyDown(KeyDownEvent {
+                native: None,
                 keystroke,
                 is_held,
                 prefer_character_input: false,
@@ -808,7 +813,10 @@ impl WebWindowInner {
                 key_char,
             };
 
-            let result = this.dispatch_input(PlatformInput::KeyUp(KeyUpEvent { keystroke }));
+            let result = this.dispatch_input(PlatformInput::KeyUp(KeyUpEvent {
+                keystroke,
+                native: None,
+            }));
             if let Some(result) = result {
                 if !result.propagate {
                     event.prevent_default();

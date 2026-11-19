@@ -116,6 +116,7 @@ impl ReusedSubtree {
 pub(crate) struct Replay {
     pub(crate) keystroke: Keystroke,
     pub(crate) bindings: SmallVec<[KeyBinding; 1]>,
+    pub(crate) consumed: usize,
 }
 
 #[derive(Default, Debug)]
@@ -547,6 +548,7 @@ impl DispatchTree {
                 to_replay.push(Replay {
                     keystroke: input.drain(0..=last).next_back().unwrap(),
                     bindings,
+                    consumed: last + 1,
                 });
                 break;
             }
@@ -554,6 +556,7 @@ impl DispatchTree {
         if to_replay.is_empty() {
             to_replay.push(Replay {
                 keystroke: input.remove(0),
+                consumed: 1,
                 ..Default::default()
             });
         }
@@ -939,6 +942,7 @@ mod tests {
         cx.update(|window, cx| {
             window.dispatch_event(
                 PlatformInput::KeyDown(KeyDownEvent {
+                    native: None,
                     keystroke: Keystroke {
                         key_char: Some("ą".into()),
                         ..Keystroke::parse("ctrl-alt-a").expect("valid keystroke")

@@ -2157,6 +2157,7 @@ impl PendingInputTimeout {
 #[derive(Default, Debug)]
 struct PendingInput {
     keystrokes: SmallVec<[Keystroke; 1]>,
+    key_events: SmallVec<[Option<KeyDownEvent>; 1]>,
     focus: Option<FocusId>,
     timeout: Option<PendingInputTimeout>,
 }
@@ -3793,6 +3794,7 @@ impl Window {
         cx.keystroke_observers.clone().retain(move |callback| {
             (callback)(
                 &KeystrokeEvent {
+                    key_down: None,
                     keystroke: keystroke.clone(),
                     input_preference,
                     action: action.map(|action| action.boxed_clone()),
@@ -3807,6 +3809,7 @@ impl Window {
     pub(crate) fn dispatch_keystroke_interceptors(
         &mut self,
         keystroke: &Keystroke,
+        key_down: Option<&KeyDownEvent>,
         input_preference: InputPreference,
         context_stack: Vec<KeyContext>,
         cx: &mut App,
@@ -3814,6 +3817,7 @@ impl Window {
         cx.keystroke_interceptors.clone().retain(move |callback| {
             (callback)(
                 &KeystrokeEvent {
+                    key_down: key_down.cloned(),
                     keystroke: keystroke.clone(),
                     input_preference,
                     action: None,
@@ -9164,6 +9168,7 @@ impl Window {
         let keystroke = keystroke.with_simulated_ime();
         let result = self.dispatch_event(
             PlatformInput::KeyDown(KeyDownEvent {
+                native: None,
                 keystroke: keystroke.clone(),
                 is_held: false,
                 prefer_character_input: false,
@@ -9731,6 +9736,21 @@ impl Window {
         let dispatch_path = self.rendered_frame.dispatch_tree.dispatch_path(node_id);
 
         let mut keystroke: Option<Keystroke> = None;
+        let physical_modifier = event.downcast_ref::<KeyDownEvent>().is_some_and(|e| {
+            e.native.is_some()
+                && matches!(
+                    e.keystroke.key.as_str(),
+                    "Shift"
+                        | "Control"
+                        | "Alt"
+                        | "AltGraph"
+                        | "Meta"
+                        | "Fn"
+                        | "CapsLock"
+                        | "NumLock"
+                        | "ScrollLock"
+                )
+        });
 
         if let Some(event) = event.downcast_ref::<ModifiersChangedEvent>() {
             if event.modifiers.number_of_modifiers() == 0
@@ -9763,7 +9783,7 @@ impl Window {
             }
             self.pending_modifier.modifiers = event.modifiers
         } else if let Some(key_down_event) = event.downcast_ref::<KeyDownEvent>() {
-            self.pending_modifier.saw_other_input = true;
+            self.pending_modifier.saw_other_input |= !physical_modifier;
             keystroke = Some(key_down_event.keystroke.clone());
             if key_down_event.keystroke.key_char.is_some()
                 && matches!(
@@ -9792,6 +9812,7 @@ impl Window {
         cx.propagate_event = true;
         self.dispatch_keystroke_interceptors(
             &keystroke,
+            event.downcast_ref::<KeyDownEvent>(),
             input_preference,
             self.context_stack(),
             cx,
@@ -9808,6 +9829,10 @@ impl Window {
             return;
         }
 
+        if physical_modifier {
+            self.dispatch_key_down_up_event(event, &dispatch_path, cx);
+            return;
+        }
         let mut currently_pending = self.pending_input.take().unwrap_or_default();
         if currently_pending.focus.is_some() && currently_pending.focus != self.focus {
             currently_pending = PendingInput::default();
@@ -9820,13 +9845,20 @@ impl Window {
         );
 
         if !match_result.to_replay.is_empty() {
-            self.replay_pending_input(match_result.to_replay, cx);
+            self.replay_pending_input(
+                match_result.to_replay,
+                &mut currently_pending.key_events,
+                cx,
+            );
             cx.propagate_event = true;
         }
 
         if !match_result.pending.is_empty() {
             let previous_timeout = currently_pending.timeout.take();
             currently_pending.keystrokes = match_result.pending;
+            currently_pending
+                .key_events
+                .push(event.downcast_ref::<KeyDownEvent>().cloned());
             currently_pending.focus = self.focus;
 
             let text_input_requires_timeout = event
@@ -9908,7 +9940,7 @@ impl Window {
         let task = self.spawn(cx, async move |cx| {
             cx.background_executor.timer(remaining).await;
             cx.update(move |window, cx| {
-                let Some(currently_pending) = window
+                let Some(mut currently_pending) = window
                     .pending_input
                     .take()
                     .filter(|pending| pending.focus == window.focus)
@@ -9925,7 +9957,7 @@ impl Window {
                     .flush_dispatch(currently_pending.keystrokes, &dispatch_path);
 
                 window.pending_input_changed(cx);
-                window.replay_pending_input(to_replay, cx)
+                window.replay_pending_input(to_replay, &mut currently_pending.key_events, cx)
             })
             .with_context(|| {
                 format!(
@@ -10145,16 +10177,26 @@ impl Window {
             .map(|pending_input| pending_input.keystrokes())
     }
 
-    fn replay_pending_input(&mut self, replays: SmallVec<[Replay; 1]>, cx: &mut App) {
+    fn replay_pending_input(
+        &mut self,
+        replays: SmallVec<[Replay; 1]>,
+        original: &mut SmallVec<[Option<KeyDownEvent>; 1]>,
+        cx: &mut App,
+    ) {
         let node_id = self.focus_node_id_in_rendered_frame(self.focus);
         let dispatch_path = self.rendered_frame.dispatch_tree.dispatch_path(node_id);
 
         'replay: for replay in replays {
-            let event = KeyDownEvent {
-                keystroke: replay.keystroke.clone(),
-                is_held: false,
-                prefer_character_input: true,
-            };
+            let event = original
+                .drain(..replay.consumed)
+                .next_back()
+                .flatten()
+                .unwrap_or_else(|| KeyDownEvent {
+                    native: None,
+                    keystroke: replay.keystroke.clone(),
+                    is_held: false,
+                    prefer_character_input: true,
+                });
 
             cx.propagate_event = true;
             for binding in replay.bindings {
@@ -13179,6 +13221,7 @@ mod tests {
             window.draw(cx).clear(cx);
             window.dispatch_event(
                 PlatformInput::KeyDown(KeyDownEvent {
+                    native: None,
                     keystroke: Keystroke::parse("down").expect("valid keystroke"),
                     is_held: false,
                     prefer_character_input: false,

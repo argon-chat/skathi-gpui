@@ -119,6 +119,136 @@ fn read_modifiers(native_event: &NSEvent) -> Modifiers {
     }
 }
 
+fn native_key(event: &NSEvent) -> gpui::NativeKey {
+    let printable = |text: &String| {
+        !text.is_empty()
+            && text
+                .chars()
+                .all(|c| !c.is_control() && !('\u{f700}'..='\u{f8ff}').contains(&c))
+    };
+    let text = event.characters().map(|s| s.to_string());
+    let dead = text.as_deref() == Some("");
+    let key = text.filter(printable).or_else(|| {
+        event
+            .charactersIgnoringModifiers()
+            .map(|s| s.to_string())
+            .filter(printable)
+    });
+    gpui::NativeKey {
+        code: gpui::NativeKeyCode::Mac(event.keyCode()),
+        key: if dead { Some("Dead".into()) } else { key },
+        modifiers: read_modifiers(event),
+    }
+}
+
+#[cfg(test)]
+mod keyboard_tests {
+    use super::*;
+    use objc2::runtime::Bool;
+    use objc2_foundation::{NSPoint, NSString};
+
+    #[test]
+    fn appkit_physical_keyboard_events() {
+        objc2::rc::autoreleasepool(|_| {
+            let make = |kind: NSEventType,
+                        code: u16,
+                        text: &str,
+                        flags: NSEventModifierFlags,
+                        repeat: bool| {
+                let text = NSString::from_str(text);
+                let event: *mut AnyObject = unsafe {
+                    msg_send![objc2::class!(NSEvent),
+                        keyEventWithType: kind.0,
+                        location: NSPoint::default(),
+                        modifierFlags: flags.bits(),
+                        timestamp: 0.0_f64,
+                        windowNumber: 0_isize,
+                        context: std::ptr::null::<AnyObject>(),
+                        characters: &*text,
+                        charactersIgnoringModifiers: &*text,
+                        isARepeat: Bool::new(repeat),
+                        keyCode: code]
+                };
+                assert!(!event.is_null());
+                event
+            };
+            let shift = NSEventModifierFlags::Shift;
+            for (code, text) in [(37, "L"), (18, "!")] {
+                let ev = make(NSEventType::KeyDown, code, text, shift, false);
+                let key = native_key(unsafe { &*ev.cast::<NSEvent>() });
+                assert_eq!(key.code, gpui::NativeKeyCode::Mac(code));
+                assert_eq!(key.key.as_deref(), Some(text));
+                assert!(key.modifiers.shift);
+            }
+            for (kind, repeat) in [
+                (NSEventType::KeyDown, false),
+                (NSEventType::KeyDown, true),
+                (NSEventType::KeyUp, false),
+            ] {
+                let ev = make(kind, 49, " ", NSEventModifierFlags::empty(), repeat);
+                let native = match unsafe { platform_input_from_native(ev, None) }.unwrap() {
+                    PlatformInput::KeyDown(e) => {
+                        assert_eq!(e.is_held, repeat);
+                        e.native
+                    }
+                    PlatformInput::KeyUp(e) => {
+                        assert_eq!(kind, NSEventType::KeyUp);
+                        e.native
+                    }
+                    _ => panic!("expected a key event"),
+                }
+                .unwrap();
+                assert_eq!(native.code, gpui::NativeKeyCode::Mac(49));
+                assert_eq!(native.key.as_deref(), Some(" "));
+            }
+            // A left Shift release while right Shift remains pressed retains the aggregate flag.
+            let ev = make(
+                NSEventType::FlagsChanged,
+                56,
+                "",
+                shift | NSEventModifierFlags::from_bits_retain(4),
+                false,
+            );
+            let Some(PlatformInput::KeyUp(key)) = (unsafe { modifier_key(ev) }) else {
+                panic!("expected left shift release")
+            };
+            assert!(key.native.unwrap().modifiers.shift);
+        });
+    }
+}
+
+/// AppKit reports physical modifier edges through flagsChanged, including opposite-side chords.
+pub(crate) unsafe fn modifier_key(native_event: *mut AnyObject) -> Option<PlatformInput> {
+    let event = unsafe { native_event.cast::<NSEvent>().as_ref()? };
+    let code = event.keyCode();
+    let flags = event.modifierFlags();
+    let (key, aggregate, side, pair) = match code {
+        56 => ("Shift", NSEventModifierFlags::Shift, 0x0002, 0x0006),
+        60 => ("Shift", NSEventModifierFlags::Shift, 0x0004, 0x0006),
+        59 => ("Control", NSEventModifierFlags::Control, 0x0001, 0x2001),
+        62 => ("Control", NSEventModifierFlags::Control, 0x2000, 0x2001),
+        58 => ("Alt", NSEventModifierFlags::Option, 0x0020, 0x0060),
+        61 => ("Alt", NSEventModifierFlags::Option, 0x0040, 0x0060),
+        55 => ("Meta", NSEventModifierFlags::Command, 0x0008, 0x0018),
+        54 => ("Meta", NSEventModifierFlags::Command, 0x0010, 0x0018),
+        57 => ("CapsLock", NSEventModifierFlags::CapsLock, 0, 0),
+        63 => ("Fn", NSEventModifierFlags::Function, 0, 0),
+        _ => return None,
+    };
+    let down = if flags.bits() & pair != 0 {
+        flags.bits() & side != 0
+    } else {
+        flags.contains(aggregate)
+    };
+    Some(gpui::NativeKey::modifier_event(
+        gpui::NativeKeyCode::Mac(code),
+        key,
+        read_modifiers(event),
+        down,
+        false,
+    ))
+}
+
 pub(crate) unsafe fn platform_input_from_native(
     native_event: *mut AnyObject,
     window_height: Option<Pixels>,
@@ -149,11 +279,13 @@ pub(crate) unsafe fn platform_input_from_native(
             }
             NSEventType::KeyDown => Some(PlatformInput::KeyDown(KeyDownEvent {
                 keystroke: parse_keystroke(native_event),
+                native: Some(native_key(native_event)),
                 is_held: native_event.isARepeat(),
                 prefer_character_input: false,
             })),
             NSEventType::KeyUp => Some(PlatformInput::KeyUp(KeyUpEvent {
                 keystroke: parse_keystroke(native_event),
+                native: Some(native_key(native_event)),
             })),
             NSEventType::LeftMouseDown
             | NSEventType::RightMouseDown

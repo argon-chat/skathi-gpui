@@ -5934,6 +5934,7 @@ mod tests {
         cx.update_window(window, |_, window, cx| {
             window.dispatch_event(
                 KeyDownEvent {
+                    native: None,
                     keystroke,
                     is_held: false,
                     prefer_character_input: false,
@@ -5949,7 +5950,14 @@ mod tests {
         let os = cx.read(|cx| cx.platform_info().os);
         let keystroke = Keystroke::parse_with_os(key, os).unwrap();
         cx.update_window(window, |_, window, cx| {
-            window.dispatch_event(KeyUpEvent { keystroke }.to_platform_input(), cx);
+            window.dispatch_event(
+                KeyUpEvent {
+                    keystroke,
+                    native: None,
+                }
+                .to_platform_input(),
+                cx,
+            );
         })
         .unwrap();
     }
