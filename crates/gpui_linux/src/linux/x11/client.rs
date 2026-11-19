@@ -673,7 +673,7 @@ impl X11Client {
             let mut events = Vec::new();
             let mut windows_to_refresh = HashSet::new();
 
-            let mut last_key_release = None;
+            let detectable_repeat = self.0.borrow().detectable_repeat;
 
             // event handlers for new keyboard / remapping refresh the state without using event
             // details, this deduplicates them.
@@ -681,61 +681,22 @@ impl X11Client {
 
             loop {
                 match xcb_connection.poll_for_event() {
-                    Ok(Some(event)) => {
-                        match event {
-                            Event::Expose(expose_event) => {
-                                windows_to_refresh.insert(expose_event.window);
-                            }
-                            Event::KeyRelease(_) => {
-                                if let Some(last_keymap_change_event) =
-                                    last_keymap_change_event.take()
-                                {
-                                    if let Some(last_key_release) = last_key_release.take() {
-                                        events.push(last_key_release);
-                                    }
-                                    events.push(last_keymap_change_event);
-                                }
-
-                                last_key_release = Some(event);
-                            }
-                            Event::KeyPress(key_press) => {
-                                if let Some(last_keymap_change_event) =
-                                    last_keymap_change_event.take()
-                                {
-                                    if let Some(last_key_release) = last_key_release.take() {
-                                        events.push(last_key_release);
-                                    }
-                                    events.push(last_keymap_change_event);
-                                }
-
-                                if let Some(Event::KeyRelease(key_release)) =
-                                    last_key_release.take()
-                                {
-                                    // Older X servers encode repeat as a release and press at the same timestamp.
-                                    if self.0.borrow().detectable_repeat
-                                        || key_release.event != key_press.event
-                                        || key_release.detail != key_press.detail
-                                        || key_press.time != key_release.time
-                                    {
-                                        events.push(Event::KeyRelease(key_release));
-                                    }
-                                }
-                                events.push(Event::KeyPress(key_press));
-                            }
-                            Event::XkbNewKeyboardNotify(_) | Event::XkbMapNotify(_) => {
-                                if let Some(release_event) = last_key_release.take() {
-                                    events.push(release_event);
-                                }
-                                last_keymap_change_event = Some(event);
-                            }
-                            _ => {
-                                if let Some(release_event) = last_key_release.take() {
-                                    events.push(release_event);
-                                }
-                                events.push(event);
-                            }
+                    Ok(Some(event)) => match event {
+                        Event::Expose(expose_event) => {
+                            windows_to_refresh.insert(expose_event.window);
                         }
-                    }
+                        Event::KeyPress(_) | Event::KeyRelease(_) => {
+                            if let Some(last_keymap_change_event) = last_keymap_change_event.take()
+                            {
+                                events.push(last_keymap_change_event);
+                            }
+                            queue_key_event(&mut events, event, detectable_repeat);
+                        }
+                        Event::XkbNewKeyboardNotify(_) | Event::XkbMapNotify(_) => {
+                            last_keymap_change_event = Some(event);
+                        }
+                        _ => events.push(event),
+                    },
                     Ok(None) => {
                         break;
                     }
@@ -750,9 +711,6 @@ impl X11Client {
                 }
             }
 
-            if let Some(release_event) = last_key_release.take() {
-                events.push(release_event);
-            }
             if let Some(keymap_change_event) = last_keymap_change_event.take() {
                 events.push(keymap_change_event);
             }
@@ -2889,6 +2847,17 @@ fn valid_scale_factor(scale_factor: f32) -> bool {
     scale_factor.is_sign_positive() && scale_factor.is_normal()
 }
 
+fn queue_key_event(events: &mut Vec<Event>, event: Event, detectable_repeat: bool) {
+    // Legacy X servers put a synthetic release immediately before each repeat press.
+    if !detectable_repeat
+        && let (Some(Event::KeyRelease(up)), Event::KeyPress(down)) = (events.last(), &event)
+        && (up.event, up.detail, up.time) == (down.event, down.detail, down.time)
+    {
+        events.pop();
+    }
+    events.push(event);
+}
+
 #[inline]
 fn xkb_state_for_key_event(xkb: &xkbc::State, event_state: xproto::KeyButMask) -> xkbc::State {
     let keymap = xkb.get_keymap();
@@ -2928,6 +2897,53 @@ mod tests {
 
     fn test_keymap(layouts: &str) -> xkbc::Keymap {
         test_keymap_with_variant(layouts, "")
+    }
+
+    #[test]
+    fn key_batches_keep_order_and_only_collapse_legacy_autorepeat_pairs() {
+        let edges = [
+            (false, 1, 10, 10),
+            (false, 1, 50, 10), // release 1, then Shift
+            (true, 1, 65, 20),  // press Space
+            (false, 1, 65, 30),
+            (true, 1, 65, 30), // legacy repeat
+            (false, 1, 65, 40),
+            (true, 1, 65, 41), // a real tap 1 ms later
+            (false, 1, 65, 42),
+            (true, 1, 46, 42), // simultaneous, different key
+            (false, 1, 46, 43),
+            (true, 2, 46, 43), // simultaneous, different window
+        ];
+        for detectable in [false, true] {
+            let mut events = Vec::new();
+            for (down, window, detail, time) in edges {
+                let key = xproto::KeyPressEvent {
+                    event: window,
+                    detail,
+                    time,
+                    ..Default::default()
+                };
+                let event = if down {
+                    Event::KeyPress(key)
+                } else {
+                    Event::KeyRelease(key)
+                };
+                queue_key_event(&mut events, event, detectable);
+            }
+            let actual: Vec<_> = events
+                .into_iter()
+                .map(|event| match event {
+                    Event::KeyPress(key) => (true, key.event, key.detail, key.time),
+                    Event::KeyRelease(key) => (false, key.event, key.detail, key.time),
+                    _ => unreachable!(),
+                })
+                .collect();
+            let mut expected = edges.to_vec();
+            if !detectable {
+                expected.remove(3); // the artificial release of the legacy repeat
+            }
+            assert_eq!(actual, expected);
+        }
     }
 
     #[test]
