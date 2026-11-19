@@ -1912,6 +1912,53 @@ fn vs_poly_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index
     return out;
 }
 
+// The native HLSL and Metal backends use the same straight-alpha, locally bounded kernel.
+fn surface_weights(t: f32, cubic: bool) -> vec4<f32> {
+    if (!cubic) { return vec4<f32>(0.0, 1.0 - t, t, 0.0); }
+    let t2 = t * t;
+    let t3 = t2 * t;
+    return 0.5 * vec4<f32>(-t + 2.0*t2 - t3, 2.0 - 5.0*t2 + 3.0*t3,
+                          t + 4.0*t2 - 3.0*t3, -t2 + t3);
+}
+
+fn sample_surface(uv: vec2<f32>, sprite: PolychromeSprite, mode: u32) -> vec4<f32> {
+    let pos = uv * vec2<f32>(textureDimensions(t_sprite, 0));
+    let lo = vec2<i32>(sprite.tile.bounds.origin);
+    let hi = lo + vec2<i32>(sprite.tile.bounds.size) - 1;
+    if (mode == 4u) {
+        return textureLoad(t_sprite, clamp(vec2<i32>(floor(pos)), lo, hi), 0);
+    }
+    let base = vec2<i32>(floor(pos - 0.5));
+    let t = pos - 0.5 - vec2<f32>(base);
+    let wx = surface_weights(t.x, (mode & 1u) != 0u);
+    let wy = surface_weights(t.y, (mode & 2u) != 0u);
+    var sum = vec4<f32>(0.0);
+    var bilinear = vec4<f32>(0.0);
+    var low = vec4<f32>(65504.0);
+    var high = vec4<f32>(-65504.0);
+    for (var y = 0; y < 4; y++) {
+        for (var x = 0; x < 4; x++) {
+            let coord = clamp(base + vec2<i32>(x - 1, y - 1), lo, hi);
+            let c = textureLoad(t_sprite, coord, 0);
+            let associated = vec4<f32>(c.rgb * c.a, c.a);
+            sum += associated * (wx[x] * wy[y]);
+            if (x >= 1 && x <= 2 && y >= 1 && y <= 2) {
+                bilinear += associated * (select(t.x, 1.0-t.x, x == 1) * select(t.y, 1.0-t.y, y == 1));
+                low.a = min(low.a, c.a);
+                high.a = max(high.a, c.a);
+                if (c.a > 0.0) {
+                    low = vec4<f32>(min(low.rgb, c.rgb), low.a);
+                    high = vec4<f32>(max(high.rgb, c.rgb), high.a);
+                }
+            }
+        }
+    }
+    let alpha = clamp(sum.a, low.a, high.a);
+    if (alpha <= 0.0) { return vec4<f32>(0.0); }
+    if (sum.a <= 0.0) { sum = bilinear; }
+    return vec4<f32>(clamp(sum.rgb / sum.a, low.rgb, high.rgb), alpha);
+}
+
 @fragment
 fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
     let uv = clamp(input.tile_position, input.tile_clamp.xy, input.tile_clamp.zw);
@@ -1925,11 +1972,15 @@ fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
     let distance = shaped_quad_sdf(input.local_position, sprite.bounds, sprite.corner_radii, sprite.corner_shapes);
 
     var color = sample;
-    // vue-native fork: an HDR tile (`pad` non-zero) holds linear values; they
-    // clamp to the sprite's headroom, `pad`'s float bits, and are encoded as
-    // the target blends.
-    if (sprite.pad != 0u) {
-        let headroom = vec3<f32>(bitcast<f32>(sprite.pad));
+    // See PolychromeSprite::sampling_word for the surface tag and legacy HDR word.
+    let mode = select(0u, (sprite.pad >> 27u) & 7u, (sprite.pad & 0x80000000u) != 0u);
+    if (mode != 0u) {
+        color = sample_surface(input.tile_position, sprite, mode);
+    }
+    let code = sprite.pad & 0x07ffffffu;
+    let headroom_bits = select(sprite.pad, select(0u, code + 0x3f7fffffu, code != 0u), mode != 0u);
+    if (headroom_bits != 0u) {
+        let headroom = vec3<f32>(bitcast<f32>(headroom_bits));
         color = vec4<f32>(linear_to_srgb(clamp(color.rgb, vec3<f32>(0.0), headroom)), saturate(color.a));
     }
     // vue-native fork: the tint takes the pixels by its alpha, keeping theirs

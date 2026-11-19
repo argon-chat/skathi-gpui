@@ -2062,18 +2062,75 @@ PolychromeSpriteVertexOutput polychrome_sprite_vertex(uint vertex_id: SV_VertexI
     return output;
 }
 
+// Surface texels hold straight alpha. Filter associated colours, then limit the
+// result to the four texels enclosing the sample, including HDR highlights.
+float4 surface_weights(float t, bool cubic) {
+    if (!cubic) return float4(0.0, 1.0 - t, t, 0.0);
+    float t2 = t * t;
+    float t3 = t2 * t;
+    return 0.5 * float4(-t + 2.0*t2 - t3, 2.0 - 5.0*t2 + 3.0*t3,
+                         t + 4.0*t2 - 3.0*t3, -t2 + t3);
+}
+
+float4 sample_surface(float2 uv, PolychromeSprite sprite, uint mode) {
+    float2 atlas_size;
+    t_sprite.GetDimensions(atlas_size.x, atlas_size.y);
+    int2 lo = int2(sprite.tile.bounds.origin);
+    int2 hi = lo + int2(sprite.tile.bounds.size) - 1;
+    float2 pos = uv * atlas_size;
+    if (mode == 4u) {
+        int2 coord = clamp(int2(floor(pos)), lo, hi);
+        return t_sprite.Load(int3(coord, 0));
+    }
+    pos -= 0.5;
+    int2 base = int2(floor(pos));
+    float2 t = pos - float2(base);
+    float4 wx = surface_weights(t.x, (mode & 1u) != 0u);
+    float4 wy = surface_weights(t.y, (mode & 2u) != 0u);
+    float4 sum = 0.0;
+    float4 bilinear = 0.0;
+    float4 low = 65504.0, high = -65504.0;
+    [unroll] for (int y = 0; y < 4; ++y) {
+        [unroll] for (int x = 0; x < 4; ++x) {
+            int2 coord = clamp(base + int2(x - 1, y - 1), lo, hi);
+            float4 c = t_sprite.Load(int3(coord, 0));
+            float4 associated = float4(c.rgb * c.a, c.a);
+            sum += associated * (wx[x] * wy[y]);
+            if (x >= 1 && x <= 2 && y >= 1 && y <= 2) {
+                bilinear += associated * ((x == 1 ? 1.0 - t.x : t.x) * (y == 1 ? 1.0 - t.y : t.y));
+                low.a = min(low.a, c.a);
+                high.a = max(high.a, c.a);
+                if (c.a > 0.0) {
+                    low.rgb = min(low.rgb, c.rgb);
+                    high.rgb = max(high.rgb, c.rgb);
+                }
+            }
+        }
+    }
+    float alpha = clamp(sum.a, low.a, high.a);
+    if (alpha <= 0.0) return 0.0;
+    if (sum.a <= 0.0) sum = bilinear;
+    return float4(clamp(sum.rgb / sum.a, low.rgb, high.rgb), alpha);
+}
+
 float4 polychrome_sprite_fragment(PolychromeSpriteFragmentInput input): SV_Target {
     PolychromeSprite sprite = poly_sprites[input.sprite_id];
     float4 tile_clamp = to_tile_clamp(sprite.tile);
-    float4 sample = t_sprite.Sample(s_sprite, clamp(input.tile_position, tile_clamp.xy, tile_clamp.zw));
+    float4 sample;
+    uint mode = (sprite.pad & 0x80000000u) != 0u ? (sprite.pad >> 27) & 7u : 0u;
+    [branch] if (mode != 0u) {
+        sample = sample_surface(input.tile_position, sprite, mode);
+    } else {
+        sample = t_sprite.SampleLevel(s_sprite, clamp(input.tile_position, tile_clamp.xy, tile_clamp.zw), 0.0);
+    }
     float distance = shaped_quad_sdf(input.local_position, sprite.bounds, sprite.corner_radii, sprite.corner_shapes);
 
     float4 color = sample;
-    // vue-native fork: an HDR tile (`pad` non-zero) holds linear values; they
-    // clamp to the sprite's headroom, `pad`'s float bits, and are encoded as
-    // the target blends.
-    if (sprite.pad != 0u) {
-        color = float4(linear_to_srgb(clamp(color.rgb, 0.0, asfloat(sprite.pad))), saturate(color.a));
+    // See PolychromeSprite::sampling_word for the surface tag and legacy HDR word.
+    uint code = sprite.pad & 0x07ffffffu;
+    uint headroom = mode == 0u ? sprite.pad : (code == 0u ? 0u : code + 0x3f7fffffu);
+    if (headroom != 0u) {
+        color = float4(linear_to_srgb(clamp(color.rgb, 0.0, asfloat(headroom))), saturate(color.a));
     }
     // vue-native fork: the tint takes the pixels by its alpha, keeping theirs
     // (canvas `source-atop`, in straight alpha).

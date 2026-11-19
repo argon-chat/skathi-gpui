@@ -4,7 +4,7 @@ use crate::*;
 use anyhow::{Context as _, Result};
 
 #[allow(missing_docs)]
-pub const WIDTH: u32 = 64;
+pub const WIDTH: u32 = 96;
 #[allow(missing_docs)]
 pub const HEIGHT: u32 = 8;
 /// 240-nit SDR white, in scRGB.
@@ -126,6 +126,36 @@ pub fn scene(atlas: &dyn PlatformAtlas) -> Result<Scene> {
             corner_shapes: CornerShapes::default(),
         });
     }
+    // The two outer texels belong outside the cropped source rectangle.
+    let stripe: Vec<_> = [4.0, 0.5, 0.5, 2.0, 2.0, 4.0]
+        .into_iter()
+        .flat_map(|v| [v, v, v, 1.])
+        .flat_map(|v| f32_to_half(v).to_le_bytes())
+        .collect();
+    let key = AtlasKey::Image(RenderImageParams {
+        image_id: ImageId(0x4d52_0010),
+        frame_index: 0,
+    });
+    let mut tile = atlas
+        .write_hdr_bytes(&key, size(DevicePixels(6), DevicePixels(1)), &stripe)?
+        .context("the filter test tile was not allocated")?;
+    tile.bounds.origin.x.0 += 1;
+    tile.bounds.size.width.0 = 4;
+    for (x, mode) in [(64., 1), (80., 4)] {
+        scene.insert_primitive(PolychromeSprite {
+            order: 0,
+            pad: PolychromeSprite::sampling_word(Some(3.), mode),
+            tile: tile.clone(),
+            grayscale: false.into(),
+            opacity: 1.,
+            bounds: rect(x, 16.),
+            content_mask: mask.clone(),
+            corner_radii: Corners::default(),
+            transformation: TransformationMatrix::unit(),
+            tint: Hsla::transparent_black(),
+            corner_shapes: CornerShapes::default(),
+        });
+    }
     scene.finish();
     Ok(scene)
 }
@@ -147,7 +177,7 @@ pub fn check(
                 expected.0
             );
         }
-        if (40..56).contains(&x) {
+        if (40..56).contains(&x) || x >= 64 {
             continue;
         }
         let shown = output[(y * WIDTH + x) as usize];
@@ -181,6 +211,12 @@ pub fn check(
     near(at(44), 2.5 * SDR_WHITE, "4.0 at headroom 2.5")?;
     near(at(52), SDR_WHITE, "4.0 at headroom 1.0")?;
     near(at(60), 0.5 * SDR_WHITE, "0.5")?;
+    near(at(64), 0.5 * SDR_WHITE, "cubic crop edge")?;
+    near(at(68), 0.5 * SDR_WHITE, "cubic dark plateau")?;
+    near(at(71), (0.5 + 1.5 * 0.345703125) * SDR_WHITE, "cubic HDR edge")?;
+    near(at(79), 2.0 * SDR_WHITE, "cubic bright plateau")?;
+    near(at(87), 0.5 * SDR_WHITE, "nearest before HDR edge")?;
+    near(at(88), 2.0 * SDR_WHITE, "nearest after HDR edge")?;
     Ok(())
 }
 

@@ -3123,6 +3123,18 @@ pub struct PolychromeSprite {
     pub corner_shapes: CornerShapes,
 }
 
+impl PolychromeSprite {
+    /// Linear sprites keep their existing headroom word. A filtered sprite uses its sign bit
+    /// as a tag: bits 27–29 select the filter and bits 0–26 preserve every useful FP16 headroom.
+    pub(crate) fn sampling_word(headroom: Option<f32>, mode: u32) -> u32 {
+        if mode == 0 {
+            return headroom.map_or(0, f32::to_bits);
+        }
+        let code = headroom.map_or(0, |h| h.clamp(1., 65504.).to_bits() - 1f32.to_bits() + 1);
+        (1 << 31) | (mode << 27) | code
+    }
+}
+
 impl From<PolychromeSprite> for Primitive {
     fn from(sprite: PolychromeSprite) -> Self {
         Primitive::PolychromeSprite(sprite)

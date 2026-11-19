@@ -121,9 +121,44 @@ where
     }
 }
 
+/// Sampling of a colour image in the sprite atlas.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ImageSampling {
+    /// Hardware bilinear filtering.
+    #[default]
+    Linear,
+    /// Bounded Catmull–Rom along magnified axes, bilinear otherwise.
+    SmoothUpscale,
+    /// The closest source texel.
+    Nearest,
+}
+
+impl ImageSampling {
+    pub(crate) fn mode(
+        self,
+        source: crate::Size<crate::DevicePixels>,
+        destination: crate::Size<crate::ScaledPixels>,
+        transform: crate::TransformationMatrix,
+    ) -> u32 {
+        match self {
+            Self::Linear => 0,
+            Self::Nearest => 4,
+            Self::SmoothUpscale => {
+                let [[a, b], [c, d]] = transform.rotation_scale;
+                let magnified =
+                    |length: f32, factor: f32, native: i32| length * factor > native as f32 + 0.001;
+                let x = magnified(destination.width.0, a.hypot(c), source.width.0);
+                let y = magnified(destination.height.0, b.hypot(d), source.height.0);
+                u32::from(x) | (u32::from(y) << 1)
+            }
+        }
+    }
+}
+
 /// The style of an image element.
 pub struct ImageStyle {
     grayscale: bool,
+    sampling: ImageSampling,
     object_fit: ObjectFit,
     loading: Option<Box<dyn Fn() -> AnyElement>>,
     fallback: Option<Box<dyn Fn() -> AnyElement>>,
@@ -133,6 +168,7 @@ impl Default for ImageStyle {
     fn default() -> Self {
         Self {
             grayscale: false,
+            sampling: ImageSampling::Linear,
             object_fit: ObjectFit::Contain,
             loading: None,
             fallback: None,
@@ -148,6 +184,12 @@ pub trait StyledImage: Sized {
     /// Set the image to be displayed in grayscale.
     fn grayscale(mut self, grayscale: bool) -> Self {
         self.image_style().grayscale = grayscale;
+        self
+    }
+
+    /// Selects how the image's native texels are sampled when painted.
+    fn image_sampling(mut self, sampling: ImageSampling) -> Self {
+        self.image_style().sampling = sampling;
         self
     }
 
@@ -495,13 +537,14 @@ impl Element for Img {
                     // against the box (`Style::corner_radii_for`).
                     let corner_radii = style.corner_radii_for(bounds.size, window.rem_size());
                     window
-                        .paint_image(
+                        .paint_image_sampled(
                             bounds,
                             new_bounds,
                             corner_radii,
                             data,
                             layout_state.frame_index,
                             self.style.grayscale,
+                            self.style.sampling,
                         )
                         .log_err();
                 } else if let Some(replacement) = &mut layout_state.replacement {
@@ -788,6 +831,49 @@ mod tests {
 
     const TEST_IMG_ID: &str = "test-img";
 
+    #[test]
+    fn sampling_tag_preserves_legacy_hdr_and_all_representable_highlights() {
+        use crate::PolychromeSprite;
+        assert_eq!(PolychromeSprite::sampling_word(None, 0), 0);
+        for h in [1., f32::from_bits(1f32.to_bits() + 1), 2.345678, 65504., f32::MAX] {
+            assert_eq!(PolychromeSprite::sampling_word(Some(h), 0), h.to_bits());
+            for mode in 1..=4 {
+                let word = PolychromeSprite::sampling_word(Some(h), mode);
+                assert_eq!((word >> 27) & 7, mode);
+                let code = word & 0x07ff_ffff;
+                assert_eq!(f32::from_bits(code + 0x3f7f_ffff), h.min(65504.));
+                assert_eq!(PolychromeSprite::sampling_word(None, mode) & 0x07ff_ffff, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn only_magnified_native_axes_get_cubic_sampling() {
+        let source = crate::size(crate::DevicePixels(8), crate::DevicePixels(4));
+        let destination = crate::size(crate::ScaledPixels(8.), crate::ScaledPixels(4.));
+        let unit = crate::TransformationMatrix::unit();
+        let scale_and_rotate = crate::TransformationMatrix {
+            rotation_scale: [[0., -3.], [0.5, 0.]],
+            translation: [12., 0.],
+        };
+        assert_eq!(
+            ImageSampling::SmoothUpscale.mode(source, destination, unit),
+            0
+        );
+        assert_eq!(
+            ImageSampling::SmoothUpscale.mode(source, destination, scale_and_rotate),
+            2
+        );
+        assert_eq!(
+            ImageSampling::Nearest.mode(source, destination, unit),
+            4
+        );
+        assert_eq!(
+            ImageSampling::Linear.mode(source, destination, scale_and_rotate),
+            0
+        );
+    }
+
     fn test_image(frame_count: usize) -> Arc<RenderImage> {
         let frame = Frame::new(ImageBuffer::from_pixel(1, 1, Rgba([0, 0, 0, 0])));
         Arc::new(RenderImage::new(SmallVec::from_iter(
@@ -822,6 +908,27 @@ mod tests {
             .draw(point(px(0.), px(0.)), size(px(100.), px(100.)), |_, _| {
                 img(ImageSource::Render(test_image(0))).into_any_element()
             });
+    }
+
+    #[gpui::test]
+    fn a_cover_crop_narrower_than_a_surface_texel_still_paints(cx: &mut TestAppContext) {
+        let window = cx.add_empty_window();
+        window.draw(point(px(0.), px(0.)), size(px(1.), px(100.)), |_, _| {
+            img(ImageSource::Render(test_image_with_size(4, 1)))
+                .size_full()
+                .object_fit(ObjectFit::Cover)
+                .image_sampling(ImageSampling::Nearest)
+                .into_any_element()
+        });
+        window.update(|w, _| {
+            let sprite = w.rendered_frame.scene.polychrome_sprites.last().unwrap();
+            assert_eq!(
+                sprite.tile.bounds.size,
+                size(crate::DevicePixels(1), crate::DevicePixels(1))
+            );
+            assert!(!sprite.grayscale.as_bool());
+            assert_eq!(sprite.pad, crate::PolychromeSprite::sampling_word(None, 4));
+        });
     }
 
     #[gpui::test]

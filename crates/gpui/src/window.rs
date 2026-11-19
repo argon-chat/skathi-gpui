@@ -7946,6 +7946,27 @@ impl Window {
         frame_index: usize,
         grayscale: bool,
     ) -> Result<()> {
+        self.paint_image_sampled(
+            bounds,
+            image_bounds,
+            corner_radii,
+            data,
+            frame_index,
+            grayscale,
+            crate::ImageSampling::Linear,
+        )
+    }
+
+    pub(crate) fn paint_image_sampled(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        image_bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        data: Arc<RenderImage>,
+        frame_index: usize,
+        grayscale: bool,
+        sampling: crate::ImageSampling,
+    ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
         let visible_bounds = bounds.intersect(&image_bounds);
@@ -7984,6 +8005,11 @@ impl Window {
         let Some(tile) = tile else { return Ok(()); };
 
         let visible_bounds_snapped = self.snap_bounds(visible_bounds);
+        let sampling_mode = sampling.mode(
+            tile.bounds.size,
+            image_bounds.size.scale(self.scale_factor()),
+            self.element_transform,
+        );
 
         let sub_tile = if visible_bounds == image_bounds {
             tile
@@ -8000,18 +8026,21 @@ impl Window {
             let tile_width = tile.bounds.size.width.0;
             let tile_height = tile.bounds.size.height.0;
 
-            let sub_origin_x = tile_origin_x + (x_offset_ratio * tile_width as f32).round() as i32;
-            let sub_origin_y = tile_origin_y + (y_offset_ratio * tile_height as f32).round() as i32;
-            let sub_width = (width_ratio * tile_width as f32).round() as i32;
-            let sub_height = (height_ratio * tile_height as f32).round() as i32;
-
-            let max_x = tile_origin_x + tile_width;
-            let max_y = tile_origin_y + tile_height;
-
-            let clamped_origin_x = sub_origin_x.clamp(tile_origin_x, max_x);
-            let clamped_origin_y = sub_origin_y.clamp(tile_origin_y, max_y);
-            let clamped_width = sub_width.min(max_x - clamped_origin_x).max(0);
-            let clamped_height = sub_height.min(max_y - clamped_origin_y).max(0);
+            let crop = |origin: i32, native: i32, offset: f32, fraction: f32| {
+                let far = origin + native;
+                let width = (fraction * native as f32).round() as i32;
+                if sampling != crate::ImageSampling::Linear && native > 0 && width == 0 {
+                    // A cover crop narrower than one texel still shows its central texel.
+                    let center = ((offset + fraction * 0.5) * native as f32).floor() as i32;
+                    return ((origin + center).clamp(origin, far - 1), 1);
+                }
+                let start = (origin + (offset * native as f32).round() as i32).clamp(origin, far);
+                (start, width.min(far - start).max(0))
+            };
+            let (clamped_origin_x, clamped_width) =
+                crop(tile_origin_x, tile_width, x_offset_ratio, width_ratio);
+            let (clamped_origin_y, clamped_height) =
+                crop(tile_origin_y, tile_height, y_offset_ratio, height_ratio);
 
             AtlasTile {
                 bounds: Bounds {
@@ -8025,22 +8054,22 @@ impl Window {
             }
         };
 
+        if sampling != crate::ImageSampling::Linear
+            && (sub_tile.bounds.size.width.0 <= 0 || sub_tile.bounds.size.height.0 <= 0)
+        {
+            return Ok(());
+        }
         let content_mask = self.snapped_content_mask();
         let corner_radii = corner_radii
             .clamp_radii_for_quad_size(visible_bounds.size)
             .scale(self.scale_factor());
         let opacity = self.element_opacity();
 
-        // An HDR tile carries its headroom in `pad`, as f32 bits; the shaders take a non-zero
-        // `pad` as linear values to clamp to it and encode.
-        let pad = if sub_tile.texture_id.kind == AtlasTextureKind::PolychromeHdr {
-            self.element_image_headroom.to_bits()
-        } else {
-            0
-        };
+        let headroom = (sub_tile.texture_id.kind == AtlasTextureKind::PolychromeHdr)
+            .then_some(self.element_image_headroom);
         self.next_frame.scene.insert_primitive(PolychromeSprite {
             order: 0,
-            pad,
+            pad: PolychromeSprite::sampling_word(headroom, sampling_mode),
             grayscale: grayscale.into(),
             bounds: visible_bounds_snapped,
             content_mask,
