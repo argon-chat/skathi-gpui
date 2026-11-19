@@ -77,6 +77,9 @@ use std::{
 
 const WINDOW_STATE_IVAR: &CStr = c"windowState";
 
+mod timer_frames;
+use timer_frames::TimerFrames;
+
 static RESTORES_WORKSPACE_AT_LAUNCH_DEFAULT: Once = Once::new();
 
 static mut WINDOW_CLASS: *const AnyClass = ptr::null();
@@ -655,6 +658,7 @@ unsafe fn apply_simple_fullscreen_plan(
 /// What paces a window's frames. The choice depends only on the OS version,
 /// so it is made once per window.
 enum FrameSource {
+    Timer(Rc<TimerFrames>),
     /// macOS 14+: a `CAMetalDisplayLink` that hands out each frame's drawable.
     Metal(Rc<MetalFrames>),
     /// Earlier systems: the shared `CVDisplayLink` registry, joined on first start.
@@ -913,14 +917,19 @@ impl MacWindowState {
         }
         let screen: *mut AnyObject = unsafe { msg_send![self.native_window, screen] };
         // SAFETY: AppKit's `screen` is a live NSScreen or nil.
-        if let Some(screen) = unsafe { screen.as_ref() } {
-            let fps: isize = unsafe { msg_send![screen, maximumFramesPerSecond] };
-            if fps > 0 {
-                self.renderer.set_refresh_interval(Duration::from_secs_f64(1.0 / fps as f64));
-            }
+        let fps = unsafe { screen.as_ref() }
+            .map(|screen| unsafe { msg_send![screen, maximumFramesPerSecond] })
+            .filter(|fps: &isize| *fps > 0);
+        let interval = Duration::from_secs_f64(1.0 / fps.unwrap_or(60) as f64);
+        if fps.is_some() || matches!(self.frame_source, FrameSource::Timer(_)) {
+            self.renderer.set_refresh_interval(interval);
         }
         let covered = !self.on_screen();
         match &mut self.frame_source {
+            FrameSource::Timer(timer) => {
+                timer.start(interval);
+                schedule_timer_frame(timer, &Rc::downgrade(window_state), &self.foreground_executor);
+            }
             FrameSource::Metal(_) if covered => {
                 let screen: *mut AnyObject = unsafe { msg_send![self.native_window, screen] };
                 let Some(display_id) = display_id_for_screen(screen) else {
@@ -969,6 +978,7 @@ impl MacWindowState {
             frame_source.stop();
         }
         match &mut self.frame_source {
+            FrameSource::Timer(timer) => timer.stop(),
             FrameSource::Metal(metal_frames) => {
                 if metal_frames.is_attached() {
                     // Detach the link rather than pause it, so that a synchronous
@@ -1077,9 +1087,8 @@ impl MacWindowState {
 pub(crate) struct MacWindow(
     Rc<Mutex<MacWindowState>>,
     MainThreadMarker,
-    /// The Metal link's frame waker, kept outside the lock so waking never
-    /// waits on it. `None` when a `CVDisplayLink` paces frames.
-    Option<Rc<MetalFrames>>,
+    /// Kept outside the window lock since invalidation can happen inside a draw.
+    Option<Rc<dyn Fn()>>,
 );
 
 impl MacWindow {
@@ -1099,6 +1108,7 @@ impl MacWindow {
             window_min_size,
             tabbing_identifier,
             use_display_p3,
+            low_latency_surface,
             ..
         }: WindowParams,
         cursor_visible: Arc<AtomicBool>,
@@ -1210,7 +1220,8 @@ impl MacWindow {
             let native_view: *mut AnyObject = msg_send![native_view, initWithFrame: content_bounds];
             assert!(!native_view.is_null());
 
-            let metal_frames = MetalFrameSource::is_available().then(Rc::<MetalFrames>::default);
+            let metal_frames = (!low_latency_surface && MetalFrameSource::is_available())
+                .then(Rc::<MetalFrames>::default);
             let (foreground, background) =
                 (foreground_executor.clone(), background_executor.clone());
             let state = Rc::new(Mutex::new(MacWindowState {
@@ -1227,6 +1238,7 @@ impl MacWindow {
                 pointer_locked: false,
                 pointer_motion: None,
                 frame_source: match &metal_frames {
+                    _ if low_latency_surface => FrameSource::Timer(Rc::default()),
                     Some(metal_frames) => FrameSource::Metal(metal_frames.clone()),
                     None => FrameSource::DisplayLink(None),
                 },
@@ -1291,7 +1303,26 @@ impl MacWindow {
                         .detach();
                 });
             }
-            let mut window = Self(state, marker, metal_frames);
+            let initial = state.lock();
+            let wake: Option<Rc<dyn Fn()>> = match &initial.frame_source {
+                FrameSource::Metal(frames) => {
+                    let frames = Rc::downgrade(frames);
+                    Some(Rc::new(move || {
+                        if let Some(frames) = frames.upgrade() {
+                            frames.wake();
+                        }
+                    }))
+                }
+                FrameSource::Timer(timer) => {
+                    let timer = Rc::clone(timer);
+                    let weak = Rc::downgrade(&state);
+                    let executor = initial.foreground_executor.clone();
+                    Some(Rc::new(move || schedule_timer_frame(&timer, &weak, &executor)))
+                }
+                FrameSource::DisplayLink(_) => None,
+            };
+            drop(initial);
+            let mut window = Self(state, marker, wake);
 
             (*native_window)
                 .class()
@@ -1538,6 +1569,7 @@ impl Drop for MacWindow {
         let window = this.native_window;
         let sheet_parent = this.sheet_parent.take();
         match &mut this.frame_source {
+            FrameSource::Timer(timer) => timer.stop(),
             FrameSource::Metal(metal_frames) => metal_frames.replace(None),
             FrameSource::DisplayLink(frame_source) => drop(frame_source.take()),
         }
@@ -2475,23 +2507,22 @@ impl PlatformWindow for MacWindow {
     fn draw(&self, scene: &gpui::Scene) {
         let mut this = self.0.lock();
         this.renderer.draw(scene);
+        if let FrameSource::Timer(timer) = &this.frame_source {
+            // Give passive callbacks and presentation feedback one tick after this draw.
+            schedule_timer_frame(timer, &Rc::downgrade(&self.0), &this.foreground_executor);
+        }
     }
 
     // GPUI calls this without waking the frame waker when a window only needs
     // a present, so a paused Metal link must resume here too.
     fn schedule_frame(&self) {
-        if let Some(metal_frames) = &self.2 {
-            metal_frames.wake();
+        if let Some(wake) = &self.2 {
+            wake();
         }
     }
 
     fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
-        let metal_frames = Rc::downgrade(self.2.as_ref()?);
-        Some(Rc::new(move || {
-            if let Some(metal_frames) = metal_frames.upgrade() {
-                metal_frames.wake();
-            }
-        }))
+        self.2.clone()
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
@@ -2576,6 +2607,7 @@ impl PlatformWindow for MacWindow {
             "frame": [frame.origin.x, frame.origin.y, frame.size.width, frame.size.height],
             "backing_scale_factor": window.backingScaleFactor(),
             "frame_source": match &state.frame_source {
+                FrameSource::Timer(timer) => timer.debug_state(),
                 FrameSource::Metal(metal_frames) => metal_frames.debug_state(),
                 FrameSource::DisplayLink(Some(frame_source)) => frame_source.debug_state(),
                 FrameSource::DisplayLink(None) => serde_json::json!({
@@ -4053,6 +4085,41 @@ extern "C" fn step(view: *mut c_void) {
 }
 
 const METAL_LINK_STALL: Duration = Duration::from_millis(500);
+
+fn schedule_timer_frame(
+    timer: &Rc<TimerFrames>,
+    window: &Weak<Mutex<MacWindowState>>,
+    executor: &ForegroundExecutor,
+) {
+    let Some((generation, delay)) = timer.next(std::time::Instant::now()) else {
+        return;
+    };
+    let timer = timer.clone();
+    let window = window.clone();
+    let alarm = (!delay.is_zero()).then(|| executor.scheduler_executor().timer(delay));
+    executor
+        .spawn(async move {
+            if let Some(alarm) = alarm {
+                alarm.await;
+            }
+            if !timer.fire(generation, std::time::Instant::now()) {
+                return;
+            }
+            let Some(window) = window.upgrade() else {
+                return;
+            };
+            let callback = window.lock().request_frame_callback.take();
+            if let Some(mut callback) = callback {
+                callback(RequestFrameOptions {
+                    signal_at: PlatformFrameSignal::capture(scheduler::Instant::now),
+                    signal_source: FrameRequestSource::LocalSchedule,
+                    ..Default::default()
+                });
+                window.lock().request_frame_callback = Some(callback);
+            }
+        })
+        .detach();
+}
 
 fn leave_stalled_metal_link(window_state: &Rc<Mutex<MacWindowState>>, updates: u64) {
     let mut lock = window_state.lock();
