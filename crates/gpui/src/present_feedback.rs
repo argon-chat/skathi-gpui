@@ -32,13 +32,27 @@ pub trait PresentListener: Send + Sync {
     fn queued(&self, window: u64, present: u64);
     /// Once per queued present, in present order per window.
     fn resolved(&self, window: u64, present: u64, outcome: PresentOutcome);
-    /// On Windows, from the vsync thread once per refresh while feedback is wanted, after that
-    /// refresh's [`Self::resolved`] calls.
+    /// On Windows, once per refresh while feedback is wanted, after that refresh's
+    /// [`Self::resolved`] calls: from the vsync thread, after it asked the windows to paint, or
+    /// with [`set_feedback_after_composition`] from a thread of its own.
     fn refresh(&self) {}
 }
 
 static LISTENER: OnceLock<Box<dyn PresentListener>> = OnceLock::new();
 static WANTED: AtomicBool = AtomicBool::new(false);
+static AFTER_COMPOSITION: AtomicBool = AtomicBool::new(false);
+
+/// On Windows, reads each refresh's feedback once the compositor has finished that refresh: every
+/// outcome is exact, and no present misses its refresh to another application's update, but every
+/// present is shown a refresh later. Off by default.
+pub fn set_feedback_after_composition(on: bool) {
+    AFTER_COMPOSITION.store(on, Ordering::Release);
+}
+
+/// Whether [`set_feedback_after_composition`] is on.
+pub fn feedback_after_composition() -> bool {
+    AFTER_COMPOSITION.load(Ordering::Acquire)
+}
 static WAKER: OnceLock<fn()> = OnceLock::new();
 
 /// Installs the listener, once per process.

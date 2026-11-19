@@ -535,26 +535,26 @@ impl WindowsPlatform {
                     let Some(all_windows) = all_windows.upgrade() else {
                         break;
                     };
-                    crate::present_feedback::poll();
-                    // Idle windows wait for demand (src/frame_pacing.rs).
-                    if !crate::frame_pacing::take_due(std::time::Instant::now()) {
-                        continue;
-                    }
-                    for hwnd in all_windows.read().iter() {
-                        unsafe {
-                            if let Some(signal_at) = signal_at {
-                                if IsWindowVisible(hwnd.as_raw()).as_bool()
-                                    && !IsIconic(hwnd.as_raw()).as_bool()
-                                {
-                                    hwnd.frame_signal.record(signal_at, signal_source);
-                                } else {
-                                    // Hidden windows may not consume WM_PAINT until shown again.
-                                    hwnd.frame_signal.take();
+                    // The windows first: what runs between the vblank and their paint requests
+                    // delays the tick. Idle windows wait for demand (src/frame_pacing.rs).
+                    if crate::frame_pacing::take_due(std::time::Instant::now()) {
+                        for hwnd in all_windows.read().iter() {
+                            unsafe {
+                                if let Some(signal_at) = signal_at {
+                                    if IsWindowVisible(hwnd.as_raw()).as_bool()
+                                        && !IsIconic(hwnd.as_raw()).as_bool()
+                                    {
+                                        hwnd.frame_signal.record(signal_at, signal_source);
+                                    } else {
+                                        // Hidden windows may not consume WM_PAINT until shown again.
+                                        hwnd.frame_signal.take();
+                                    }
                                 }
                             }
+                            redraw_window(hwnd.as_raw()).log_err();
                         }
-                        redraw_window(hwnd.as_raw()).log_err();
                     }
+                    crate::present_feedback::refreshed();
                 }
             })
             .unwrap();

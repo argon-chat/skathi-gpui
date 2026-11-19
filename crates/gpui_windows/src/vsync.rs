@@ -223,12 +223,9 @@ impl Output {
             self.output = find_output(monitor).log_err().flatten();
             self.nominal = None;
         }
-        let output = self.output.as_ref()?;
-        if unsafe { output.WaitForVBlank() }.is_err() {
-            self.output = None;
-            return None;
-        }
-        // The mode can change under the same monitor; reading it is cheap but not free.
+        self.output.as_ref()?;
+        // The mode can change under the same monitor. Read before the wait: after it, the read
+        // would delay the paint requests that follow the vblank.
         if self
             .nominal
             .is_none_or(|(_, read)| read.elapsed() >= Duration::from_secs(1))
@@ -243,6 +240,11 @@ impl Output {
                     * *QPC_TICKS_PER_SECOND as f64
             };
             self.nominal = Some((nominal, Instant::now()));
+        }
+        let output = self.output.as_ref()?;
+        if unsafe { output.WaitForVBlank() }.is_err() {
+            self.output = None;
+            return None;
         }
         Some(Display {
             id: monitor.0 as isize,

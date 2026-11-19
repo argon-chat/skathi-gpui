@@ -3,19 +3,22 @@
 //! A flip-model swap chain's frame statistics name the last present shown (`PresentCount`, as
 //! `GetLastPresentCount` numbers them) and the refresh it was first shown on
 //! (`PresentRefreshCount`), against a refresh and its QPC time (`SyncRefreshCount`,
-//! `SyncQPCTime`). The vsync thread reads them every refresh while feedback is wanted. DWM
+//! `SyncQPCTime`). They are read every refresh while feedback is wanted: by the vsync thread, or
+//! once DWM has composed the refresh (`set_feedback_after_composition`). DWM
 //! discards a present superseded before its refresh, so a present older than one shown that never
 //! showed itself was discarded. A present the statistics do not show in time is estimated: shown
 //! as many refreshes after the first vblank following its GPU work as the last presents shown
 //! exactly were (one where none were: DWM composes it on that vblank and shows it on the next).
 
 use std::collections::VecDeque;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Condvar, LazyLock, Mutex, OnceLock};
 
-use gpui::present_feedback::{PresentOutcome, present_feedback_wanted, present_listener};
+use gpui::present_feedback::{
+    PresentOutcome, feedback_after_composition, present_feedback_wanted, present_listener,
+};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct3D12::ID3D12Fence;
-use windows::Win32::Graphics::Dwm::{DWM_TIMING_INFO, DwmGetCompositionTimingInfo};
+use windows::Win32::Graphics::Dwm::{DWM_TIMING_INFO, DwmFlush, DwmGetCompositionTimingInfo};
 use windows::Win32::Graphics::Dxgi::{DXGI_FRAME_STATISTICS, IDXGISwapChain};
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::core::Interface;
@@ -469,7 +472,53 @@ pub(crate) fn forget(hwnd: HWND) {
     }
 }
 
-/// On the vsync thread, once per refresh.
+static REFRESHED: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+
+/// On the vsync thread, once per refresh, after the windows were asked to paint.
+pub(crate) fn refreshed() {
+    if !present_feedback_wanted() {
+        return;
+    }
+    if !feedback_after_composition() {
+        poll();
+        return;
+    }
+    static THREAD: OnceLock<bool> = OnceLock::new();
+    let spawned = *THREAD.get_or_init(|| {
+        std::thread::Builder::new()
+            .name("PresentFeedback".to_owned())
+            .spawn(poll_after_composition)
+            .is_ok()
+    });
+    if !spawned {
+        poll();
+        return;
+    }
+    let (seen, wake) = &REFRESHED;
+    *seen.lock().unwrap_or_else(|e| e.into_inner()) = true;
+    wake.notify_one();
+}
+
+/// The vsync thread wakes some tens of microseconds after the vblank, before DWM has published
+/// that refresh's statistics; `DwmFlush` returns once it has. A waiter in `DwmFlush` also makes
+/// DWM compose each refresh after the presents made in it, at one refresh of latency.
+fn poll_after_composition() {
+    let (seen, wake) = &REFRESHED;
+    loop {
+        {
+            let mut seen = seen.lock().unwrap_or_else(|e| e.into_inner());
+            while !*seen {
+                seen = wake.wait(seen).unwrap_or_else(|e| e.into_inner());
+            }
+            *seen = false;
+        }
+        // SAFETY: takes no arguments. Without composition it fails or returns at once.
+        let _ = unsafe { DwmFlush() };
+        poll();
+    }
+}
+
+/// Once per refresh: from [`refreshed`], or the feedback thread after composition.
 pub(crate) fn poll() {
     if !present_feedback_wanted() {
         return;
@@ -625,6 +674,59 @@ mod tests {
         assert!(d.decode(&mut q, stale(104 * P + 10), |_| true).is_empty());
         assert_eq!(
             d.decode(&mut q, stale(105 * P + 10), |_| true),
+            [(5, shown(104, false))]
+        );
+    }
+
+    /// Four presents flipped straight to the display, then a fifth queued in refresh 103 that
+    /// missed 104 and was shown on 105.
+    fn flipped_then_one_late() -> (Decoder, VecDeque<Pending>) {
+        let mut d = Decoder::default();
+        let mut q = VecDeque::new();
+        for k in 0..4u32 {
+            let r = 100 + k;
+            q.push_back(pending(
+                u64::from(k) + 1,
+                k + 1,
+                (i64::from(r) - 1) * P + 500,
+            ));
+            d.decode(&mut q, poll(r, k + 1, r), |_| true);
+        }
+        q.push_back(pending(5, 5, 103 * P + 500));
+        (d, q)
+    }
+
+    /// The statistics as read `after` ticks into refresh `now_on`, last updated on `sync`.
+    fn read(now_on: i64, after: i64, sync: u32, count: u32, on: u32) -> Poll {
+        Poll {
+            now: now_on * P + after,
+            vblank: now_on * P,
+            ..poll(sync, count, on)
+        }
+    }
+
+    #[test]
+    fn read_after_composition_a_present_shown_a_refresh_late_is_exact() {
+        let (mut d, mut q) = flipped_then_one_late();
+        assert!(
+            d.decode(&mut q, read(104, 300, 104, 4, 103), |_| true)
+                .is_empty()
+        );
+        assert_eq!(
+            d.decode(&mut q, read(105, 300, 105, 5, 105), |_| true),
+            [(5, shown(105, true))]
+        );
+    }
+
+    #[test]
+    fn read_at_the_vblank_a_present_shown_a_refresh_late_is_estimated_on_the_one_it_missed() {
+        let (mut d, mut q) = flipped_then_one_late();
+        assert!(
+            d.decode(&mut q, read(104, 10, 103, 4, 103), |_| true)
+                .is_empty()
+        );
+        assert_eq!(
+            d.decode(&mut q, read(105, 10, 104, 4, 103), |_| true),
             [(5, shown(104, false))]
         );
     }
