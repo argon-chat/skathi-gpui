@@ -2,8 +2,8 @@
 //! macOS can hand a drawable that reached the screen back with a `presentedTime` of 0, and can run
 //! a presented handler late or not at all. So a drawable without a time counts as replaced when a
 //! later present aimed at the same refresh, or, at one present per refresh, when the next one was
-//! shown exactly at the refresh it aimed at, or when an earlier present was already reported on
-//! that refresh; otherwise it was shown, at the refresh it aimed at.
+//! shown exactly at the refresh it aimed at, or when an earlier present was shown exactly on that
+//! refresh; otherwise it was shown, at the refresh it aimed at.
 //! An estimated outcome is held until the time it reports, and outcomes go out in present order.
 
 use std::collections::VecDeque;
@@ -45,7 +45,7 @@ pub(super) struct Presents {
     refresh: u64,
     /// A known vblank: a display link's target or a shown drawable's time.
     anchor: Option<u64>,
-    /// The refresh the latest present reported shown went out on.
+    /// When the latest present with a time was shown.
     shown: Option<u64>,
     /// When a scheduled settle runs.
     timer: Option<u64>,
@@ -140,7 +140,10 @@ impl Presents {
                 PresentOutcome::Displayed { at_ns, exact, .. } if !exact => at_ns,
                 _ => 0,
             };
-            if let PresentOutcome::Displayed { at_ns, .. } = outcome {
+            if let PresentOutcome::Displayed {
+                at_ns, exact: true, ..
+            } = outcome
+            {
                 self.shown = Some(at_ns);
             }
             let timeless = p.heard.is_none_or(|at| at == 0);
@@ -315,6 +318,29 @@ mod tests {
                 (1161, shown(target(3), true)),
             ]
         );
+    }
+
+    #[test]
+    fn a_live_resize_drawable_without_a_time_is_not_discarded_behind_an_estimate() {
+        let mut log = Presents::default();
+        let vblank = 1_000 * MS;
+        log.anchor(vblank);
+        let mut out = Vec::new();
+        for i in 1..=30u64 {
+            let now = vblank + i * 6 * MS;
+            let target = log.transaction_target(now, REFRESH);
+            present(&mut log, i, target);
+            out.extend(heard(&mut log, i, 0, now + MS));
+        }
+        out.extend(log.settle(2_000 * MS).into_iter().map(|(p, o, _)| (p, o)));
+        let presents: Vec<u64> = out.iter().map(|&(p, _)| p).collect();
+        assert_eq!(presents, (1..=30).collect::<Vec<_>>());
+        for (p, outcome) in out {
+            assert!(
+                matches!(outcome, PresentOutcome::Displayed { exact: false, .. }),
+                "present {p}: {outcome:?}"
+            );
+        }
     }
 
     #[test]
