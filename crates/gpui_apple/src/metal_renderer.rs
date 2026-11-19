@@ -161,7 +161,7 @@ pub struct MetalRenderer {
     headless_render_target: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
     /// vue-native: presents made while present feedback was wanted.
     presents: u64,
-    /// vue-native: those whose presented handler has not run yet.
+    /// vue-native: those whose outcome has not been reported yet.
     presented: Arc<Mutex<presented::Presents>>,
     /// vue-native: when the display link's drawable for this frame is to reach the screen.
     frame_target: Option<f64>,
@@ -676,9 +676,15 @@ impl MetalRenderer {
             }
         };
 
-        let target = match (&self.display_link_mode, target) {
-            (DisplayLinkMode::Attached { .. }, Some(target)) => host_ns(target),
-            _ => host_ns(current_media_time()) + self.refresh_ns,
+        let target = {
+            let mut presented = self.presented.lock();
+            match (&self.display_link_mode, target) {
+                (DisplayLinkMode::Attached { .. }, Some(target)) => {
+                    presented.anchor(host_ns(target));
+                    host_ns(target)
+                }
+                _ => presented.transaction_target(host_ns(current_media_time()), self.refresh_ns),
+            }
         };
         self.report_present(&layer, &drawable, target);
         if self.presents_with_transaction {
@@ -703,7 +709,7 @@ impl MetalRenderer {
         let listener = present_listener().filter(|_| present_feedback_wanted());
         {
             let mut presented = self.presented.lock();
-            presented.presenting(target);
+            presented.presenting(target, self.refresh_ns);
             if listener.is_some() {
                 self.presents += 1;
                 presented.queued(self.presents, target);
@@ -715,21 +721,15 @@ impl MetalRenderer {
         let window = ptr::from_ref(layer) as u64;
         let present = self.presents;
         listener.queued(window, present);
-        let (presented, refresh_ns) = (self.presented.clone(), self.refresh_ns);
+        let presented = self.presented.clone();
         type Shown = ptr::NonNull<ProtocolObject<dyn MTLDrawable>>;
         let handler = RcBlock::new(move |shown: Shown| {
             // SAFETY: Metal passes the drawable the handler was added to, alive for the call;
             // `presentedTime` is a CFTimeInterval getter (macOS 10.15.4+).
             let at: f64 = unsafe { objc2::msg_send![shown.as_ref(), presentedTime] };
             let at = if at > 0.0 { host_ns(at) } else { 0 };
-            // Held while reporting, so handlers on different threads report in present order.
-            let mut presented = presented.lock();
-            for (present, outcome) in presented.presented(present, at, refresh_ns) {
-                if at == 0 {
-                    log::debug!("present {present} had no presentedTime: {outcome:?}");
-                }
-                listener.resolved(window, present, outcome);
-            }
+            presented.lock().presented(present, at);
+            report_outcomes(&presented, window);
         });
         // SAFETY: Metal copies the block and calls it once, after the drawable was shown or skipped.
         unsafe { drawable.addPresentedHandler(RcBlock::as_ptr(&handler)) };
@@ -1552,6 +1552,36 @@ impl MetalRenderer {
         }
         Ok(())
     }
+}
+
+/// vue-native: hands the listener what `presented` can settle now, and schedules the next settle
+/// for what it holds back.
+fn report_outcomes(presented: &Arc<Mutex<presented::Presents>>, window: u64) {
+    let Some(listener) = gpui::present_feedback::present_listener() else {
+        return;
+    };
+    let now = host_ns(current_media_time());
+    // Held while reporting, so handlers and timers on different threads report in present order.
+    let mut log = presented.lock();
+    for (present, outcome, timeless) in log.settle(now) {
+        if timeless {
+            log::debug!("present {present} had no presentedTime: {outcome:?}");
+        }
+        listener.resolved(window, present, outcome);
+    }
+    let Some(at) = log.wake_at() else {
+        return;
+    };
+    drop(log);
+    let presented = presented.clone();
+    let queue = dispatch2::DispatchQueue::global_queue(dispatch2::GlobalQueueIdentifier::Priority(
+        dispatch2::DispatchQueueGlobalPriority::High,
+    ));
+    let when = dispatch2::DispatchTime::NOW.time(at.saturating_sub(now) as i64);
+    let _ = queue.after(when, move || {
+        presented.lock().woke(at);
+        report_outcomes(&presented, window);
+    });
 }
 
 /// A Core Animation host time in seconds, as nanoseconds.
