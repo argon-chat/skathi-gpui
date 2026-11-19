@@ -2,7 +2,8 @@
 //! macOS can hand a drawable that reached the screen back with a `presentedTime` of 0, and can run
 //! a presented handler late or not at all. So a drawable without a time counts as replaced when a
 //! later present aimed at the same refresh, or, at one present per refresh, when the next one was
-//! shown exactly at the refresh it aimed at; otherwise it was shown, at the refresh it aimed at.
+//! shown exactly at the refresh it aimed at, or when an earlier present was already reported on
+//! that refresh; otherwise it was shown, at the refresh it aimed at.
 //! An estimated outcome is held until the time it reports, and outcomes go out in present order.
 
 use std::collections::VecDeque;
@@ -44,6 +45,8 @@ pub(super) struct Presents {
     refresh: u64,
     /// A known vblank: a display link's target or a shown drawable's time.
     anchor: Option<u64>,
+    /// The refresh the latest present reported shown went out on.
+    shown: Option<u64>,
     /// When a scheduled settle runs.
     timer: Option<u64>,
 }
@@ -115,6 +118,9 @@ impl Presents {
                 _ if p.next.is_some_and(|next| next < p.target + r / 2) => {
                     PresentOutcome::Discarded
                 }
+                _ if self.shown.is_some_and(|at| p.target < at + r / 2) => {
+                    PresentOutcome::Discarded
+                }
                 _ => match self
                     .pending
                     .get(1)
@@ -134,6 +140,9 @@ impl Presents {
                 PresentOutcome::Displayed { at_ns, exact, .. } if !exact => at_ns,
                 _ => 0,
             };
+            if let PresentOutcome::Displayed { at_ns, .. } = outcome {
+                self.shown = Some(at_ns);
+            }
             let timeless = p.heard.is_none_or(|at| at == 0);
             let present = p.present;
             self.pending.pop_front();
@@ -280,6 +289,31 @@ mod tests {
         assert_eq!(
             heard(&mut log, 2, target(3), target(3) + MS),
             [(1, shown(target(1), false)), (2, shown(target(3), true))]
+        );
+    }
+
+    #[test]
+    fn a_drawable_without_a_time_on_the_refresh_a_late_frame_took_was_not_shown() {
+        let mut log = Presents::default();
+        let target = |i: u64| 1_000 * MS + i * REFRESH;
+        let late = target(1) + REFRESH / 400;
+        let mut out = Vec::new();
+        present(&mut log, 1158, target(0));
+        present(&mut log, 1159, target(1));
+        out.extend(heard(&mut log, 1158, late, target(1) + MS));
+        present(&mut log, 1160, target(2));
+        out.extend(heard(&mut log, 1159, 0, target(1) + 2 * MS));
+        present(&mut log, 1161, target(3));
+        out.extend(heard(&mut log, 1160, 0, target(2) + MS));
+        out.extend(heard(&mut log, 1161, target(3), target(3) + MS));
+        assert_eq!(
+            out,
+            [
+                (1158, shown(late, true)),
+                (1159, PresentOutcome::Discarded),
+                (1160, PresentOutcome::Discarded),
+                (1161, shown(target(3), true)),
+            ]
         );
     }
 
