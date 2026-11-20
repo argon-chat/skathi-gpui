@@ -156,6 +156,9 @@ pub struct Xdnd {
     other_window: xproto::Window,
     drag_type: u32,
     retrieved: bool,
+    pending: bool,
+    allowed: u8,
+    requested: u8,
     position: Point<Pixels>,
 }
 
@@ -901,7 +904,30 @@ impl X11Client {
                 }
 
                 if event.type_ == state.atoms.XdndEnter {
-                    state.xdnd_state.other_window = atom;
+                    state.xdnd_state = Xdnd {
+                        other_window: atom,
+                        ..Default::default()
+                    };
+                    state.xdnd_state.allowed = state
+                        .xcb_connection
+                        .get_property(
+                            false,
+                            atom,
+                            state.atoms.XdndActionList,
+                            AtomEnum::ATOM,
+                            0,
+                            32,
+                        )
+                        .ok()
+                        .and_then(|cookie| cookie.reply().ok())
+                        .and_then(|reply| {
+                            reply.value32().map(|actions| {
+                                actions.fold(0, |bits, action| {
+                                    bits | xdnd_action_bits(action, &state.atoms)
+                                })
+                            })
+                        })
+                        .unwrap_or(0);
                     if (arg1 & 0x1) == 0x1 {
                         state.xdnd_state.drag_type = xdnd_get_supported_atom(
                             &state.xcb_connection,
@@ -917,21 +943,39 @@ impl X11Client {
                         }
                     }
                 } else if event.type_ == state.atoms.XdndLeave {
-                    let position = state.xdnd_state.position;
+                    if atom != state.xdnd_state.other_window {
+                        return Some(());
+                    }
+                    let offer = gpui::DragOffer {
+                        modifiers: state.modifiers,
+                        ..Default::default()
+                    };
+                    state.xdnd_state = Xdnd::default();
                     drop(state);
-                    window
-                        .handle_input(PlatformInput::FileDrop(FileDropEvent::Pending { position }));
-                    window.handle_input(PlatformInput::FileDrop(FileDropEvent::Exited {}));
-                    self.0.borrow_mut().xdnd_state = Xdnd::default();
+                    window.handle_drag_offer(FileDropEvent::Exited, offer);
                 } else if event.type_ == state.atoms.XdndPosition {
+                    if atom != state.xdnd_state.other_window || state.xdnd_state.drag_type == 0 {
+                        xdnd_send_status(
+                            &state.xcb_connection,
+                            &state.atoms,
+                            event.window,
+                            atom,
+                            0,
+                        );
+                        return Some(());
+                    }
                     if let Ok(pos) = get_reply(
                         || "Failed to query pointer position",
                         state.xcb_connection.query_pointer(event.window),
                     ) {
-                        state.xdnd_state.position =
-                            Point::new(px(pos.win_x as f32), px(pos.win_y as f32));
+                        state.xdnd_state.position = Point::new(
+                            px(pos.win_x as f32 / state.scale_factor),
+                            px(pos.win_y as f32 / state.scale_factor),
+                        );
                     }
-                    if !state.xdnd_state.retrieved {
+                    state.xdnd_state.requested = xdnd_action_bits(arg4, &state.atoms);
+                    if !state.xdnd_state.retrieved && !state.xdnd_state.pending {
+                        state.xdnd_state.pending = true;
                         check_reply(
                             || "Failed to convert selection for drag and drop",
                             state.xcb_connection.convert_selection(
@@ -944,68 +988,149 @@ impl X11Client {
                         )
                         .log_err();
                     }
-                    xdnd_send_status(
-                        &state.xcb_connection,
-                        &state.atoms,
-                        event.window,
-                        state.xdnd_state.other_window,
-                        arg4,
-                    );
                     let position = state.xdnd_state.position;
+                    let allowed = state.xdnd_state.allowed;
+                    let requested = state.xdnd_state.requested;
+                    let retrieved = state.xdnd_state.retrieved;
+                    let modifiers = state.modifiers;
                     drop(state);
-                    window
-                        .handle_input(PlatformInput::FileDrop(FileDropEvent::Pending { position }));
+                    if retrieved {
+                        let op = window.handle_drag_offer(
+                            FileDropEvent::Pending { position },
+                            gpui::DragOffer {
+                                allowed: if allowed == 0 { requested } else { allowed },
+                                modifiers,
+                                strings: Vec::new(),
+                            },
+                        );
+                        let state = self.0.borrow();
+                        xdnd_send_status(
+                            &state.xcb_connection,
+                            &state.atoms,
+                            event.window,
+                            atom,
+                            xdnd_action(op, &state.atoms),
+                        );
+                    }
                 } else if event.type_ == state.atoms.XdndDrop {
+                    if atom != state.xdnd_state.other_window {
+                        return Some(());
+                    }
+                    let session = std::mem::take(&mut state.xdnd_state);
+                    let modifiers = state.modifiers;
+                    drop(state);
+                    let op = window.handle_drag_offer(
+                        FileDropEvent::Submit {
+                            position: session.position,
+                        },
+                        gpui::DragOffer {
+                            allowed: if session.allowed == 0 {
+                                session.requested
+                            } else {
+                                session.allowed
+                            },
+                            modifiers,
+                            strings: Vec::new(),
+                        },
+                    );
+                    let state = self.0.borrow();
                     xdnd_send_finished(
                         &state.xcb_connection,
                         &state.atoms,
                         event.window,
-                        state.xdnd_state.other_window,
+                        session.other_window,
+                        xdnd_action(op, &state.atoms),
                     );
-                    let position = state.xdnd_state.position;
-                    drop(state);
-                    window
-                        .handle_input(PlatformInput::FileDrop(FileDropEvent::Submit { position }));
-                    self.0.borrow_mut().xdnd_state = Xdnd::default();
                 }
             }
             Event::SelectionNotify(event) => {
                 let window = self.get_window(event.requestor)?;
-                let state = self.0.borrow_mut();
-                let reply = get_reply(
-                    || "Failed to get XDND_DATA",
-                    state.xcb_connection.get_property(
-                        false,
-                        event.requestor,
-                        state.atoms.XDND_DATA,
-                        AtomEnum::ANY,
-                        0,
-                        1024,
-                    ),
-                )
-                .log_err();
-                let Some(reply) = reply else {
+                let mut state = self.0.borrow_mut();
+                if event.selection != state.atoms.XdndSelection
+                    || !state.xdnd_state.pending
+                    || event.target != state.xdnd_state.drag_type
+                {
                     return Some(());
-                };
-                if let Ok(file_list) = str::from_utf8(&reply.value) {
-                    let paths: SmallVec<[_; 2]> = file_list
-                        .lines()
-                        .filter_map(|path| Url::parse(path).log_err())
-                        .filter_map(|url| match url.to_file_path() {
-                            Ok(url) => Some(url),
-                            Err(()) => {
-                                log::error!("Failed turn {url:?} into a file path");
-                                None
+                }
+                state.xdnd_state.pending = false;
+                state.xdnd_state.retrieved = true;
+                let source = state.xdnd_state.other_window;
+                let reply = (event.property == state.atoms.XDND_DATA)
+                    .then(|| {
+                        state
+                            .xcb_connection
+                            .get_property(
+                                true,
+                                event.requestor,
+                                state.atoms.XDND_DATA,
+                                AtomEnum::ANY,
+                                0,
+                                2 << 20,
+                            )
+                            .ok()?
+                            .reply()
+                            .ok()
+                    })
+                    .flatten();
+                let mut paths = SmallVec::new();
+                let mut strings = Vec::new();
+                if let Some(text) = reply
+                    .as_ref()
+                    .filter(|r| r.bytes_after == 0)
+                    .and_then(|r| str::from_utf8(&r.value).ok())
+                {
+                    if state.xdnd_state.drag_type == state.atoms.TextUriList {
+                        let mut urls = Vec::new();
+                        for line in text
+                            .lines()
+                            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                        {
+                            let Ok(url) = Url::parse(line) else { continue };
+                            if let Ok(path) = url.to_file_path() {
+                                paths.push(path);
+                            } else {
+                                urls.push(line);
                             }
-                        })
-                        .collect();
-                    let input = PlatformInput::FileDrop(FileDropEvent::Entered {
-                        position: state.xdnd_state.position,
-                        paths: gpui::ExternalPaths(paths),
-                    });
-                    drop(state);
-                    window.handle_input(input);
-                    self.0.borrow_mut().xdnd_state.retrieved = true;
+                        }
+                        if !urls.is_empty() {
+                            strings.push(("text/uri-list".into(), urls.join("\r\n")));
+                        }
+                    } else {
+                        strings.push(("text/plain".into(), text.to_string()));
+                    }
+                }
+                let position = state.xdnd_state.position;
+                let allowed = if state.xdnd_state.allowed == 0 {
+                    state.xdnd_state.requested
+                } else {
+                    state.xdnd_state.allowed
+                };
+                let modifiers = state.modifiers;
+                drop(state);
+                let op = if paths.is_empty() && strings.is_empty() {
+                    gpui::DropOperation::None
+                } else {
+                    window.handle_drag_offer(
+                        FileDropEvent::Entered {
+                            position,
+                            paths: gpui::ExternalPaths(paths),
+                        },
+                        gpui::DragOffer {
+                            allowed,
+                            modifiers,
+                            strings,
+                        },
+                    )
+                };
+                let state = self.0.borrow();
+                if source == state.xdnd_state.other_window {
+                    xdnd_send_status(
+                        &state.xcb_connection,
+                        &state.atoms,
+                        event.requestor,
+                        source,
+                        xdnd_action(op, &state.atoms),
+                    );
                 }
             }
             Event::ConfigureNotify(event) => {
@@ -2394,17 +2519,39 @@ fn xdnd_get_supported_atom(
     0
 }
 
+fn xdnd_action_bits(atom: u32, atoms: &XcbAtoms) -> u8 {
+    if atom == atoms.XdndActionCopy {
+        1
+    } else if atom == atoms.XdndActionMove {
+        2
+    } else if atom == atoms.XdndActionLink {
+        4
+    } else {
+        0
+    }
+}
+
+fn xdnd_action(op: gpui::DropOperation, atoms: &XcbAtoms) -> u32 {
+    match op {
+        gpui::DropOperation::Copy => atoms.XdndActionCopy,
+        gpui::DropOperation::Move => atoms.XdndActionMove,
+        gpui::DropOperation::Link => atoms.XdndActionLink,
+        gpui::DropOperation::None => 0,
+    }
+}
+
 fn xdnd_send_finished(
     xcb_connection: &XCBConnection,
     atoms: &XcbAtoms,
     source: xproto::Window,
     target: xproto::Window,
+    action: u32,
 ) {
     let message = ClientMessageEvent {
         format: 32,
         window: target,
         type_: atoms.XdndFinished,
-        data: ClientMessageData::from([source, 1, atoms.XdndActionCopy, 0, 0]),
+        data: ClientMessageData::from([source, u32::from(action != 0), action, 0, 0]),
         sequence: 0,
         response_type: xproto::CLIENT_MESSAGE_EVENT,
     };
@@ -2427,7 +2574,7 @@ fn xdnd_send_status(
         format: 32,
         window: target,
         type_: atoms.XdndStatus,
-        data: ClientMessageData::from([source, 1, 0, 0, action]),
+        data: ClientMessageData::from([source, 2 | u32::from(action != 0), 0, 0, action]),
         sequence: 0,
         response_type: xproto::CLIENT_MESSAGE_EVENT,
     };

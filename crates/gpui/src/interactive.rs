@@ -893,6 +893,42 @@ impl Render for ExternalPaths {
     }
 }
 
+/// Operation accepted by the destination of a native drag.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum DropOperation {
+    /// Refuse the offer.
+    #[default]
+    None = 0,
+    /// Copy the data.
+    Copy = 1,
+    /// Move the data.
+    Move = 2,
+    /// Create a link to the data.
+    Link = 4,
+}
+
+/// Source operations, held modifiers and string data offered alongside files.
+#[derive(Clone, Debug)]
+pub struct DragOffer {
+    /// Bit mask of the source's permitted `DropOperation` values.
+    pub allowed: u8,
+    /// Modifier keys at this position.
+    pub modifiers: Modifiers,
+    /// MIME type and string value, supplied on entry.
+    pub strings: Vec<(String, String)>,
+}
+
+impl Default for DragOffer {
+    fn default() -> Self {
+        Self {
+            allowed: 7,
+            modifiers: Modifiers::default(),
+            strings: Vec::new(),
+        }
+    }
+}
+
 /// A file drop event from the platform, generated when files are dragged and dropped onto the window.
 #[derive(Debug, Clone)]
 pub enum FileDropEvent {
@@ -959,6 +995,8 @@ pub enum PlatformInput {
     BackGesture(BackGestureEvent),
     /// Files were dragged and dropped onto the window.
     FileDrop(FileDropEvent),
+    /// Native drag input with the source's offer and modifier state.
+    ExternalDrop(FileDropEvent, DragOffer),
     /// A raw touch event on a touch screen.
     Touch(TouchEvent),
     /// Stylus input, dispatched as the mouse event it carries.
@@ -981,7 +1019,7 @@ impl PlatformInput {
             PlatformInput::LongPress(event) => Some(event),
             PlatformInput::TouchDrag(event) => Some(event),
             PlatformInput::BackGesture(event) => Some(event),
-            PlatformInput::FileDrop(event) => Some(event),
+            PlatformInput::FileDrop(event) | PlatformInput::ExternalDrop(event, _) => Some(event),
             PlatformInput::Touch(_) => None,
             PlatformInput::Pen(event) => match &event.action {
                 PenAction::Down(e) => Some(e),
@@ -1007,7 +1045,7 @@ impl PlatformInput {
             PlatformInput::LongPress(_) => None,
             PlatformInput::TouchDrag(_) => None,
             PlatformInput::BackGesture(_) => None,
-            PlatformInput::FileDrop(_) => None,
+            PlatformInput::FileDrop(_) | PlatformInput::ExternalDrop(..) => None,
             PlatformInput::Touch(_) => None,
             PlatformInput::Pen(_) => None,
         }
@@ -1030,7 +1068,7 @@ impl PlatformInput {
             PlatformInput::LongPress(_) => "long_press",
             PlatformInput::TouchDrag(_) => "touch_drag",
             PlatformInput::BackGesture(_) => "back_gesture",
-            PlatformInput::FileDrop(_) => "file_drop",
+            PlatformInput::FileDrop(_) | PlatformInput::ExternalDrop(..) => "file_drop",
             PlatformInput::Touch(_) => "touch",
             PlatformInput::Pen(_) => "pen",
         }

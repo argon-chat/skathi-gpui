@@ -1209,7 +1209,7 @@ impl MacWindow {
             let () = msg_send![
                 native_window,
                 registerForDraggedTypes:
-                    &*NSArray::from_slice(&[NSFilenamesPboardType])
+                    &*NSArray::from_slice(&[NSFilenamesPboardType, &*NSString::from_str("public.utf8-plain-text"), &*NSString::from_str("public.url")])
             ];
             let () = msg_send![
                 native_window,
@@ -1871,23 +1871,7 @@ impl PlatformWindow for MacWindow {
     }
 
     fn modifiers(&self) -> Modifiers {
-        unsafe {
-            let modifiers: NSEventModifierFlags = msg_send![class!(NSEvent), modifierFlags];
-
-            let control = modifiers.contains(NSEventModifierFlags::Control);
-            let alt = modifiers.contains(NSEventModifierFlags::Option);
-            let shift = modifiers.contains(NSEventModifierFlags::Shift);
-            let command = modifiers.contains(NSEventModifierFlags::Command);
-            let function = modifiers.contains(NSEventModifierFlags::Function);
-
-            Modifiers {
-                control,
-                alt,
-                shift,
-                platform: command,
-                function,
-            }
-        }
+        pressed_modifiers()
     }
 
     fn capslock(&self) -> Capslock {
@@ -4585,58 +4569,133 @@ fn is_drag_from_this_window(this: &AnyObject, dragging_info: *mut AnyObject) -> 
     std::ptr::eq(source as *const AnyObject, this as *const AnyObject)
 }
 
-extern "C" fn dragging_entered(
-    this: &AnyObject,
-    _: Sel,
-    dragging_info: *mut AnyObject,
-) -> NSDragOperation {
-    let is_source_window = is_drag_from_this_window(this, dragging_info);
-    let window_state = unsafe { get_window_state(this) };
-    let position = drag_event_position(&window_state, dragging_info);
-    let paths = external_paths_from_event(dragging_info);
-    if let Some(event) = paths.map(|paths| FileDropEvent::Entered { position, paths })
-        && send_file_drop_event(window_state, event)
-    {
-        if is_source_window {
-            return NSDragOperation::Move;
+fn pressed_modifiers() -> Modifiers {
+    unsafe {
+        let modifiers: NSEventModifierFlags = msg_send![class!(NSEvent), modifierFlags];
+
+        let control = modifiers.contains(NSEventModifierFlags::Control);
+        let alt = modifiers.contains(NSEventModifierFlags::Option);
+        let shift = modifiers.contains(NSEventModifierFlags::Shift);
+        let command = modifiers.contains(NSEventModifierFlags::Command);
+        let function = modifiers.contains(NSEventModifierFlags::Function);
+
+        Modifiers {
+            control,
+            alt,
+            shift,
+            platform: command,
+            function,
         }
-        return NSDragOperation::Copy;
     }
-    NSDragOperation::None
 }
 
-extern "C" fn dragging_updated(
-    this: &AnyObject,
-    _: Sel,
-    dragging_info: *mut AnyObject,
-) -> NSDragOperation {
-    let is_source_window = is_drag_from_this_window(this, dragging_info);
-    let window_state = unsafe { get_window_state(this) };
-    let position = drag_event_position(&window_state, dragging_info);
-    if send_file_drop_event(window_state, FileDropEvent::Pending { position }) {
-        if is_source_window {
-            NSDragOperation::Move
-        } else {
-            NSDragOperation::Copy
-        }
-    } else {
-        NSDragOperation::None
+fn native_drag_operation(op: gpui::DropOperation) -> NSDragOperation {
+    match op {
+        gpui::DropOperation::Copy => NSDragOperation::Copy,
+        gpui::DropOperation::Move => NSDragOperation::Move,
+        gpui::DropOperation::Link => NSDragOperation::Link,
+        gpui::DropOperation::None => NSDragOperation::None,
     }
+}
+
+fn drag_offer(info: *mut AnyObject, read_strings: bool) -> gpui::DragOffer {
+    let mask: NSDragOperation = unsafe { msg_send![info, draggingSourceOperationMask] };
+    let mut allowed = 0;
+    for op in [
+        gpui::DropOperation::Copy,
+        gpui::DropOperation::Move,
+        gpui::DropOperation::Link,
+    ] {
+        if mask.contains(native_drag_operation(op)) {
+            allowed |= op as u8;
+        }
+    }
+    let mut offer = gpui::DragOffer {
+        allowed,
+        modifiers: pressed_modifiers(),
+        strings: Vec::new(),
+    };
+    if read_strings {
+        let board: *mut AnyObject = unsafe { msg_send![info, draggingPasteboard] };
+        if !board.is_null() {
+            for (name, mime) in [
+                ("public.utf8-plain-text", "text/plain"),
+                ("public.url", "text/uri-list"),
+            ] {
+                let value: *mut NSString =
+                    unsafe { msg_send![board, stringForType: &*NSString::from_str(name)] };
+                if let Some(s) = unsafe { value.as_ref() } {
+                    offer.strings.push((mime.into(), s.to_string()));
+                }
+            }
+        }
+    }
+    offer
+}
+
+extern "C" fn dragging_entered(this: &AnyObject, _: Sel, info: *mut AnyObject) -> NSDragOperation {
+    let state = unsafe { get_window_state(this) };
+    let position = drag_event_position(&state, info);
+    let offer = drag_offer(info, true);
+    let paths = external_paths_from_event(info).unwrap_or_else(|| ExternalPaths(SmallVec::new()));
+    if paths.0.is_empty() && offer.strings.is_empty() {
+        return NSDragOperation::None;
+    }
+    send_native_drop(
+        this,
+        state,
+        info,
+        FileDropEvent::Entered { position, paths },
+        offer,
+    )
+}
+
+extern "C" fn dragging_updated(this: &AnyObject, _: Sel, info: *mut AnyObject) -> NSDragOperation {
+    let state = unsafe { get_window_state(this) };
+    let position = drag_event_position(&state, info);
+    send_native_drop(
+        this,
+        state,
+        info,
+        FileDropEvent::Pending { position },
+        drag_offer(info, false),
+    )
 }
 
 extern "C" fn dragging_exited(this: &AnyObject, _: Sel, _: *mut AnyObject) {
-    let window_state = unsafe { get_window_state(this) };
-    send_file_drop_event(window_state, FileDropEvent::Exited);
+    send_file_drop_event(
+        unsafe { get_window_state(this) },
+        FileDropEvent::Exited,
+        Default::default(),
+    );
 }
 
-extern "C" fn perform_drag_operation(
+extern "C" fn perform_drag_operation(this: &AnyObject, _: Sel, info: *mut AnyObject) -> Bool {
+    let state = unsafe { get_window_state(this) };
+    let position = drag_event_position(&state, info);
+    (send_native_drop(
+        this,
+        state,
+        info,
+        FileDropEvent::Submit { position },
+        drag_offer(info, false),
+    ) != NSDragOperation::None)
+        .to_objc()
+}
+
+fn send_native_drop(
     this: &AnyObject,
-    _: Sel,
-    dragging_info: *mut AnyObject,
-) -> Bool {
-    let window_state = unsafe { get_window_state(this) };
-    let position = drag_event_position(&window_state, dragging_info);
-    send_file_drop_event(window_state, FileDropEvent::Submit { position }).to_objc()
+    state: Rc<Mutex<MacWindowState>>,
+    info: *mut AnyObject,
+    event: FileDropEvent,
+    offer: gpui::DragOffer,
+) -> NSDragOperation {
+    match send_file_drop_event(state, event, offer) {
+        Some(Some(op)) => native_drag_operation(op),
+        Some(None) if is_drag_from_this_window(this, info) => NSDragOperation::Move,
+        Some(None) => NSDragOperation::Copy,
+        None => NSDragOperation::None,
+    }
 }
 
 fn external_paths_from_event(dragging_info: *mut AnyObject) -> Option<ExternalPaths> {
@@ -4664,7 +4723,7 @@ fn external_paths_from_event(dragging_info: *mut AnyObject) -> Option<ExternalPa
 
 extern "C" fn conclude_drag_operation(this: &AnyObject, _: Sel, _: *mut AnyObject) {
     let window_state = unsafe { get_window_state(this) };
-    send_file_drop_event(window_state, FileDropEvent::Exited);
+    send_file_drop_event(window_state, FileDropEvent::Exited, Default::default());
 }
 
 extern "C" fn dragging_session_source_operation_mask(
@@ -4702,7 +4761,7 @@ extern "C" fn dragging_session_ended(
         lock.synthetic_drag_counter += 1;
         lock.last_left_mouse_down_event = None;
     }
-    send_file_drop_event(window_state, FileDropEvent::Ended);
+    send_file_drop_event(window_state, FileDropEvent::Ended, Default::default());
 }
 
 fn synthetic_drag_button_is_pressed(button: Option<MouseButton>, pressed: NSUInteger) -> bool {
@@ -4752,7 +4811,8 @@ async fn synthetic_drag(
 fn send_file_drop_event(
     window_state: Rc<Mutex<MacWindowState>>,
     file_drop_event: FileDropEvent,
-) -> bool {
+    offer: gpui::DragOffer,
+) -> Option<Option<gpui::DropOperation>> {
     let external_files_dragged = match file_drop_event {
         FileDropEvent::Entered { .. } => Some(true),
         FileDropEvent::Exited | FileDropEvent::Ended => Some(false),
@@ -4762,15 +4822,15 @@ fn send_file_drop_event(
     let mut lock = window_state.lock();
     if let Some(mut callback) = lock.event_callback.take() {
         drop(lock);
-        callback(PlatformInput::FileDrop(file_drop_event));
+        let result = callback(PlatformInput::ExternalDrop(file_drop_event, offer));
         let mut lock = window_state.lock();
         lock.event_callback = Some(callback);
         if let Some(external_files_dragged) = external_files_dragged {
             lock.external_files_dragged = external_files_dragged;
         }
-        true
+        Some(result.drop_operation)
     } else {
-        false
+        None
     }
 }
 

@@ -1787,6 +1787,9 @@ pub struct Window {
     vn_pick_every_box: bool,
     /// vue-native fork: see [`Window::set_vn_hit_refiner`].
     vn_hit_refiner: Option<VnHitRefiner>,
+    external_drop: Option<
+        fn(&FileDropEvent, &crate::DragOffer, &mut Window, &mut App) -> crate::DropOperation,
+    >,
     // Optional modal input interception, e.g. an external element inspector.
     input_interceptor: Option<Rc<dyn Fn(&PlatformInput, &mut Window, &mut App) -> bool>>,
     /// vue-native fork: see [`Window::vn_key_event_seq`].
@@ -3083,6 +3086,7 @@ impl Window {
             vn_tag_every_hitbox: false,
             vn_pick_every_box: false,
             vn_hit_refiner: None,
+            external_drop: None,
             input_interceptor: None,
             vn_key_event_seq: 0,
             vn_pointer_lock: None,
@@ -3175,6 +3179,8 @@ impl Window {
 pub struct DispatchEventResult {
     pub propagate: bool,
     pub default_prevented: bool,
+    /// An installed native drop destination's answer for the platform.
+    pub drop_operation: Option<crate::DropOperation>,
 }
 
 /// Indicates which region of the window is visible. Content falling outside of this mask will not be
@@ -9317,9 +9323,28 @@ impl Window {
         self.input_interceptor = interceptor;
     }
 
+    /// Install a synchronous native drag destination for this window.
+    pub fn set_external_drop_handler(
+        &mut self,
+        handler: fn(
+            &FileDropEvent,
+            &crate::DragOffer,
+            &mut Window,
+            &mut App,
+        ) -> crate::DropOperation,
+    ) {
+        self.external_drop = Some(handler);
+    }
+
     /// Dispatch a mouse, keyboard, or touch event on the window.
     #[profiling::function]
     pub fn dispatch_event(&mut self, event: PlatformInput, cx: &mut App) -> DispatchEventResult {
+        let (event, offer) = match event {
+            PlatformInput::ExternalDrop(event, offer) => {
+                (PlatformInput::FileDrop(event), Some(offer))
+            }
+            other => (other, None),
+        };
         let event = match event {
             PlatformInput::Pen(pen) => {
                 let (mouse, pen) = pen.into_mouse();
@@ -9341,15 +9366,42 @@ impl Window {
         // Rc permits the interceptor to remove itself while handling an event.
         if let Some(intercept) = self.input_interceptor.clone() {
             if intercept(&event, self, cx) {
-                return DispatchEventResult { propagate: false, default_prevented: true };
+                return DispatchEventResult {
+                    propagate: false,
+                    default_prevented: true,
+                    drop_operation: matches!(event, PlatformInput::FileDrop(_))
+                        .then_some(crate::DropOperation::None),
+                };
             }
+        }
+        if let (Some(handler), PlatformInput::FileDrop(drag)) = (self.external_drop, &event) {
+            self.pointer_inside = !matches!(drag, FileDropEvent::Exited | FileDropEvent::Ended);
+            match drag {
+                FileDropEvent::Entered { position, .. }
+                | FileDropEvent::Pending { position }
+                | FileDropEvent::Submit { position } => self.mouse_position = *position,
+                FileDropEvent::Exited | FileDropEvent::Ended => {}
+            }
+            let offer = offer.unwrap_or_else(|| crate::DragOffer {
+                modifiers: self.modifiers(),
+                ..Default::default()
+            });
+            let wanted = handler(drag, &offer, self, cx);
+            let op = if offer.allowed & wanted as u8 != 0 {
+                wanted
+            } else {
+                crate::DropOperation::None
+            };
+            return DispatchEventResult {
+                propagate: false,
+                default_prevented: op != crate::DropOperation::None,
+                drop_operation: Some(op),
+            };
         }
         #[cfg(feature = "profiler")]
         self.window_profiler.begin_input(event.kind_name());
         let update_count_before = self.invalidator.update_count();
-        // Track input modality for focus-visible styling and hover suppression.
-        // Hover is suppressed during keyboard modality so that keyboard navigation
-        // doesn't show hover highlights on the item under the mouse cursor.
+        // Focus-visible and hover suppression follow the last active input modality.
         let old_modality = self.last_input_modality;
         self.last_input_modality = match &event {
             PlatformInput::KeyDown(_) => InputModality::Keyboard,
@@ -9382,7 +9434,7 @@ impl Window {
                 false
             }
             PlatformInput::FileDrop(FileDropEvent::Exited) | PlatformInput::MouseExited(_) => true,
-            PlatformInput::FileDrop(_) => {
+            PlatformInput::FileDrop(_) | PlatformInput::ExternalDrop(..) => {
                 self.pointer_inside = true;
                 false
             }
@@ -9489,6 +9541,7 @@ impl Window {
                     PlatformInput::FileDrop(FileDropEvent::Ended)
                 }
             },
+            PlatformInput::ExternalDrop(..) => unreachable!("normalized above"),
             PlatformInput::Touch(touch) => PlatformInput::Touch(touch),
             PlatformInput::Pen(pen) => PlatformInput::Pen(pen),
             PlatformInput::LongPress(long_press) => {
@@ -9554,6 +9607,7 @@ impl Window {
         DispatchEventResult {
             propagate: cx.propagate_event,
             default_prevented: self.default_prevented,
+            drop_operation: None,
         }
     }
 
@@ -13101,6 +13155,47 @@ mod tests {
                 root
             }
         }
+    }
+
+    #[test]
+    fn desktop_drag_returns_only_an_operation_the_source_offered() {
+        use crate::{DragOffer, DropOperation, FileDropEvent, Modifiers, PlatformInput};
+        let mut cx = TestAppContext::single();
+        let window = cx.add_window(|_, _| RootView {
+            auto_sized: false,
+            child_bounds: Rc::new(Cell::new(Bounds::default())),
+        });
+        window
+            .update(&mut cx, |_, window, cx| {
+                window.set_external_drop_handler(|_, offer, _, _| {
+                    if offer.modifiers.control {
+                        DropOperation::Move
+                    } else {
+                        DropOperation::Copy
+                    }
+                });
+                for (control, expected) in
+                    [(false, DropOperation::Copy), (true, DropOperation::None)]
+                {
+                    let event = PlatformInput::ExternalDrop(
+                        FileDropEvent::Pending {
+                            position: Default::default(),
+                        },
+                        DragOffer {
+                            allowed: DropOperation::Copy as u8,
+                            modifiers: Modifiers {
+                                control,
+                                ..Default::default()
+                            },
+                            strings: Vec::new(),
+                        },
+                    );
+                    let result = window.dispatch_event(event, cx);
+                    assert_eq!(result.drop_operation, Some(expected));
+                    assert!(!result.propagate);
+                }
+            })
+            .unwrap();
     }
 
     #[test]

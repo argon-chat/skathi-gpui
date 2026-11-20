@@ -56,6 +56,7 @@ impl ReceiveData for ZwpPrimarySelectionOfferV1 {
 /// Wrapper for `WlDataOffer` and `ZwpPrimarySelectionOfferV1`, used to help track mime types.
 pub(crate) struct DataOffer<T: ReceiveData> {
     pub inner: T,
+    pub drag_actions: u8,
     mime_types: Vec<String>,
 }
 
@@ -63,6 +64,7 @@ impl<T: ReceiveData> DataOffer<T> {
     pub fn new(offer: T) -> Self {
         Self {
             inner: offer,
+            drag_actions: 1,
             mime_types: Vec::new(),
         }
     }
@@ -71,7 +73,7 @@ impl<T: ReceiveData> DataOffer<T> {
         self.mime_types.push(mime_type)
     }
 
-    fn has_mime_type(&self, mime_type: &str) -> bool {
+    pub fn has_mime_type(&self, mime_type: &str) -> bool {
         self.mime_types.iter().any(|t| t == mime_type)
     }
 

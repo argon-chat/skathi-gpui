@@ -1634,6 +1634,23 @@ impl WaylandWindowStatePtr {
         }
     }
 
+    pub fn handle_drag_offer(
+        &self,
+        event: gpui::FileDropEvent,
+        offer: gpui::DragOffer,
+    ) -> gpui::DropOperation {
+        if self.is_blocked() {
+            return gpui::DropOperation::None;
+        }
+        let callback = self.callbacks.borrow_mut().input.take();
+        let Some(mut fun) = callback else {
+            return gpui::DropOperation::None;
+        };
+        let result = fun(PlatformInput::ExternalDrop(event, offer));
+        self.callbacks.borrow_mut().input = Some(fun);
+        result.drop_operation.unwrap_or(gpui::DropOperation::Copy)
+    }
+
     pub fn handle_input(&self, input: PlatformInput) {
         if self.is_blocked() {
             return;

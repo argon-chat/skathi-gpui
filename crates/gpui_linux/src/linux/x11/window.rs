@@ -48,6 +48,9 @@ x11rb::atom_manager! {
         XdndFinished,
         XdndTypeList,
         XdndActionCopy,
+        XdndActionMove,
+        XdndActionLink,
+        XdndActionList,
         TextUriList: b"text/uri-list",
         UTF8_STRING,
         TEXT,
@@ -1267,6 +1270,23 @@ impl X11WindowStatePtr {
             fun(request_frame_options);
             self.callbacks.borrow_mut().request_frame = Some(fun);
         }
+    }
+
+    pub fn handle_drag_offer(
+        &self,
+        event: gpui::FileDropEvent,
+        offer: gpui::DragOffer,
+    ) -> gpui::DropOperation {
+        if self.is_blocked() {
+            return gpui::DropOperation::None;
+        }
+        let callback = self.callbacks.borrow_mut().input.take();
+        let Some(mut fun) = callback else {
+            return gpui::DropOperation::None;
+        };
+        let result = fun(PlatformInput::ExternalDrop(event, offer));
+        self.callbacks.borrow_mut().input = Some(fun);
+        result.drop_operation.unwrap_or(gpui::DropOperation::Copy)
     }
 
     pub fn handle_input(&self, input: PlatformInput) {

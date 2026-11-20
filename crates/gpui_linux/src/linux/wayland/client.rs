@@ -437,6 +437,9 @@ struct DragState<DataOffer = wl_data_offer::WlDataOffer, Window = WaylandWindowS
     window: Option<Window>,
     position: Point<Pixels>,
     uri_read_generation: u64,
+    serial: u32,
+    allowed: u8,
+    mime: String,
 }
 
 impl<DataOffer, Window> DragState<DataOffer, Window> {
@@ -461,7 +464,9 @@ trait FileDragDataOffer {
 
 impl FileDragDataOffer for wl_data_offer::WlDataOffer {
     fn finish(&self) {
-        wl_data_offer::WlDataOffer::finish(self);
+        if self.version() >= 3 {
+            wl_data_offer::WlDataOffer::finish(self);
+        }
     }
 
     fn destroy(&self) {
@@ -484,11 +489,13 @@ where
         Some((window, PlatformInput::FileDrop(FileDropEvent::Exited {})))
     }
 
-    fn handle_drop(&mut self) -> Option<(Window, PlatformInput)> {
+    fn handle_drop(&mut self, accepted: bool) -> Option<(Window, PlatformInput)> {
         self.invalidate_uri_read();
         let window = self.window.clone()?;
         let data_offer = self.data_offer.clone()?;
-        data_offer.finish();
+        if accepted {
+            data_offer.finish();
+        }
         data_offer.destroy();
         self.data_offer = None;
         self.window = None;
@@ -520,6 +527,18 @@ where
             window,
             PlatformInput::FileDrop(FileDropEvent::Entered { position, paths }),
         ))
+    }
+}
+
+fn answer_offer(offer: &WlDataOffer, serial: u32, mime: &str, operation: gpui::DropOperation) {
+    let action = match operation {
+        gpui::DropOperation::Copy => DndAction::Copy,
+        gpui::DropOperation::Move => DndAction::Move,
+        _ => DndAction::empty(),
+    };
+    offer.accept(serial, (!action.is_empty()).then(|| mime.to_owned()));
+    if offer.version() >= 3 {
+        offer.set_actions(action, action);
     }
 }
 
@@ -1109,6 +1128,9 @@ impl WaylandConnection {
                 window: None,
                 position: Point::default(),
                 uri_read_generation: 0,
+                serial: 0,
+                allowed: 1,
+                mime: String::new(),
             },
             external_drag: None,
             click: ClickState {
@@ -2935,24 +2957,38 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                     let Some(drag_window) = get_window(&mut state, &surface.id()) else {
                         return;
                     };
-                    let uri_read_generation = state.drag.begin_uri_read();
+                    let generation = state.drag.begin_uri_read();
+                    let Some(offer) = state
+                        .data_offers
+                        .iter()
+                        .find(|o| o.inner.id() == data_offer.id())
+                    else {
+                        return;
+                    };
+                    let Some(mime) = [FILE_LIST_MIME_TYPE]
+                        .into_iter()
+                        .chain(TEXT_MIME_TYPES)
+                        .find(|m| offer.has_mime_type(m))
+                    else {
+                        data_offer.accept(serial, None);
+                        return;
+                    };
+                    state.drag.allowed = offer.drag_actions;
+                    state.drag.serial = serial;
+                    state.drag.mime = mime.to_string();
+                    state.drag.position = Point::new(x.into(), y.into());
+                    answer_offer(&data_offer, serial, mime, gpui::DropOperation::None);
 
-                    const ACTIONS: DndAction = DndAction::Copy;
-                    data_offer.set_actions(ACTIONS, ACTIONS);
-
-                    let pipe = Pipe::new().unwrap();
-                    data_offer.receive(FILE_LIST_MIME_TYPE.to_string(), unsafe {
+                    let Ok(pipe) = Pipe::new() else { return };
+                    data_offer.receive(mime.to_string(), unsafe {
                         BorrowedFd::borrow_raw(pipe.write.as_raw_fd())
                     });
                     let fd = pipe.read;
                     drop(pipe.write);
-
-                    let read_task = state.common.borrow().background_executor.spawn(async {
-                        let buffer = read_fd_with_timeout(fd, PIPE_READ_TIMEOUT)?;
-                        let text = String::from_utf8(buffer)?;
-                        anyhow::Ok(text)
+                    let task = state.common.borrow().background_executor.spawn(async {
+                        let bytes = read_fd_with_timeout(fd, PIPE_READ_TIMEOUT)?;
+                        anyhow::Ok(String::from_utf8(bytes)?)
                     });
-
                     let this = this.clone();
                     state
                         .common
@@ -2960,77 +2996,117 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                         .foreground_executor
                         .clone()
                         .spawn(async move {
-                            let file_list = match read_task.await {
-                                Ok(list) => list,
-                                Err(err) => {
-                                    log::error!("error reading drag and drop pipe: {err:?}");
-                                    return;
-                                }
-                            };
-
-                            let paths: SmallVec<[_; 2]> = file_list
-                                .lines()
-                                .filter_map(|path| Url::parse(path).log_err())
-                                .filter_map(|url| match url.to_file_path() {
-                                    Ok(url) => Some(url),
-                                    Err(()) => {
-                                        log::error!("Failed turn {url:?} into a file path");
-                                        None
-                                    }
-                                })
-                                .collect();
-                            let position = Point::new(x.into(), y.into());
-
-                            // Prevent dropping text from other programs.
-                            if paths.is_empty() {
-                                data_offer.destroy();
-                                return;
-                            }
                             let Some(client) = this.0.upgrade() else {
                                 data_offer.destroy();
                                 return;
                             };
+                            let Ok(text) = task.await else {
+                                data_offer.destroy();
+                                return;
+                            };
+                            let mut paths = SmallVec::new();
+                            let mut strings = Vec::new();
+                            if mime == FILE_LIST_MIME_TYPE {
+                                let mut urls = Vec::new();
+                                for line in text
+                                    .lines()
+                                    .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                                {
+                                    let Ok(url) = Url::parse(line) else { continue };
+                                    if let Ok(path) = url.to_file_path() {
+                                        paths.push(path);
+                                    } else {
+                                        urls.push(line);
+                                    }
+                                }
+                                if !urls.is_empty() {
+                                    strings.push(("text/uri-list".into(), urls.join("\r\n")));
+                                }
+                            } else {
+                                strings.push(("text/plain".into(), text));
+                            }
+                            if paths.is_empty() && strings.is_empty() {
+                                data_offer.destroy();
+                                return;
+                            }
                             let mut state = client.borrow_mut();
+                            let position = state.drag.position;
+                            let allowed = state
+                                .data_offers
+                                .iter()
+                                .find(|o| o.inner.id() == data_offer.id())
+                                .map_or(state.drag.allowed, |o| o.drag_actions);
+                            let offer = gpui::DragOffer {
+                                allowed,
+                                modifiers: state.modifiers,
+                                strings,
+                            };
                             let input = state.drag.complete_uri_read(
-                                uri_read_generation,
-                                data_offer,
+                                generation,
+                                data_offer.clone(),
                                 drag_window,
                                 position,
                                 gpui::ExternalPaths(paths),
                             );
-
+                            if input.is_some() {
+                                state.drag.allowed = allowed;
+                            }
                             drop(state);
-                            if let Some((drag_window, input)) = input {
-                                drag_window.handle_input(input);
+                            if let Some((window, PlatformInput::FileDrop(event))) = input {
+                                let action = window.handle_drag_offer(event, offer);
+                                answer_offer(&data_offer, serial, mime, action);
                             }
                         })
                         .detach();
                 }
             }
             wl_data_device::Event::Motion { x, y, .. } => {
-                let Some(drag_window) = state.drag.window.clone() else {
-                    return;
-                };
                 let position = Point::new(x.into(), y.into());
                 state.drag.position = position;
-
-                let input = PlatformInput::FileDrop(FileDropEvent::Pending { position });
+                let Some(window) = state.drag.window.clone() else {
+                    return;
+                };
+                let Some(data_offer) = state.drag.data_offer.clone() else {
+                    return;
+                };
+                let (serial, mime) = (state.drag.serial, state.drag.mime.clone());
+                let offer = gpui::DragOffer {
+                    allowed: state.drag.allowed,
+                    modifiers: state.modifiers,
+                    strings: vec![],
+                };
                 drop(state);
-                drag_window.handle_input(input);
+                let action = window.handle_drag_offer(FileDropEvent::Pending { position }, offer);
+                answer_offer(&data_offer, serial, &mime, action);
             }
             wl_data_device::Event::Leave => {
+                let offer = gpui::DragOffer {
+                    allowed: state.drag.allowed,
+                    modifiers: state.modifiers,
+                    strings: vec![],
+                };
                 let input = state.drag.handle_leave();
                 drop(state);
-                if let Some((drag_window, input)) = input {
-                    drag_window.handle_input(input);
+                if let Some((window, PlatformInput::FileDrop(event))) = input {
+                    window.handle_drag_offer(event, offer);
                 }
             }
             wl_data_device::Event::Drop => {
-                let input = state.drag.handle_drop();
+                let offer = gpui::DragOffer {
+                    allowed: state.drag.allowed,
+                    modifiers: state.modifiers,
+                    strings: vec![],
+                };
+                let target = state.drag.window.clone();
+                let position = state.drag.position;
                 drop(state);
-                if let Some((drag_window, input)) = input {
-                    drag_window.handle_input(input);
-                }
+                let action = target.map(|window| {
+                    window.handle_drag_offer(FileDropEvent::Submit { position }, offer)
+                });
+                client
+                    .borrow_mut()
+                    .drag
+                    .handle_drop(action.is_some_and(|a| a != gpui::DropOperation::None));
             }
             _ => {}
         }
@@ -3053,22 +3129,36 @@ impl Dispatch<wl_data_offer::WlDataOffer, ()> for WaylandClientStatePtr {
         let client = this.get_client();
         let mut state = client.borrow_mut();
 
-        if let wl_data_offer::Event::Offer { mime_type } = event {
-            // Drag and drop
-            if mime_type == FILE_LIST_MIME_TYPE {
-                let serial = state.serial_tracker.get(SerialKind::DataDevice);
-                let mime_type = mime_type.clone();
-                data_offer.accept(serial.as_raw(), Some(mime_type));
+        let Some(offer) = state
+            .data_offers
+            .iter_mut()
+            .find(|w| w.inner.id() == data_offer.id())
+        else {
+            return;
+        };
+        match event {
+            wl_data_offer::Event::Offer { mime_type } => offer.add_mime_type(mime_type),
+            wl_data_offer::Event::SourceActions {
+                source_actions: WEnum::Value(actions),
+            } => {
+                let mut allowed = 0;
+                if actions.contains(DndAction::Copy) {
+                    allowed |= gpui::DropOperation::Copy as u8;
+                }
+                if actions.contains(DndAction::Move) {
+                    allowed |= gpui::DropOperation::Move as u8;
+                }
+                offer.drag_actions = allowed;
+                if state
+                    .drag
+                    .data_offer
+                    .as_ref()
+                    .is_some_and(|o| o.id() == data_offer.id())
+                {
+                    state.drag.allowed = allowed;
+                }
             }
-
-            // Clipboard
-            if let Some(offer) = state
-                .data_offers
-                .iter_mut()
-                .find(|wrapper| wrapper.inner.id() == data_offer.id())
-            {
-                offer.add_mime_type(mime_type);
-            }
+            _ => {}
         }
     }
 }
@@ -3274,6 +3364,9 @@ mod tests {
             window: None,
             position: Point::default(),
             uri_read_generation: 0,
+            serial: 0,
+            allowed: 1,
+            mime: String::new(),
         }
     }
 
@@ -3327,7 +3420,7 @@ mod tests {
         let generation = drag.begin_uri_read();
         let mut entered_windows = Vec::new();
 
-        record_entered(drag.handle_drop(), &mut entered_windows);
+        record_entered(drag.handle_drop(false), &mut entered_windows);
         assert_ne!(drag.uri_read_generation, generation);
         record_entered(drag.handle_leave(), &mut entered_windows);
         record_entered(

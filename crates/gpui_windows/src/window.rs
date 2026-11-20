@@ -5,7 +5,6 @@ use std::{
     num::NonZeroIsize,
     path::PathBuf,
     rc::{Rc, Weak},
-    str::FromStr,
     sync::{Arc, Once, atomic::AtomicBool},
     time::{Duration, Instant},
 };
@@ -1469,11 +1468,74 @@ impl accesskit::ActionHandler for A11yActionHandler {
 struct WindowsDragDropHandler(pub Rc<WindowsWindowInner>);
 
 impl WindowsDragDropHandler {
-    fn handle_drag_drop(&self, input: PlatformInput) {
-        if let Some(mut func) = self.0.state.callbacks.input.take() {
-            func(input);
-            self.0.state.callbacks.input.set(Some(func));
+    fn dispatch(&self, event: FileDropEvent, offer: DragOffer) -> DropOperation {
+        let Some(mut input) = self.0.state.callbacks.input.take() else {
+            return DropOperation::None;
+        };
+        let allowed = offer.allowed;
+        let result = input(PlatformInput::ExternalDrop(event, offer));
+        self.0.state.callbacks.input.set(Some(input));
+        result.drop_operation.unwrap_or(if allowed & 1 != 0 {
+            DropOperation::Copy
+        } else {
+            DropOperation::None
+        })
+    }
+
+    fn point(&self, screen: POINT) -> Point<Pixels> {
+        let mut client = screen;
+        unsafe {
+            ScreenToClient(self.0.hwnd, &mut client).ok().log_err();
         }
+        logical_point(
+            client.x as f32,
+            client.y as f32,
+            self.0.state.scale_factor.get(),
+        )
+    }
+}
+
+fn drop_offer(keys: MODIFIERKEYS_FLAGS, effects: DROPEFFECT) -> DragOffer {
+    let mut modifiers = current_modifiers();
+    modifiers.control = keys.contains(MK_CONTROL);
+    modifiers.shift = keys.contains(MK_SHIFT);
+    DragOffer {
+        allowed: (effects.0 & 7) as u8,
+        modifiers,
+        strings: Vec::new(),
+    }
+}
+
+fn drop_data<R>(object: &IDataObject, format: u16, read: impl FnOnce(HGLOBAL) -> R) -> Option<R> {
+    let format = FORMATETC {
+        cfFormat: format,
+        dwAspect: DVASPECT_CONTENT.0,
+        lindex: -1,
+        tymed: TYMED_HGLOBAL.0 as u32,
+        ..Default::default()
+    };
+    unsafe {
+        let mut medium = object.GetData(&format).ok()?;
+        let global = medium.u.hGlobal;
+        let result = (!global.is_invalid()).then(|| read(global));
+        ReleaseStgMedium(&mut medium);
+        result
+    }
+}
+
+fn drag_wide_string(global: HGLOBAL) -> Option<String> {
+    use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+    unsafe {
+        let n = GlobalSize(global) / 2;
+        let p = GlobalLock(global) as *const u16;
+        if p.is_null() {
+            return None;
+        }
+        let slice = std::slice::from_raw_parts(p, n);
+        let value =
+            String::from_utf16_lossy(&slice[..slice.iter().position(|&c| c == 0).unwrap_or(n)]);
+        let _ = GlobalUnlock(global);
+        Some(value)
     }
 }
 
@@ -1481,57 +1543,48 @@ impl WindowsDragDropHandler {
 impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
     fn DragEnter(
         &self,
-        pdataobj: windows::core::Ref<IDataObject>,
-        _grfkeystate: MODIFIERKEYS_FLAGS,
+        data: windows::core::Ref<IDataObject>,
+        keys: MODIFIERKEYS_FLAGS,
         pt: &POINTL,
-        pdweffect: *mut DROPEFFECT,
+        effect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
+        let object = data.ok()?;
+        let screen = POINT { x: pt.x, y: pt.y };
+        let position = self.point(screen);
         unsafe {
-            let idata_obj = pdataobj.ok()?;
-            let config = FORMATETC {
-                cfFormat: CF_HDROP.0,
-                ptd: std::ptr::null_mut() as _,
-                dwAspect: DVASPECT_CONTENT.0,
-                lindex: -1,
-                tymed: TYMED_HGLOBAL.0 as _,
-            };
-            let cursor_position = POINT { x: pt.x, y: pt.y };
-            if idata_obj.QueryGetData(&config as _) == S_OK {
-                *pdweffect = DROPEFFECT_COPY;
-                let Some(mut idata) = idata_obj.GetData(&config as _).log_err() else {
-                    return Ok(());
-                };
-                if idata.u.hGlobal.is_invalid() {
-                    return Ok(());
+            let mut offer = drop_offer(keys, *effect);
+            let paths = drop_data(object, CF_HDROP.0, |global| {
+                let mut paths = SmallVec::new();
+                with_file_names(HDROP(global.0), |name| paths.push(PathBuf::from(name)));
+                paths
+            })
+            .unwrap_or_default();
+            let url_format = windows::Win32::System::DataExchange::RegisterClipboardFormatW(
+                windows::core::w!("UniformResourceLocatorW"),
+            ) as u16;
+            for (format, mime) in [
+                (CF_UNICODETEXT.0, "text/plain"),
+                (url_format, "text/uri-list"),
+            ] {
+                if let Some(text) = drop_data(object, format, drag_wide_string).flatten() {
+                    offer.strings.push((mime.into(), text));
                 }
-                let hdrop = HDROP(idata.u.hGlobal.0);
-                let mut paths = SmallVec::<[PathBuf; 2]>::new();
-                with_file_names(hdrop, |file_name| {
-                    if let Some(path) = PathBuf::from_str(&file_name).log_err() {
-                        paths.push(path);
-                    }
-                });
-                ReleaseStgMedium(&mut idata);
-                let mut cursor_position = cursor_position;
-                ScreenToClient(self.0.hwnd, &mut cursor_position)
-                    .ok()
-                    .log_err();
-                let scale_factor = self.0.state.scale_factor.get();
-                let input = PlatformInput::FileDrop(FileDropEvent::Entered {
-                    position: logical_point(
-                        cursor_position.x as f32,
-                        cursor_position.y as f32,
-                        scale_factor,
-                    ),
-                    paths: ExternalPaths(paths),
-                });
-                self.handle_drag_drop(input);
-            } else {
-                *pdweffect = DROPEFFECT_NONE;
             }
+            let op = if paths.is_empty() && offer.strings.is_empty() {
+                DropOperation::None
+            } else {
+                self.dispatch(
+                    FileDropEvent::Entered {
+                        position,
+                        paths: ExternalPaths(paths),
+                    },
+                    offer,
+                )
+            };
+            *effect = DROPEFFECT(op as u32);
             self.0
                 .drop_target_helper
-                .DragEnter(self.0.hwnd, idata_obj, &cursor_position, *pdweffect)
+                .DragEnter(self.0.hwnd, object, &screen, *effect)
                 .log_err();
         }
         Ok(())
@@ -1539,31 +1592,24 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
 
     fn DragOver(
         &self,
-        _grfkeystate: MODIFIERKEYS_FLAGS,
+        keys: MODIFIERKEYS_FLAGS,
         pt: &POINTL,
-        pdweffect: *mut DROPEFFECT,
+        effect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
-        let mut cursor_position = POINT { x: pt.x, y: pt.y };
+        let screen = POINT { x: pt.x, y: pt.y };
         unsafe {
-            *pdweffect = DROPEFFECT_COPY;
+            let op = self.dispatch(
+                FileDropEvent::Pending {
+                    position: self.point(screen),
+                },
+                drop_offer(keys, *effect),
+            );
+            *effect = DROPEFFECT(op as u32);
             self.0
                 .drop_target_helper
-                .DragOver(&cursor_position, *pdweffect)
-                .log_err();
-            ScreenToClient(self.0.hwnd, &mut cursor_position)
-                .ok()
+                .DragOver(&screen, *effect)
                 .log_err();
         }
-        let scale_factor = self.0.state.scale_factor.get();
-        let input = PlatformInput::FileDrop(FileDropEvent::Pending {
-            position: logical_point(
-                cursor_position.x as f32,
-                cursor_position.y as f32,
-                scale_factor,
-            ),
-        });
-        self.handle_drag_drop(input);
-
         Ok(())
     }
 
@@ -1571,41 +1617,32 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
         unsafe {
             self.0.drop_target_helper.DragLeave().log_err();
         }
-        let input = PlatformInput::FileDrop(FileDropEvent::Exited);
-        self.handle_drag_drop(input);
-
+        self.dispatch(FileDropEvent::Exited, DragOffer::default());
         Ok(())
     }
 
     fn Drop(
         &self,
-        pdataobj: windows::core::Ref<IDataObject>,
-        _grfkeystate: MODIFIERKEYS_FLAGS,
+        data: windows::core::Ref<IDataObject>,
+        keys: MODIFIERKEYS_FLAGS,
         pt: &POINTL,
-        pdweffect: *mut DROPEFFECT,
+        effect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
-        let idata_obj = pdataobj.ok()?;
-        let mut cursor_position = POINT { x: pt.x, y: pt.y };
+        let object = data.ok()?;
+        let screen = POINT { x: pt.x, y: pt.y };
         unsafe {
-            *pdweffect = DROPEFFECT_COPY;
+            let op = self.dispatch(
+                FileDropEvent::Submit {
+                    position: self.point(screen),
+                },
+                drop_offer(keys, *effect),
+            );
+            *effect = DROPEFFECT(op as u32);
             self.0
                 .drop_target_helper
-                .Drop(idata_obj, &cursor_position, *pdweffect)
-                .log_err();
-            ScreenToClient(self.0.hwnd, &mut cursor_position)
-                .ok()
+                .Drop(object, &screen, *effect)
                 .log_err();
         }
-        let scale_factor = self.0.state.scale_factor.get();
-        let input = PlatformInput::FileDrop(FileDropEvent::Submit {
-            position: logical_point(
-                cursor_position.x as f32,
-                cursor_position.y as f32,
-                scale_factor,
-            ),
-        });
-        self.handle_drag_drop(input);
-
         Ok(())
     }
 }
