@@ -105,6 +105,7 @@ impl WindowsWindowInner {
             WM_MOVE => self.handle_move_msg(handle, lparam),
             WM_SIZE => self.handle_size_msg(wparam, lparam),
             WM_GETMINMAXINFO => self.handle_get_min_max_info_msg(lparam),
+            WM_SIZING => self.handle_sizing(handle, wparam.0 as u32, lparam),
             WM_ENTERSIZEMOVE | WM_ENTERMENULOOP => self.handle_size_move_loop(handle),
             WM_EXITSIZEMOVE | WM_EXITMENULOOP => self.handle_size_move_loop_exit(handle),
             WM_TIMER => self.handle_timer_msg(handle, wparam),
@@ -225,18 +226,67 @@ impl WindowsWindowInner {
     }
 
     fn handle_get_min_max_info_msg(&self, lparam: LPARAM) -> Option<isize> {
-        let min_size = self.state.min_size?;
-        let scale_factor = self.state.scale_factor.get();
-        let boarder_offset = &self.state.border_offset;
-
-        unsafe {
-            let minmax_info = &mut *(lparam.0 as *mut MINMAXINFO);
-            minmax_info.ptMinTrackSize.x = min_size.width.scale(scale_factor).as_f32() as i32
-                + boarder_offset.width_offset.get();
-            minmax_info.ptMinTrackSize.y = min_size.height.scale(scale_factor).as_f32() as i32
-                + boarder_offset.height_offset.get();
+        let constraints = self.state.size_constraints.get();
+        if constraints.min.is_none() && constraints.max.is_none() {
+            return None;
+        }
+        let scale = self.state.scale_factor.get();
+        let border = &self.state.border_offset;
+        let info = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
+        if let Some(min) = constraints.min {
+            info.ptMinTrackSize.x =
+                ((min.width.as_f32() * scale).ceil() as i32).saturating_add(border.width_offset.get());
+            info.ptMinTrackSize.y =
+                ((min.height.as_f32() * scale).ceil() as i32).saturating_add(border.height_offset.get());
+        }
+        if let Some(max) = constraints.max {
+            info.ptMaxTrackSize.x = ((max.width.as_f32() * scale).floor() as i32)
+                .saturating_add(border.width_offset.get())
+                .max(info.ptMinTrackSize.x);
+            info.ptMaxTrackSize.y = ((max.height.as_f32() * scale).floor() as i32)
+                .saturating_add(border.height_offset.get())
+                .max(info.ptMinTrackSize.y);
         }
         Some(0)
+    }
+
+    fn handle_sizing(&self, hwnd: HWND, edge: u32, lparam: LPARAM) -> Option<isize> {
+        let constraints = self.state.size_constraints.get();
+        constraints.aspect?;
+        let scale = self.state.scale_factor.get();
+        let mut frame = RECT::default();
+        let mut client = RECT::default();
+        unsafe {
+            GetWindowRect(hwnd, &mut frame).ok()?;
+            GetClientRect(hwnd, &mut client).ok()?;
+        }
+        let frame_w = frame.right - frame.left - client.right;
+        let frame_h = frame.bottom - frame.top - client.bottom;
+        let rect = unsafe { &mut *(lparam.0 as *mut RECT) };
+        let w = (rect.right - rect.left - frame_w) as f32;
+        let h = (rect.bottom - rect.top - frame_h) as f32;
+        let horizontal = match edge {
+            WMSZ_LEFT | WMSZ_RIGHT => true,
+            WMSZ_TOP | WMSZ_BOTTOM => false,
+            _ => {
+                (w - client.right as f32).abs() * client.bottom as f32
+                    >= (h - client.bottom as f32).abs() * client.right as f32
+            }
+        };
+        let sz = constraints.fit(size(px(w / scale), px(h / scale)), horizontal);
+        let w = ((sz.width.as_f32() * scale).round() as i32).saturating_add(frame_w);
+        let h = ((sz.height.as_f32() * scale).round() as i32).saturating_add(frame_h);
+        if matches!(edge, WMSZ_LEFT | WMSZ_TOPLEFT | WMSZ_BOTTOMLEFT) {
+            rect.left = rect.right.saturating_sub(w);
+        } else {
+            rect.right = rect.left.saturating_add(w);
+        }
+        if matches!(edge, WMSZ_TOP | WMSZ_TOPLEFT | WMSZ_TOPRIGHT) {
+            rect.top = rect.bottom.saturating_sub(h);
+        } else {
+            rect.bottom = rect.top.saturating_add(h);
+        }
+        Some(1)
     }
 
     fn handle_size_msg(self: &Rc<Self>, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {

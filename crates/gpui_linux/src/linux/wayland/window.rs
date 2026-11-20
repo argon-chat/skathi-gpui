@@ -101,6 +101,8 @@ struct InProgressConfigure {
 }
 
 pub struct WaylandWindowState {
+    resizable: bool,
+    size_constraints: gpui::WindowSizeConstraints,
     surface_state: WaylandSurfaceState,
     parent: Option<WaylandWindowStatePtr>,
     /// Child surfaces mapped to whether they block this window's input (dialogs
@@ -629,6 +631,8 @@ impl WaylandWindowState {
             display: None,
             renderer: Some(renderer),
             bounds: options.bounds,
+            resizable: options.is_resizable,
+            size_constraints: Default::default(),
             scale: 1.0,
             input_handler: None,
             decorations: WindowDecorations::Client,
@@ -1298,6 +1302,21 @@ impl WaylandWindowStatePtr {
                 }
 
                 let mut state = self.state.borrow_mut();
+                let size = size.map(|s| {
+                    if resizing
+                        && !fullscreen
+                        && !maximized
+                        && state.size_constraints.aspect.is_some()
+                    {
+                        let mut limits = state.size_constraints;
+                        // xdg-shell allows a smaller aspect-fitted size inside the configure rectangle.
+                        limits.max = Some(s);
+                        limits.min = None;
+                        limits.fit(s, true)
+                    } else {
+                        s
+                    }
+                });
                 state.in_progress_configure = Some(InProgressConfigure {
                     size,
                     fullscreen,
@@ -2002,6 +2021,36 @@ impl PlatformWindow for WaylandWindow {
 
     fn is_fullscreen(&self) -> bool {
         self.borrow().fullscreen
+    }
+
+    fn vn_set_size_constraints(&self, limits: gpui::WindowSizeConstraints) {
+        let mut state = self.0.state.borrow_mut();
+        if !state.resizable {
+            return;
+        }
+        state.size_constraints = limits;
+        let WaylandSurfaceState::Xdg(xdg) = &state.surface_state else {
+            return;
+        };
+        let cap = state
+            .renderer
+            .as_ref()
+            .map_or(i32::MAX, |r| r.max_texture_size() as i32);
+        let min = limits.min.unwrap_or_default();
+        let mw = (min.width.as_f32().ceil() as i32).clamp(0, cap);
+        let mh = (min.height.as_f32().ceil() as i32).clamp(0, cap);
+        let max = limits
+            .max
+            .map(|s| {
+                (
+                    (s.width.as_f32().floor() as i32).clamp(mw, cap),
+                    (s.height.as_f32().floor() as i32).clamp(mh, cap),
+                )
+            })
+            .unwrap_or((cap, cap));
+        xdg.toplevel.set_min_size(mw, mh);
+        xdg.toplevel.set_max_size(max.0, max.1);
+        state.surface.commit();
     }
 
     fn vn_set_maximized(&self, maximized: bool) {

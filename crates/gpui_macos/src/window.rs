@@ -721,6 +721,8 @@ struct MacWindowState {
     app_owns_titlebar_drag: bool,
     fullscreen_restore_bounds: Bounds<Pixels>,
     is_exiting_fullscreen: bool,
+    fullscreen_changed: Option<Rc<dyn Fn(gpui::WindowFullscreenTransition)>>,
+    spaces_before_override: Option<NSWindowCollectionBehavior>,
     simple_fullscreen_state: Option<SimpleFullscreenState>,
     move_tab_to_new_window_callback: Option<Box<dyn FnMut()>>,
     merge_all_windows_callback: Option<Box<dyn FnMut()>>,
@@ -1277,6 +1279,8 @@ impl MacWindow {
                 app_owns_titlebar_drag,
                 fullscreen_restore_bounds: Bounds::default(),
                 is_exiting_fullscreen: false,
+                fullscreen_changed: None,
+                spaces_before_override: None,
                 simple_fullscreen_state: None,
                 move_tab_to_new_window_callback: None,
                 merge_all_windows_callback: None,
@@ -2343,6 +2347,88 @@ impl PlatformWindow for MacWindow {
             })
             .detach();
         true
+    }
+
+    fn vn_traffic_light_position(&self) -> Option<Point<Pixels>> {
+        let state = self.0.lock();
+        if state.is_fullscreen() {
+            return None;
+        }
+        let button = state
+            .native_window()
+            .standardWindowButton(NSWindowButton::CloseButton)?;
+        let origin = button.frame().origin;
+        Some(gpui::point(
+            gpui::px(origin.x as f32),
+            gpui::px(origin.y as f32),
+        ))
+    }
+
+    fn vn_restore_traffic_light_position(&self) {
+        let mut state = self.0.lock();
+        state.restore_traffic_light();
+        state.traffic_light_position = None;
+    }
+
+    fn vn_set_size_constraints(&self, limits: gpui::WindowSizeConstraints) {
+        let window = self.0.lock().native_window;
+        let min = limits.min.unwrap_or_default();
+        let max = limits
+            .max
+            .map(|s| {
+                NSSize::new(
+                    s.width.max(min.width).to_f64(),
+                    s.height.max(min.height).to_f64(),
+                )
+            })
+            .unwrap_or_else(|| NSSize::new(f32::MAX as f64, f32::MAX as f64));
+        unsafe {
+            let _: () = msg_send![window, setContentMinSize: NSSize::new(min.width.to_f64(), min.height.to_f64())];
+            let _: () = msg_send![window, setContentMaxSize: max];
+            if let Some(r) = limits.aspect {
+                let _: () = msg_send![window, setContentAspectRatio: NSSize::new(r as f64, 1.)];
+            } else {
+                // AppKit's content resize increments and aspect ratio are mutually exclusive.
+                let _: () = msg_send![window, setContentResizeIncrements: NSSize::new(1., 1.)];
+            }
+        }
+    }
+
+    fn vn_set_opacity(&self, opacity: f32) -> bool {
+        let window = self.0.lock().native_window;
+        unsafe {
+            let _: () = msg_send![window, setAlphaValue: opacity as f64];
+        }
+        true
+    }
+
+    fn vn_set_all_workspaces(&self, on: bool) -> bool {
+        let mut state = self.0.lock();
+        let window = state.native_window;
+        let current: NSWindowCollectionBehavior = unsafe { msg_send![window, collectionBehavior] };
+        let required = NSWindowCollectionBehavior::CanJoinAllSpaces
+            | NSWindowCollectionBehavior::FullScreenAuxiliary;
+        let mask = required
+            | NSWindowCollectionBehavior::MoveToActiveSpace
+            | NSWindowCollectionBehavior::FullScreenPrimary
+            | NSWindowCollectionBehavior::FullScreenNone;
+        let next = if on {
+            state.spaces_before_override.get_or_insert(current & mask);
+            (current & !mask) | required
+        } else if let Some(previous) = state.spaces_before_override.take() {
+            (current & !mask) | previous
+        } else {
+            return true;
+        };
+        drop(state);
+        unsafe {
+            let _: () = msg_send![window, setCollectionBehavior: next];
+        }
+        true
+    }
+
+    fn vn_on_fullscreen_transition(&self, callback: Box<dyn Fn(gpui::WindowFullscreenTransition)>) {
+        self.0.lock().fullscreen_changed = Some(Rc::from(callback));
     }
 
     fn vn_set_always_on_top(&self, on: bool) -> bool {
@@ -3583,7 +3669,18 @@ extern "C" fn window_did_resize(this: &AnyObject, _: Sel, _: *mut AnyObject) {
     window_state.as_ref().lock().move_traffic_light();
 }
 
+fn report_fullscreen_transition(this: &AnyObject, event: gpui::WindowFullscreenTransition) {
+    let callback = unsafe { get_window_state(this) }
+        .lock()
+        .fullscreen_changed
+        .clone();
+    if let Some(callback) = callback {
+        callback(event);
+    }
+}
+
 extern "C" fn window_will_enter_fullscreen(this: &AnyObject, _: Sel, _: *mut AnyObject) {
+    report_fullscreen_transition(this, gpui::WindowFullscreenTransition::Will(true));
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.as_ref().lock();
     lock.fullscreen_restore_bounds = lock.bounds();
@@ -3603,6 +3700,7 @@ extern "C" fn window_will_enter_fullscreen(this: &AnyObject, _: Sel, _: *mut Any
 }
 
 extern "C" fn window_did_enter_fullscreen(this: &AnyObject, _: Sel, _: *mut AnyObject) {
+    report_fullscreen_transition(this, gpui::WindowFullscreenTransition::Did(true));
     // SAFETY: registered only on GPUI window classes, whose WINDOW_STATE_IVAR
     // holds the window state.
     let window_state = unsafe { get_window_state(this) };
@@ -3619,6 +3717,7 @@ extern "C" fn window_did_enter_fullscreen(this: &AnyObject, _: Sel, _: *mut AnyO
 }
 
 extern "C" fn window_did_fail_to_enter_fullscreen(this: &AnyObject, _: Sel, _: *mut AnyObject) {
+    report_fullscreen_transition(this, gpui::WindowFullscreenTransition::Cancelled(true));
     // SAFETY: registered only on GPUI window classes, whose WINDOW_STATE_IVAR
     // holds the window state.
     let window_state = unsafe { get_window_state(this) };
@@ -3751,6 +3850,7 @@ fn desktop_picture_screen_changed(window_state: &Rc<Mutex<MacWindowState>>) {
 }
 
 extern "C" fn window_will_exit_fullscreen(this: &AnyObject, _: Sel, _: *mut AnyObject) {
+    report_fullscreen_transition(this, gpui::WindowFullscreenTransition::Will(false));
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.as_ref().lock();
     lock.is_exiting_fullscreen = true;
@@ -3759,6 +3859,7 @@ extern "C" fn window_will_exit_fullscreen(this: &AnyObject, _: Sel, _: *mut AnyO
 }
 
 extern "C" fn window_did_fail_to_exit_fullscreen(this: &AnyObject, _: Sel, _: *mut AnyObject) {
+    report_fullscreen_transition(this, gpui::WindowFullscreenTransition::Cancelled(false));
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.as_ref().lock();
     lock.is_exiting_fullscreen = false;
@@ -3769,6 +3870,7 @@ extern "C" fn window_did_fail_to_exit_fullscreen(this: &AnyObject, _: Sel, _: *m
 }
 
 extern "C" fn window_did_exit_fullscreen(this: &AnyObject, _: Sel, _: *mut AnyObject) {
+    report_fullscreen_transition(this, gpui::WindowFullscreenTransition::Did(false));
     // SAFETY: This method is registered only on GPUI window classes, which initialize
     // WINDOW_STATE_IVAR with an Rc<Mutex<MacWindowState>> during window creation.
     let window_state = unsafe { get_window_state(this) };

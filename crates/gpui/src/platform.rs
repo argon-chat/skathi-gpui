@@ -1284,6 +1284,47 @@ pub enum TextInputStateChange {
     ContentChanged,
 }
 
+/// Limits on the native client area, in logical pixels.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WindowSizeConstraints {
+    /// Smallest allowed content size.
+    pub min: Option<Size<Pixels>>,
+    /// Largest allowed content size. The minimum wins on conflicting axes.
+    pub max: Option<Size<Pixels>>,
+    /// Content width divided by content height during resize.
+    pub aspect: Option<f32>,
+}
+
+impl WindowSizeConstraints {
+    /// Apply both limits and use the dragged axis to resolve an aspect ratio.
+    pub fn fit(self, requested: Size<Pixels>, use_width: bool) -> Size<Pixels> {
+        let min = self.min.unwrap_or_default();
+        let max = self.max.unwrap_or_else(|| size(px(f32::MAX), px(f32::MAX)));
+        let (mw, mh) = (min.width.as_f32().max(1.0), min.height.as_f32().max(1.0));
+        let (xw, xh) = (max.width.as_f32().max(mw), max.height.as_f32().max(mh));
+        let (w, h) = (requested.width.as_f32(), requested.height.as_f32());
+        if let Some(r) = self.aspect.filter(|v| v.is_finite() && *v > 0.0) {
+            let (lo, hi) = (mw.max(mh * r), xw.min(xh * r));
+            if lo <= hi {
+                let width = (if use_width { w } else { h * r }).clamp(lo, hi);
+                return size(px(width), px((width / r).clamp(mh, xh)));
+            }
+        }
+        size(px(w.clamp(mw, xw)), px(h.clamp(mh, xh)))
+    }
+}
+
+/// An edge from a native animated fullscreen transition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowFullscreenTransition {
+    /// The native animation is about to start, toward the given fullscreen state.
+    Will(bool),
+    /// The transition has finished in the given state.
+    Did(bool),
+    /// The platform cancelled a transition toward the given state.
+    Cancelled(bool),
+}
+
 #[expect(missing_docs)]
 pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn bounds(&self) -> Bounds<Pixels>;
@@ -1480,6 +1521,19 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
         false
     }
     /// vue-native fork: keeps the window above normal windows. False where unsupported.
+    fn vn_traffic_light_position(&self) -> Option<Point<Pixels>> {
+        None
+    }
+    fn vn_restore_traffic_light_position(&self) {}
+    fn vn_set_size_constraints(&self, _constraints: WindowSizeConstraints) {}
+    fn vn_set_opacity(&self, _opacity: f32) -> bool {
+        false
+    }
+    fn vn_set_all_workspaces(&self, _on: bool) -> bool {
+        false
+    }
+    fn vn_on_fullscreen_transition(&self, _callback: Box<dyn Fn(WindowFullscreenTransition)>) {}
+
     fn vn_set_always_on_top(&self, _on: bool) -> bool {
         false
     }

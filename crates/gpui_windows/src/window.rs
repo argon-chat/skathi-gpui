@@ -45,7 +45,8 @@ impl std::ops::Deref for WindowsWindow {
 pub struct WindowsWindowState {
     pub origin: Cell<Point<Pixels>>,
     pub logical_size: Cell<Size<Pixels>>,
-    pub min_size: Option<Size<Pixels>>,
+    pub size_constraints: Cell<WindowSizeConstraints>,
+    opacity_layer: Cell<bool>,
     pub fullscreen_restore_bounds: Cell<Bounds<Pixels>>,
     pub border_offset: WindowBorderOffset,
     pub appearance: Cell<WindowAppearance>,
@@ -177,7 +178,11 @@ impl WindowsWindowState {
             background_appearance: Cell::new(WindowBackgroundAppearance::Opaque),
             scale_factor: Cell::new(scale_factor),
             restore_from_minimized: Cell::new(restore_from_minimized),
-            min_size,
+            size_constraints: Cell::new(WindowSizeConstraints {
+                min: min_size,
+                ..Default::default()
+            }),
+            opacity_layer: Cell::new(false),
             callbacks,
             frame_signal: Arc::new(PlatformFrameSignal::new()),
             input_handler: Cell::new(input_handler),
@@ -1117,6 +1122,30 @@ impl PlatformWindow for WindowsWindow {
                 status.state = WindowOpenState::Maximized;
                 self.state.initial_placement.set(Some(status));
             }
+        }
+    }
+
+    fn vn_set_size_constraints(&self, constraints: WindowSizeConstraints) {
+        self.state.size_constraints.set(constraints);
+    }
+
+    fn vn_set_opacity(&self, opacity: f32) -> bool {
+        let alpha = (opacity.clamp(0., 1.) * 255.).round() as u8;
+        unsafe {
+            let style = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE);
+            let flag = WS_EX_LAYERED.0 as isize;
+            if alpha == 255 && self.state.opacity_layer.replace(false) {
+                SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, style & !flag);
+                return true;
+            }
+            if style & flag == 0 {
+                if alpha == 255 {
+                    return true;
+                }
+                SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, style | flag);
+                self.state.opacity_layer.set(true);
+            }
+            SetLayeredWindowAttributes(self.hwnd, COLORREF(0), alpha, LWA_ALPHA).is_ok()
         }
     }
 

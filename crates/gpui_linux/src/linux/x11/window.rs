@@ -69,6 +69,9 @@ x11rb::atom_manager! {
         _NET_WM_STATE_HIDDEN,
         _NET_WM_STATE_FOCUSED,
         _NET_WM_STATE_ABOVE,
+        _NET_WM_WINDOW_OPACITY,
+        _NET_WM_DESKTOP,
+        _NET_CURRENT_DESKTOP,
         _NET_ACTIVE_WINDOW,
         _NET_WM_SYNC_REQUEST,
         _NET_WM_SYNC_REQUEST_COUNTER,
@@ -273,6 +276,7 @@ pub struct X11WindowState {
     /// Taken when the window is dropped. Its GPU objects use the X connection, so they mustn't
     /// outlive the window, which a display mode switch relies on.
     renderer: Option<WgpuRenderer>,
+    resizable: bool,
     display: Rc<dyn PlatformDisplay>,
     input_handler: Option<PlatformInputHandler>,
     appearance: WindowAppearance,
@@ -867,6 +871,7 @@ impl X11WindowState {
                 bounds: bounds.to_pixels(scale_factor),
                 scale_factor,
                 renderer: Some(renderer),
+                resizable: params.is_resizable,
                 atoms: *atoms,
                 input_handler: None,
                 active: false,
@@ -1929,6 +1934,113 @@ impl PlatformWindow for X11Window {
         .log_err()
         .is_some();
         xcb_flush(&self.0.xcb);
+        ok
+    }
+
+    fn vn_set_size_constraints(&self, limits: gpui::WindowSizeConstraints) {
+        let state = self.0.state.borrow();
+        if !state.resizable {
+            return;
+        }
+        let Some(renderer) = &state.renderer else {
+            return;
+        };
+        let cap = renderer.max_texture_size() as i32;
+        let scaled = |n: Pixels| {
+            (n.as_f32() * state.scale_factor)
+                .round()
+                .clamp(1., cap as f32) as i32
+        };
+        let mut hints = WmSizeHints::new();
+        hints.min_size = limits.min.map(|s| (scaled(s.width), scaled(s.height)));
+        let (mw, mh) = hints.min_size.unwrap_or((1, 1));
+        hints.max_size = Some(limits.max.map_or((cap, cap), |s| {
+            (scaled(s.width).max(mw), scaled(s.height).max(mh))
+        }));
+        hints.aspect = limits.aspect.map(|ratio| {
+            let aspect =
+                x11rb::properties::AspectRatio::new((ratio * 10000.).round().max(1.) as i32, 10000);
+            (aspect, aspect)
+        });
+        check_reply(
+            || "X11 window size constraints",
+            hints.set_normal_hints(&*self.0.xcb, self.0.x_window),
+        )
+        .log_err();
+        xcb_flush(&self.0.xcb);
+    }
+
+    fn vn_set_opacity(&self, opacity: f32) -> bool {
+        let atom = self.0.state.borrow().atoms._NET_WM_WINDOW_OPACITY;
+        let value = (f64::from(opacity) * f64::from(u32::MAX)).round() as u32;
+        let ok = check_reply(
+            || "X11 window opacity",
+            self.0.xcb.change_property32(
+                xproto::PropMode::REPLACE,
+                self.0.x_window,
+                atom,
+                xproto::AtomEnum::CARDINAL,
+                &[value],
+            ),
+        )
+        .log_err()
+        .is_some();
+        xcb_flush(&self.0.xcb);
+        ok
+    }
+
+    fn vn_set_all_workspaces(&self, on: bool) -> bool {
+        let state = self.0.state.borrow();
+        let root = state.x_root_window;
+        let atom = state.atoms._NET_WM_DESKTOP;
+        let xcb = &self.0.xcb;
+        let desktop = if on {
+            u32::MAX
+        } else {
+            let Some(current) = xcb
+                .get_property(
+                    false,
+                    root,
+                    state.atoms._NET_CURRENT_DESKTOP,
+                    xproto::AtomEnum::CARDINAL,
+                    0,
+                    1,
+                )
+                .ok()
+                .and_then(|c| c.reply().ok())
+                .and_then(|r| r.value32()?.next())
+            else {
+                return false;
+            };
+            current
+        };
+        let ok = if state.vn_shown {
+            let event = ClientMessageEvent::new(32, self.0.x_window, atom, [desktop, 1, 0, 0, 0]);
+            check_reply(
+                || "X11 window desktop",
+                xcb.send_event(
+                    false,
+                    root,
+                    xproto::EventMask::SUBSTRUCTURE_REDIRECT
+                        | xproto::EventMask::SUBSTRUCTURE_NOTIFY,
+                    event,
+                ),
+            )
+        } else {
+            check_reply(
+                || "X11 window desktop",
+                xcb.change_property32(
+                    xproto::PropMode::REPLACE,
+                    self.0.x_window,
+                    atom,
+                    xproto::AtomEnum::CARDINAL,
+                    &[desktop],
+                ),
+            )
+        }
+        .log_err()
+        .is_some();
+        xcb_flush(xcb);
         ok
     }
 

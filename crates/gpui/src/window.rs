@@ -3730,6 +3730,40 @@ impl Window {
         self.platform_window.vn_set_frame(origin, size)
     }
 
+    /// Actual lower-left origin of the AppKit close button in its title-bar container.
+    pub fn vn_traffic_light_position(&self) -> Option<Point<Pixels>> {
+        self.platform_window.vn_traffic_light_position()
+    }
+
+    /// Restore the platform's standard caption button positions.
+    pub fn vn_restore_traffic_light_position(&self) {
+        self.platform_window.vn_restore_traffic_light_position();
+    }
+
+    /// Set the live content-size constraints.
+    pub fn vn_set_size_constraints(&self, constraints: crate::WindowSizeConstraints) {
+        self.platform_window.vn_set_size_constraints(constraints);
+    }
+
+    /// Change the opacity of the native window, where supported by the compositor.
+    pub fn vn_set_opacity(&self, opacity: f32) -> bool {
+        self.platform_window.vn_set_opacity(opacity)
+    }
+
+    /// Request visibility on every workspace, including fullscreen Spaces on macOS.
+    pub fn vn_set_all_workspaces(&self, on: bool) -> bool {
+        self.platform_window.vn_set_all_workspaces(on)
+    }
+
+    /// Observe the start, completion or cancellation of a native fullscreen animation.
+    pub fn vn_on_fullscreen_transition(
+        &self,
+        callback: impl Fn(crate::WindowFullscreenTransition) + 'static,
+    ) {
+        self.platform_window
+            .vn_on_fullscreen_transition(Box::new(callback));
+    }
+
     /// vue-native: keeps the window above normal windows; false where unsupported.
     pub fn vn_set_always_on_top(&self, on: bool) -> bool {
         self.platform_window.vn_set_always_on_top(on)
