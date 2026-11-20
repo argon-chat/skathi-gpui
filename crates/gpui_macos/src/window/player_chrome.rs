@@ -81,18 +81,17 @@ pub(super) fn show_buttons(state: &MacWindowState, visible: bool) {
     }
 }
 
-pub(super) fn layout_after_show(state: &Rc<Mutex<MacWindowState>>) {
+pub(super) fn settle_traffic_lights(state: &Rc<Mutex<MacWindowState>>) {
     let window = {
         let state = state.lock();
         (state.traffic_light_position.is_some()
-            && !state.player_chrome.buttons_hidden
             && !state.player_chrome.fullscreen
             && state.native_window().isVisible()
             && !state.is_fullscreen())
         .then(|| state.native_window().retain())
     };
     if let Some(window) = &window {
-        // Showing standard buttons can queue an AppKit layout that restores their default frames.
+        // Changing a standard button's alpha or visibility can queue a title-bar layout that resets its frame.
         // Layout may call the GPUI view, so finish it outside the window-state lock.
         window.layoutIfNeeded();
     }
@@ -269,7 +268,7 @@ pub(super) fn sync_panel(state: &Rc<Mutex<MacWindowState>>) {
     s.player_chrome.parked = Some(source);
     s.player_chrome.switching_panel = false;
     drop(s);
-    layout_after_show(state);
+    settle_traffic_lights(state);
 }
 
 pub(super) fn toggle_fullscreen(state: &Rc<Mutex<MacWindowState>>, fade: bool) {

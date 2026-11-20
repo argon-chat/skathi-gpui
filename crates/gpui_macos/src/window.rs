@@ -1487,7 +1487,7 @@ impl MacWindow {
             //  is different from the primary screen.
             let _: () = msg_send![native_window, setFrameTopLeftPoint: window_rect.origin];
             window.0.lock().sheet_parent = sheet_parent;
-            player_chrome::layout_after_show(&window.0);
+            player_chrome::settle_traffic_lights(&window.0);
 
             Ok(window)
         })
@@ -2000,7 +2000,7 @@ impl PlatformWindow for MacWindow {
                     }
                     window.makeKeyAndOrderFront(None);
                     if reveal {
-                        player_chrome::layout_after_show(&state);
+                        player_chrome::settle_traffic_lights(&state);
                     }
                 }
             })
@@ -2252,7 +2252,7 @@ impl PlatformWindow for MacWindow {
                         let _: () = msg_send![window, orderFront: ptr::null_mut::<AnyObject>()];
                     }
                 }
-                player_chrome::layout_after_show(&state);
+                player_chrome::settle_traffic_lights(&state);
                 completed(true);
             })
             .detach();
@@ -2380,14 +2380,14 @@ impl PlatformWindow for MacWindow {
 
     fn vn_set_window_buttons(&self, visible: bool, opacity: f32) {
         let mut state = self.0.lock();
-        let reveal = visible
-            && (state.player_chrome.buttons_hidden || state.player_chrome.button_opacity.is_none());
+        let changed = state.player_chrome.buttons_hidden == visible
+            || state.player_chrome.button_opacity != Some(opacity);
         state.player_chrome.buttons_hidden = !visible;
         state.player_chrome.button_opacity = Some(opacity);
         player_chrome::show_buttons(&state, visible);
         drop(state);
-        if reveal {
-            player_chrome::layout_after_show(&self.0);
+        if changed {
+            player_chrome::settle_traffic_lights(&self.0);
         }
     }
 
