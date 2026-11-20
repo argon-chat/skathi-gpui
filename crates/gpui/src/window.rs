@@ -3840,6 +3840,26 @@ impl Window {
         self.platform_window.vn_set_all_workspaces(on)
     }
 
+    /// Show or hide the standard title-bar buttons where the platform supports it.
+    pub fn vn_set_window_buttons(&self, visible: bool, opacity: f32) {
+        self.platform_window.vn_set_window_buttons(visible, opacity);
+    }
+
+    /// Bounds of visible native title-bar buttons relative to the content viewport.
+    pub fn vn_window_buttons_rect(&self) -> Option<Bounds<Pixels>> {
+        self.platform_window.vn_window_buttons_rect()
+    }
+
+    /// Platform-specific native window state for devtools.
+    pub fn platform_debug_state(&self) -> serde_json::Value {
+        self.platform_window.debug_state()
+    }
+
+    /// Mask the content during AppKit's fullscreen animation and reveal it on completion.
+    pub fn vn_toggle_fullscreen_faded(&self) {
+        self.platform_window.vn_toggle_fullscreen_faded();
+    }
+
     /// Observe the start, completion or cancellation of a native fullscreen animation.
     pub fn vn_on_fullscreen_transition(
         &self,

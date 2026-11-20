@@ -76,6 +76,7 @@ use std::{
 };
 
 const WINDOW_STATE_IVAR: &CStr = c"windowState";
+mod player_chrome;
 
 mod surface_pacing;
 
@@ -83,6 +84,7 @@ static RESTORES_WORKSPACE_AT_LAUNCH_DEFAULT: Once = Once::new();
 
 static mut WINDOW_CLASS: *const AnyClass = ptr::null();
 static mut PANEL_CLASS: *const AnyClass = ptr::null();
+static mut WORKSPACE_PANEL_CLASS: *const AnyClass = ptr::null();
 static mut VIEW_CLASS: *const AnyClass = ptr::null();
 static mut BLURRED_VIEW_CLASS: *const AnyClass = ptr::null();
 static mut WINDOW_STATE_ARCHIVER_DELEGATE_CLASS: *const AnyClass = ptr::null();
@@ -107,6 +109,12 @@ unsafe fn build_classes() {
     unsafe {
         WINDOW_CLASS = build_window_class(c"GPUIWindow", class!(NSWindow));
         PANEL_CLASS = build_window_class(c"GPUIPanel", class!(NSPanel));
+        let mut panel = ClassBuilder::new(c"GPUIWorkspacePanel", &*PANEL_CLASS).unwrap();
+        panel.add_method(
+            sel!(canBecomeMainWindow),
+            player_chrome::cannot_become_main as extern "C" fn(_, Sel) -> Bool,
+        );
+        WORKSPACE_PANEL_CLASS = panel.register();
         VIEW_CLASS = {
             let mut decl = ClassBuilder::new(c"GPUIView", class!(NSView)).unwrap();
             decl.add_ivar::<*mut c_void>(WINDOW_STATE_IVAR);
@@ -435,6 +443,10 @@ unsafe fn build_window_class(name: &CStr, superclass: &AnyClass) -> *const AnyCl
             window_did_resize as extern "C" fn(_, Sel, *mut AnyObject),
         );
         decl.add_method(
+            sel!(windowDidEndSheet:),
+            player_chrome::sheet_ended as extern "C" fn(_, Sel, *mut AnyObject),
+        );
+        decl.add_method(
             sel!(windowDidChangeOcclusionState:),
             window_did_change_occlusion_state as extern "C" fn(_, Sel, *mut AnyObject),
         );
@@ -724,6 +736,7 @@ struct MacWindowState {
     is_exiting_fullscreen: bool,
     fullscreen_changed: Option<Rc<dyn Fn(gpui::WindowFullscreenTransition)>>,
     spaces_before_override: Option<NSWindowCollectionBehavior>,
+    player_chrome: player_chrome::PlayerChrome,
     simple_fullscreen_state: Option<SimpleFullscreenState>,
     move_tab_to_new_window_callback: Option<Box<dyn FnMut()>>,
     merge_all_windows_callback: Option<Box<dyn FnMut()>>,
@@ -739,6 +752,9 @@ struct MacWindowState {
 
 impl MacWindowState {
     fn move_traffic_light(&mut self) {
+        if self.player_chrome.button_opacity.is_some() {
+            player_chrome::show_buttons(self, !self.player_chrome.buttons_hidden);
+        }
         if !self.native_titlebar_visible {
             self.update_native_titlebar_visibility();
         }
@@ -1197,15 +1213,7 @@ impl MacWindow {
                 screen: target_screen.as_deref()
             ];
             assert!(!native_window.is_null());
-            #[expect(
-                deprecated,
-                reason = "File-drop decoding expects a property-list array of paths; replacing NSFilenamesPboardType requires migrating both registration and decoding to file URLs"
-            )]
-            let () = msg_send![
-                native_window,
-                registerForDraggedTypes:
-                    &*NSArray::from_slice(&[NSFilenamesPboardType, &*NSString::from_str("public.file-url"), &*NSString::from_str("public.utf8-plain-text"), &*NSString::from_str("public.url"), &*NSString::from_str("public.html"), &*NSString::from_str(crate::drag_source::NATIVE_MARKER)])
-            ];
+            player_chrome::register_drag_types(&*native_window.cast::<NSWindow>());
             let () = msg_send![
                 native_window,
                 setReleasedWhenClosed: Bool::NO
@@ -1277,6 +1285,7 @@ impl MacWindow {
                 is_exiting_fullscreen: false,
                 fullscreen_changed: None,
                 spaces_before_override: None,
+                player_chrome: Default::default(),
                 simple_fullscreen_state: None,
                 move_tab_to_new_window_callback: None,
                 merge_all_windows_callback: None,
@@ -1491,11 +1500,11 @@ impl MacWindow {
         unsafe {
             let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
             let main_window: *mut AnyObject = msg_send![app, mainWindow];
-            if main_window.is_null() {
-                return None;
+            let key_window: *mut AnyObject = msg_send![app, keyWindow];
+            if !key_window.is_null() && std::ptr::eq((*key_window).class(), WORKSPACE_PANEL_CLASS) {
+                return Some(get_window_state(&*key_window).lock().handle);
             }
-
-            if msg_send![main_window, isKindOfClass: WINDOW_CLASS] {
+            if !main_window.is_null() && msg_send![main_window, isKindOfClass: WINDOW_CLASS] {
                 let handle = get_window_state(&*main_window).lock().handle;
                 Some(handle)
             } else {
@@ -1513,7 +1522,14 @@ impl MacWindow {
             let mut window_handles = Vec::new();
             for i in 0..count {
                 let window: *mut AnyObject = msg_send![windows, objectAtIndex:i];
-                if msg_send![window, isKindOfClass: WINDOW_CLASS] {
+                if msg_send![window, isKindOfClass: WINDOW_CLASS]
+                    || std::ptr::eq((*window).class(), WORKSPACE_PANEL_CLASS)
+                {
+                    if !(*window.cast::<NSWindow>()).isVisible()
+                        && (*window.cast::<NSWindow>()).delegate().is_none()
+                    {
+                        continue;
+                    }
                     let handle = get_window_state(&*window).lock().handle;
                     window_handles.push(handle);
                 }
@@ -1566,6 +1582,7 @@ impl Drop for MacWindow {
         this.renderer.destroy();
         let window = this.native_window;
         let sheet_parent = this.sheet_parent.take();
+        let parked = this.player_chrome.parked.take();
         match &mut this.frame_source {
             FrameSource::Metal(metal_frames) => metal_frames.replace(None),
             FrameSource::DisplayLink(frame_source) => drop(frame_source.take()),
@@ -1586,6 +1603,9 @@ impl Drop for MacWindow {
                     }
                     let _: () = msg_send![window, close];
                     let _: *mut AnyObject = msg_send![window, autorelease];
+                    if let Some(parked) = parked {
+                        parked.close();
+                    }
                 }
             })
             .detach();
@@ -1632,10 +1652,11 @@ impl PlatformWindow for MacWindow {
 
     fn resize(&mut self, size: Size<Pixels>) {
         let this = self.0.lock();
-        let window = this.native_window;
+        let state = self.0.clone();
         let closed = this.closed.clone();
         this.foreground_executor
             .spawn(async move {
+                let window = state.lock().native_window;
                 if_window_not_closed(closed, || unsafe {
                     let _: () = msg_send![window, setContentSize: NSSize {
                         width: size.width.as_f32() as f64,
@@ -2125,9 +2146,10 @@ impl PlatformWindow for MacWindow {
 
     fn show_character_palette(&self) {
         let this = self.0.lock();
-        let window = this.native_window;
+        let state = self.0.clone();
         this.foreground_executor
             .spawn(async move {
+                let window = state.lock().native_window;
                 unsafe {
                     let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
                     let _: () = msg_send![app, orderFrontCharacterPalette: window];
@@ -2145,10 +2167,11 @@ impl PlatformWindow for MacWindow {
 
     fn zoom(&self) {
         let this = self.0.lock();
-        let window = this.native_window;
+        let state = self.0.clone();
         let closed = this.closed.clone();
         this.foreground_executor
             .spawn(async move {
+                let window = state.lock().native_window;
                 if_window_not_closed(closed, || unsafe {
                     let _: () = msg_send![window, zoom: ptr::null_mut::<AnyObject>()];
                 })
@@ -2157,16 +2180,7 @@ impl PlatformWindow for MacWindow {
     }
 
     fn toggle_fullscreen(&self) {
-        let this = self.0.lock();
-        let window = this.native_window;
-        let closed = this.closed.clone();
-        this.foreground_executor
-            .spawn(async move {
-                if_window_not_closed(closed, || unsafe {
-                    let _: () = msg_send![window, toggleFullScreen: ptr::null_mut::<AnyObject>()];
-                })
-            })
-            .detach();
+        player_chrome::toggle_fullscreen(&self.0, false);
     }
 
     fn toggle_simple_fullscreen(&self) {
@@ -2216,11 +2230,12 @@ impl PlatformWindow for MacWindow {
         completed: Box<dyn FnOnce(bool)>,
     ) -> bool {
         let this = self.0.lock();
-        let window = this.native_window;
+        let state = self.0.clone();
         let view = this.native_view.as_ptr();
         let closed = this.closed.clone();
         this.foreground_executor
             .spawn(async move {
+                let window = state.lock().native_window;
                 if closed.load(Ordering::Acquire) || !should_show() {
                     completed(false);
                     return;
@@ -2246,10 +2261,11 @@ impl PlatformWindow for MacWindow {
         if this.simple_fullscreen_state.is_some() {
             return;
         }
-        let window = this.native_window;
+        let state = self.0.clone();
         let closed = this.closed.clone();
         this.foreground_executor
             .spawn(async move {
+                let window = state.lock().native_window;
                 if_window_not_closed(closed, || unsafe {
                     let zoomed: bool = msg_send![window, isZoomed];
                     if zoomed != maximized {
@@ -2272,10 +2288,11 @@ impl PlatformWindow for MacWindow {
 
     fn vn_unminimize(&self) {
         let this = self.0.lock();
-        let window = this.native_window;
+        let state = self.0.clone();
         let closed = this.closed.clone();
         this.foreground_executor
             .spawn(async move {
+                let window = state.lock().native_window;
                 if_window_not_closed(closed, || unsafe {
                     let _: () = msg_send![window, deminiaturize: ptr::null_mut::<AnyObject>()];
                 })
@@ -2307,10 +2324,11 @@ impl PlatformWindow for MacWindow {
         if this.simple_fullscreen_state.is_some() || this.is_fullscreen() {
             return false;
         }
-        let window = this.native_window;
+        let state = self.0.clone();
         let closed = this.closed.clone();
         this.foreground_executor
             .spawn(async move {
+                let window = state.lock().native_window;
                 if_window_not_closed(closed, || unsafe {
                     let native = &*window.cast::<NSWindow>();
                     let frame = native.frame();
@@ -2355,6 +2373,21 @@ impl PlatformWindow for MacWindow {
         let mut state = self.0.lock();
         state.restore_traffic_light();
         state.traffic_light_position = None;
+    }
+
+    fn vn_set_window_buttons(&self, visible: bool, opacity: f32) {
+        let mut state = self.0.lock();
+        state.player_chrome.buttons_hidden = !visible;
+        state.player_chrome.button_opacity = Some(opacity);
+        player_chrome::show_buttons(&state, visible);
+    }
+
+    fn vn_window_buttons_rect(&self) -> Option<Bounds<Pixels>> {
+        player_chrome::buttons_rect(&self.0.lock())
+    }
+
+    fn vn_toggle_fullscreen_faded(&self) {
+        player_chrome::toggle_fullscreen(&self.0, true);
     }
 
     fn vn_set_size_constraints(&self, limits: gpui::WindowSizeConstraints) {
@@ -2455,7 +2488,10 @@ impl PlatformWindow for MacWindow {
     fn vn_set_all_workspaces(&self, on: bool) -> bool {
         let mut state = self.0.lock();
         let window = state.native_window;
-        let current: NSWindowCollectionBehavior = unsafe { msg_send![window, collectionBehavior] };
+        let current = state
+            .player_chrome
+            .windowed_behavior
+            .unwrap_or_else(|| unsafe { msg_send![window, collectionBehavior] });
         let required = NSWindowCollectionBehavior::CanJoinAllSpaces
             | NSWindowCollectionBehavior::FullScreenAuxiliary;
         let mask = required
@@ -2470,10 +2506,15 @@ impl PlatformWindow for MacWindow {
         } else {
             return true;
         };
+        if state.player_chrome.windowed_behavior.is_some() {
+            state.player_chrome.windowed_behavior = Some(next);
+            return true;
+        }
         drop(state);
         unsafe {
             let _: () = msg_send![window, setCollectionBehavior: next];
         }
+        player_chrome::sync_panel(&self.0);
         true
     }
 
@@ -2491,6 +2532,7 @@ impl PlatformWindow for MacWindow {
         unsafe {
             let _: () = msg_send![window, setLevel: level];
         }
+        player_chrome::sync_panel(&self.0);
         true
     }
 
@@ -2526,10 +2568,11 @@ impl PlatformWindow for MacWindow {
 
     fn vn_request_close(&self) {
         let this = self.0.lock();
-        let window = this.native_window;
+        let state = self.0.clone();
         let closed = this.closed.clone();
         this.foreground_executor
             .spawn(async move {
+                let window = state.lock().native_window;
                 if_window_not_closed(closed, || unsafe {
                     let _: () = msg_send![window, performClose: ptr::null_mut::<AnyObject>()];
                 })
@@ -2739,6 +2782,14 @@ impl PlatformWindow for MacWindow {
             "is_visible": window.isVisible(),
             "is_key_window": window.isKeyWindow(),
             "is_main_window": window.isMainWindow(),
+            "window_class": unsafe { (*state.native_window).class() }.name().to_string_lossy(),
+            "window_number": window.windowNumber(),
+            "nonactivating_panel": window.styleMask().contains(NSWindowStyleMask::NonactivatingPanel),
+            "collection_behavior": window.collectionBehavior().bits(),
+            "level": window.level(),
+            "can_become_key": window.canBecomeKeyWindow(),
+            "can_become_main": window.canBecomeMainWindow(),
+            "fullscreen_content_masked": state.player_chrome.cover.is_some(),
             "is_miniaturized": window.isMiniaturized(),
             "is_on_active_space": window.isOnActiveSpace(),
             "screen_display_id": display_id_for_screen(screen),
@@ -2791,10 +2842,11 @@ impl PlatformWindow for MacWindow {
         if this.simple_fullscreen_state.is_some() {
             return;
         }
-        let window = this.native_window;
+        let state = self.0.clone();
         let closed = this.closed.clone();
         this.foreground_executor
             .spawn(async move {
+                let window = state.lock().native_window;
                 if_window_not_closed(closed, || {
                     unsafe {
                         let defaults: *mut AnyObject = msg_send![class!(NSUserDefaults), standardUserDefaults];
@@ -3194,7 +3246,13 @@ extern "C" fn yes(_: &AnyObject, _: Sel) -> Bool {
 extern "C" fn dealloc_window(this: &AnyObject, _: Sel) {
     unsafe {
         drop_window_state(this);
-        let _: () = msg_send![super(this, class!(NSWindow)), dealloc];
+        let panel: bool = msg_send![this, isKindOfClass: class!(NSPanel)];
+        let base = if panel {
+            class!(NSPanel)
+        } else {
+            class!(NSWindow)
+        };
+        let _: () = msg_send![super(this, base), dealloc];
     }
 }
 
@@ -3789,6 +3847,10 @@ fn report_fullscreen_transition(this: &AnyObject, event: gpui::WindowFullscreenT
 }
 
 extern "C" fn window_will_enter_fullscreen(this: &AnyObject, _: Sel, _: *mut AnyObject) {
+    unsafe { get_window_state(this) }
+        .lock()
+        .player_chrome
+        .transitioning = true;
     report_fullscreen_transition(this, gpui::WindowFullscreenTransition::Will(true));
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.as_ref().lock();
@@ -3809,6 +3871,7 @@ extern "C" fn window_will_enter_fullscreen(this: &AnyObject, _: Sel, _: *mut Any
 }
 
 extern "C" fn window_did_enter_fullscreen(this: &AnyObject, _: Sel, _: *mut AnyObject) {
+    player_chrome::finish_fullscreen(&unsafe { get_window_state(this) }, true);
     report_fullscreen_transition(this, gpui::WindowFullscreenTransition::Did(true));
     // SAFETY: registered only on GPUI window classes, whose WINDOW_STATE_IVAR
     // holds the window state.
@@ -3826,6 +3889,7 @@ extern "C" fn window_did_enter_fullscreen(this: &AnyObject, _: Sel, _: *mut AnyO
 }
 
 extern "C" fn window_did_fail_to_enter_fullscreen(this: &AnyObject, _: Sel, _: *mut AnyObject) {
+    player_chrome::finish_fullscreen(&unsafe { get_window_state(this) }, false);
     report_fullscreen_transition(this, gpui::WindowFullscreenTransition::Cancelled(true));
     // SAFETY: registered only on GPUI window classes, whose WINDOW_STATE_IVAR
     // holds the window state.
@@ -3959,6 +4023,10 @@ fn desktop_picture_screen_changed(window_state: &Rc<Mutex<MacWindowState>>) {
 }
 
 extern "C" fn window_will_exit_fullscreen(this: &AnyObject, _: Sel, _: *mut AnyObject) {
+    unsafe { get_window_state(this) }
+        .lock()
+        .player_chrome
+        .transitioning = true;
     report_fullscreen_transition(this, gpui::WindowFullscreenTransition::Will(false));
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.as_ref().lock();
@@ -3968,6 +4036,7 @@ extern "C" fn window_will_exit_fullscreen(this: &AnyObject, _: Sel, _: *mut AnyO
 }
 
 extern "C" fn window_did_fail_to_exit_fullscreen(this: &AnyObject, _: Sel, _: *mut AnyObject) {
+    player_chrome::finish_fullscreen(&unsafe { get_window_state(this) }, true);
     report_fullscreen_transition(this, gpui::WindowFullscreenTransition::Cancelled(false));
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.as_ref().lock();
@@ -3979,6 +4048,7 @@ extern "C" fn window_did_fail_to_exit_fullscreen(this: &AnyObject, _: Sel, _: *m
 }
 
 extern "C" fn window_did_exit_fullscreen(this: &AnyObject, _: Sel, _: *mut AnyObject) {
+    player_chrome::finish_fullscreen(&unsafe { get_window_state(this) }, false);
     report_fullscreen_transition(this, gpui::WindowFullscreenTransition::Did(false));
     // SAFETY: This method is registered only on GPUI window classes, which initialize
     // WINDOW_STATE_IVAR with an Rc<Mutex<MacWindowState>> during window creation.

@@ -1655,6 +1655,13 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn vn_set_all_workspaces(&self, _on: bool) -> bool {
         false
     }
+    fn vn_set_window_buttons(&self, _visible: bool, _opacity: f32) {}
+    fn vn_window_buttons_rect(&self) -> Option<Bounds<Pixels>> {
+        None
+    }
+    fn vn_toggle_fullscreen_faded(&self) {
+        self.toggle_fullscreen();
+    }
     fn vn_on_fullscreen_transition(&self, _callback: Box<dyn Fn(WindowFullscreenTransition)>) {}
 
     fn vn_set_always_on_top(&self, _on: bool) -> bool {
