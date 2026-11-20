@@ -181,7 +181,13 @@ impl WindowsWindowInner {
             WM_GPUI_DOCUMENT_DRAG => {
                 let pending = self.document_drag.take();
                 if let Some((data, done)) = pending {
-                    done(crate::drag_source::perform(data));
+                    // OLE owns the message loop until the button is released.
+                    // Reuse the resize-loop frame timer to run JS and paint
+                    // even when normal DXGI wakeups are outside that loop.
+                    self.handle_size_move_loop(handle);
+                    let result = crate::drag_source::perform(data);
+                    self.handle_size_move_loop_exit(handle);
+                    done(result);
                 }
                 Some(0)
             }
