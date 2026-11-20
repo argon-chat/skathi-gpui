@@ -7,6 +7,10 @@ use gpui::{
 };
 use std::cell::Cell;
 
+thread_local! {
+    pub(crate) static HAS_FORCE_TOUCH: Cell<bool> = const { Cell::new(false) };
+}
+
 use crate::{
     LMGetKbdType, NSStringExt, TISCopyCurrentKeyboardLayoutInputSource, TISGetInputSourceProperty,
     UCKeyTranslate, kTISPropertyUnicodeKeyLayoutData,
@@ -338,6 +342,9 @@ pub(crate) unsafe fn platform_input_from_native(
             }
             NSEventType::Pressure => {
                 let stage = native_event.stage();
+                if stage > 0 {
+                    HAS_FORCE_TOUCH.set(true);
+                }
                 let pressure = native_event.pressure();
 
                 window_height.map(|window_height| {

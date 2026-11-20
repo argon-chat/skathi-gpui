@@ -1284,6 +1284,39 @@ pub enum TextInputStateChange {
     ContentChanged,
 }
 
+/// A desktop interaction to communicate through a pointing device.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HapticPattern {
+    /// A short confirmation.
+    Generic,
+    /// A geometric snap or alignment.
+    Alignment,
+    /// A discrete change in a control's value.
+    LevelChange,
+    /// Continuous pen-tip feedback during an ink stroke.
+    InkContinuous,
+    /// A pencil texture for a contacting pen.
+    PencilContinuous,
+}
+
+impl HapticPattern {
+    /// Whether the effect follows a pen stroke until it stops.
+    pub fn is_continuous(self) -> bool {
+        matches!(self, Self::InkContinuous | Self::PencilContinuous)
+    }
+}
+
+/// Skathi exposes one primary mouse and one primary pen per window.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HapticTarget {
+    /// The current device routed by the platform.
+    Current,
+    /// The mouse or trackpad.
+    Mouse,
+    /// The pen currently in range of this window.
+    Pen,
+}
+
 /// Limits on the native client area, in logical pixels.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WindowSizeConstraints {
@@ -1526,6 +1559,21 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     }
     fn vn_restore_traffic_light_position(&self) {}
     fn vn_set_size_constraints(&self, _constraints: WindowSizeConstraints) {}
+    fn vn_haptics_supported(&self, _target: HapticTarget) -> bool {
+        false
+    }
+    fn vn_perform_haptic(
+        &self,
+        _pattern: HapticPattern,
+        _target: HapticTarget,
+        _after_present: bool,
+    ) -> bool {
+        false
+    }
+    fn vn_stop_haptic(&self, _target: HapticTarget) -> bool {
+        false
+    }
+
     fn vn_set_opacity(&self, _opacity: f32) -> bool {
         false
     }

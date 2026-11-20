@@ -1610,6 +1610,16 @@ fn if_window_not_closed(closed: Arc<AtomicBool>, f: impl FnOnce()) {
     }
 }
 
+fn trackpad_pattern(pattern: gpui::HapticPattern) -> Option<objc2_app_kit::NSHapticFeedbackPattern> {
+    use objc2_app_kit::NSHapticFeedbackPattern as Pattern;
+    match pattern {
+        gpui::HapticPattern::Generic => Some(Pattern::Generic),
+        gpui::HapticPattern::Alignment => Some(Pattern::Alignment),
+        gpui::HapticPattern::LevelChange => Some(Pattern::LevelChange),
+        _ => None,
+    }
+}
+
 impl PlatformWindow for MacWindow {
     fn bounds(&self) -> Bounds<Pixels> {
         self.0.as_ref().lock().bounds()
@@ -2392,6 +2402,35 @@ impl PlatformWindow for MacWindow {
                 let _: () = msg_send![window, setContentResizeIncrements: NSSize::new(1., 1.)];
             }
         }
+    }
+
+    fn vn_haptics_supported(&self, target: gpui::HapticTarget) -> bool {
+        target != gpui::HapticTarget::Pen && crate::events::HAS_FORCE_TOUCH.get()
+    }
+
+    fn vn_perform_haptic(
+        &self,
+        pattern: gpui::HapticPattern,
+        target: gpui::HapticTarget,
+        after_present: bool,
+    ) -> bool {
+        use objc2_app_kit::{
+            NSHapticFeedbackManager, NSHapticFeedbackPerformanceTime as Time, NSHapticFeedbackPerformer,
+        };
+        if !self.vn_haptics_supported(target) {
+            return false;
+        }
+        let Some(pattern) = trackpad_pattern(pattern) else {
+            return false;
+        };
+        let time = if after_present {
+            Time::DrawCompleted
+        } else {
+            Time::Now
+        };
+        NSHapticFeedbackManager::defaultPerformer()
+            .performFeedbackPattern_performanceTime(pattern, time);
+        true
     }
 
     fn vn_set_opacity(&self, opacity: f32) -> bool {
@@ -4914,6 +4953,17 @@ extern "C" fn toggle_tab_bar(this: &AnyObject, _sel: Sel, _id: *mut AnyObject) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trackpad_maps_discrete_patterns() {
+        use gpui::HapticPattern::*;
+        use objc2_app_kit::NSHapticFeedbackPattern as Pattern;
+        assert_eq!(trackpad_pattern(Generic), Some(Pattern::Generic));
+        assert_eq!(trackpad_pattern(Alignment), Some(Pattern::Alignment));
+        assert_eq!(trackpad_pattern(LevelChange), Some(Pattern::LevelChange));
+        assert_eq!(trackpad_pattern(InkContinuous), None);
+        assert_eq!(trackpad_pattern(PencilContinuous), None);
+    }
 
     #[test]
     fn display_id_for_screen_handles_missing_metadata() {

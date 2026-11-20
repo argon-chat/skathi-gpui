@@ -3745,6 +3745,32 @@ impl Window {
         self.platform_window.vn_set_size_constraints(constraints);
     }
 
+    /// Whether the selected pointing device can currently receive feedback.
+    pub fn vn_haptics_supported(&self, target: crate::HapticTarget) -> bool {
+        self.platform_window.vn_haptics_supported(target)
+    }
+
+    /// Submit an effect, optionally synchronized with the next window frame.
+    pub fn vn_perform_haptic(
+        &mut self,
+        pattern: crate::HapticPattern,
+        target: crate::HapticTarget,
+        after_present: bool,
+    ) -> bool {
+        let accepted = self
+            .platform_window
+            .vn_perform_haptic(pattern, target, after_present);
+        if accepted && after_present {
+            self.refresh();
+        }
+        accepted
+    }
+
+    /// Stop a running or queued effect for this pointer.
+    pub fn vn_stop_haptic(&self, target: crate::HapticTarget) -> bool {
+        self.platform_window.vn_stop_haptic(target)
+    }
+
     /// Change the opacity of the native window, where supported by the compositor.
     pub fn vn_set_opacity(&self, opacity: f32) -> bool {
         self.platform_window.vn_set_opacity(opacity)
@@ -9261,6 +9287,7 @@ impl Window {
             PlatformInput::MouseMove(_)
             | PlatformInput::MouseDown(_)
             | PlatformInput::MouseUp(_)
+            | PlatformInput::MousePressure(_)
             | PlatformInput::Scroll(_) => {
                 self.vn_pen = None;
                 event

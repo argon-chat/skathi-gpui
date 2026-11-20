@@ -46,6 +46,7 @@ pub struct WindowsWindowState {
     pub origin: Cell<Point<Pixels>>,
     pub logical_size: Cell<Size<Pixels>>,
     pub size_constraints: Cell<WindowSizeConstraints>,
+    pub(crate) haptics: RefCell<crate::haptics::WindowHaptics>,
     opacity_layer: Cell<bool>,
     pub fullscreen_restore_bounds: Cell<Bounds<Pixels>>,
     pub border_offset: WindowBorderOffset,
@@ -182,6 +183,7 @@ impl WindowsWindowState {
                 min: min_size,
                 ..Default::default()
             }),
+            haptics: RefCell::default(),
             opacity_layer: Cell::new(false),
             callbacks,
             frame_signal: Arc::new(PlatformFrameSignal::new()),
@@ -1129,6 +1131,26 @@ impl PlatformWindow for WindowsWindow {
         self.state.size_constraints.set(constraints);
     }
 
+    fn vn_haptics_supported(&self, target: HapticTarget) -> bool {
+        self.state.haptics.borrow().supported(target)
+    }
+
+    fn vn_perform_haptic(
+        &self,
+        pattern: HapticPattern,
+        target: HapticTarget,
+        after_present: bool,
+    ) -> bool {
+        self.state
+            .haptics
+            .borrow_mut()
+            .perform(pattern, target, after_present)
+    }
+
+    fn vn_stop_haptic(&self, target: HapticTarget) -> bool {
+        self.state.haptics.borrow_mut().stop(target)
+    }
+
     fn vn_set_opacity(&self, opacity: f32) -> bool {
         let alpha = (opacity.clamp(0., 1.) * 255.).round() as u8;
         unsafe {
@@ -1275,11 +1297,15 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn draw(&self, scene: &Scene) {
-        self.state
+        let presented = self
+            .state
             .renderer
             .borrow_mut()
             .draw(scene, self.state.background_appearance.get())
             .log_err();
+        if presented == Some(true) {
+            self.state.haptics.borrow_mut().presented();
+        }
     }
 
     // vue-native: ungated, see `Window::render_to_image`.

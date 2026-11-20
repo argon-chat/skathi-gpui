@@ -877,9 +877,9 @@ impl Renderer {
         &mut self,
         scene: &Scene,
         appearance: WindowBackgroundAppearance,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         if self.skip_draws || self.uploads_failed {
-            return Ok(());
+            return Ok(false);
         }
         self.apply_hdr_output()?;
         let _profile = crate::profiling::span(self.hwnd.0 as usize, "native", "D3D12 draw");
@@ -899,7 +899,7 @@ impl Renderer {
                         timings.skipped_gpu_busy += 1;
                         timings.emit_if_due();
                     }
-                    return Ok(());
+                    return Ok(false);
                 }
                 // On timeout (an occluded or stalled compositor) present anyway,
                 // as before; the queue then holds one frame more until it drains.
@@ -923,7 +923,7 @@ impl Renderer {
                     timings.skipped_gpu_busy += 1;
                     timings.emit_if_due();
                 }
-                return Ok(());
+                return Ok(false);
             }
             let _wait =
                 crate::profiling::span(self.hwnd.0 as usize, "wait", "D3D12 backbuffer fence");
@@ -1004,14 +1004,14 @@ impl Renderer {
             );
         }
         if present_busy {
-            return Ok(());
+            return Ok(false);
         }
         result.ok().context("Presenting native D3D12 swap chain")?;
         if let Some(swap_chain) = &self.swap_chain {
             let (fence, _) = self.gpu.completion_point();
             crate::present_feedback::presented(self.hwnd, swap_chain, Some((&fence, completed)));
         }
-        Ok(())
+        Ok(result.0 == 0)
     }
     fn render(
         &mut self,
@@ -2920,10 +2920,10 @@ impl DirectXRenderer {
         &mut self,
         scene: &Scene,
         appearance: WindowBackgroundAppearance,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         match self.live.as_mut() {
             Some(live) => live.draw(scene, appearance),
-            None => Ok(()),
+            None => Ok(false),
         }
     }
 

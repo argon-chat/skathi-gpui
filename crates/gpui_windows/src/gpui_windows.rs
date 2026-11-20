@@ -18,6 +18,7 @@ mod dispatcher;
 mod display;
 mod events;
 mod frame_pacing;
+mod haptics;
 mod keyboard;
 mod platform;
 mod pen;

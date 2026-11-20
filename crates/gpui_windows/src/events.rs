@@ -407,6 +407,7 @@ impl WindowsWindowInner {
     }
 
     fn handle_destroy_msg(&self, handle: HWND) -> Option<isize> {
+        self.state.haptics.borrow_mut().clear();
         self.state.pointer_lock.unlock();
         // The handle is invalid once this returns, while gpui may still ask for the bounds.
         self.state
@@ -482,8 +483,23 @@ impl WindowsWindowInner {
             return None;
         }
         let pointer_id = wparam.loword() as u32;
+        let leaving = matches!(msg, WM_POINTERLEAVE | WM_POINTERCAPTURECHANGED);
+        if leaving || msg == WM_POINTERUP {
+            self.state
+                .haptics
+                .borrow_mut()
+                .pen_ended(pointer_id, leaving);
+        }
         let readings = crate::pen::read(handle, pointer_id)?;
         let latest = *readings.last()?;
+        if latest.pointer_flags & windows::Win32::UI::Input::Pointer::POINTER_FLAG_CANCELED.0 != 0 {
+            self.state.haptics.borrow_mut().pen_ended(pointer_id, true);
+        } else if !leaving {
+            self.state
+                .haptics
+                .borrow_mut()
+                .observe_pen(pointer_id, latest.in_contact());
+        }
         let scale = self.state.scale_factor.get();
         if msg != WM_POINTERLEAVE && msg != WM_POINTERCAPTURECHANGED {
             self.start_tracking_mouse(handle, TME_LEAVE);
@@ -1021,6 +1037,7 @@ impl WindowsWindowInner {
         let this = self.clone();
 
         if !activated {
+            this.state.haptics.borrow_mut().clear();
             this.state.pointer_lock.unlock();
             this.state.dead_keys.borrow_mut().clear();
             this.state.cursor_visible.store(true, Ordering::Relaxed);

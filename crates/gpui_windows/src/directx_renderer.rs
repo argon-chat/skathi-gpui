@@ -529,7 +529,7 @@ impl DirectXRenderer {
     }
 
     #[inline]
-    fn present(&mut self) -> Result<()> {
+    fn present(&mut self) -> Result<bool> {
         let flags = if self.present_no_wait {
             DXGI_PRESENT_DO_NOT_WAIT
         } else {
@@ -544,13 +544,13 @@ impl DirectXRenderer {
         };
         if self.present_no_wait && result == DXGI_ERROR_WAS_STILL_DRAWING {
             // Compositor busy mid-drag: drop this frame, keep the loop live.
-            return Ok(());
+            return Ok(false);
         }
         result.ok().context("Presenting swap chain failed")?;
         if let Some(resources) = &self.resources {
             crate::present_feedback::presented(self.hwnd, &resources.swap_chain, None);
         }
-        Ok(())
+        Ok(result.0 == 0)
     }
 
     /// D3D11 makes a new device while the removed one is referenced, so this keeps it.
@@ -642,11 +642,11 @@ impl DirectXRenderer {
         &mut self,
         scene: &Scene,
         background_appearance: WindowBackgroundAppearance,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         if self.skip_draws {
             // skip drawing this frame, we just recovered from a device lost event
             // and so likely do not have the textures anymore that are required for drawing
-            return Ok(());
+            return Ok(false);
         }
         self.render(scene, background_appearance)?;
         self.present()
