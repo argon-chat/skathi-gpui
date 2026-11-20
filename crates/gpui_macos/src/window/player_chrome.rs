@@ -1,6 +1,7 @@
 use super::*;
 use objc2::MainThreadOnly;
 use objc2_app_kit::{NSAnimationContext, NSAppearanceCustomization};
+use objc2_foundation::NSIntersectionRect;
 
 #[derive(Default)]
 pub(super) struct PlayerChrome {
@@ -80,6 +81,32 @@ pub(super) fn show_buttons(state: &MacWindowState, visible: bool) {
     }
 }
 
+pub(super) fn layout_after_show(state: &Rc<Mutex<MacWindowState>>) {
+    let window = {
+        let state = state.lock();
+        (state.traffic_light_position.is_some()
+            && !state.player_chrome.buttons_hidden
+            && !state.player_chrome.fullscreen
+            && state.native_window().isVisible()
+            && !state.is_fullscreen())
+        .then(|| state.native_window().retain())
+    };
+    if let Some(window) = &window {
+        // Showing standard buttons can queue an AppKit layout that restores their default frames.
+        // Layout may call the GPUI view, so finish it outside the window-state lock.
+        window.layoutIfNeeded();
+    }
+    let mut state = state.lock();
+    if state.closed.load(Ordering::Acquire) {
+        return;
+    }
+    state.move_traffic_light();
+    if window.is_some() {
+        let view = unsafe { &*state.native_view.as_ptr().cast::<NSView>() };
+        state.native_window().invalidateCursorRectsForView(view);
+    }
+}
+
 pub(super) fn buttons_rect(state: &MacWindowState) -> Option<Bounds<Pixels>> {
     if state.player_chrome.buttons_hidden {
         return None;
@@ -95,8 +122,9 @@ pub(super) fn buttons_rect(state: &MacWindowState) -> Option<Bounds<Pixels>> {
         {
             continue;
         }
-        let visible = button.visibleRect();
-        if visible.size.width <= 0. || visible.size.height <= 0. {
+        // With clipsToBounds disabled, visibleRect may extend across the window.
+        let visible = NSIntersectionRect(button.bounds(), button.visibleRect());
+        if visible.is_empty() {
             continue;
         }
         let rect = button.convertRect_toView(visible, Some(view));
@@ -240,7 +268,8 @@ pub(super) fn sync_panel(state: &Rc<Mutex<MacWindowState>>) {
     let mut s = state.lock();
     s.player_chrome.parked = Some(source);
     s.player_chrome.switching_panel = false;
-    s.move_traffic_light();
+    drop(s);
+    layout_after_show(state);
 }
 
 pub(super) fn toggle_fullscreen(state: &Rc<Mutex<MacWindowState>>, fade: bool) {

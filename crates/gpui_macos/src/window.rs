@@ -1486,11 +1486,8 @@ impl MacWindow {
             // the window position might be incorrect if the main screen (the screen that contains the window that has focus)
             //  is different from the primary screen.
             let _: () = msg_send![native_window, setFrameTopLeftPoint: window_rect.origin];
-            {
-                let mut window_state = window.0.lock();
-                window_state.move_traffic_light();
-                window_state.sheet_parent = sheet_parent;
-            }
+            window.0.lock().sheet_parent = sheet_parent;
+            player_chrome::layout_after_show(&window.0);
 
             Ok(window)
         })
@@ -1986,6 +1983,7 @@ impl PlatformWindow for MacWindow {
     }
 
     fn activate(&self) {
+        let state = self.0.clone();
         let lock = self.0.lock();
         let window = lock.native_window;
         let view = lock.native_view.as_ptr();
@@ -1995,11 +1993,15 @@ impl PlatformWindow for MacWindow {
             .spawn(async move {
                 if !closed.load(Ordering::Acquire) {
                     let window = unsafe { &*window.cast::<NSWindow>() };
-                    if !window.isVisible() {
+                    let reveal = !window.isVisible();
+                    if reveal {
                         let view = unsafe { &*view.cast::<NSView>() };
                         view.setNeedsDisplay(true);
                     }
                     window.makeKeyAndOrderFront(None);
+                    if reveal {
+                        player_chrome::layout_after_show(&state);
+                    }
                 }
             })
             .detach();
@@ -2250,6 +2252,7 @@ impl PlatformWindow for MacWindow {
                         let _: () = msg_send![window, orderFront: ptr::null_mut::<AnyObject>()];
                     }
                 }
+                player_chrome::layout_after_show(&state);
                 completed(true);
             })
             .detach();
@@ -2377,9 +2380,15 @@ impl PlatformWindow for MacWindow {
 
     fn vn_set_window_buttons(&self, visible: bool, opacity: f32) {
         let mut state = self.0.lock();
+        let reveal = visible
+            && (state.player_chrome.buttons_hidden || state.player_chrome.button_opacity.is_none());
         state.player_chrome.buttons_hidden = !visible;
         state.player_chrome.button_opacity = Some(opacity);
         player_chrome::show_buttons(&state, visible);
+        drop(state);
+        if reveal {
+            player_chrome::layout_after_show(&self.0);
+        }
     }
 
     fn vn_window_buttons_rect(&self) -> Option<Bounds<Pixels>> {
@@ -2798,6 +2807,12 @@ impl PlatformWindow for MacWindow {
             "window_runtime_class": object.class().name().to_string_lossy(),
             "workspace_panel": player_chrome::is_workspace_panel(object),
             "content_window_number": view.window().map(|owner| owner.windowNumber()),
+            "traffic_light_frames": state.traffic_light_buttons().map(|buttons| {
+                [buttons.close, buttons.minimize, buttons.zoom].map(|button| {
+                    let f = button.frame();
+                    [f.origin.x, f.origin.y, f.size.width, f.size.height]
+                })
+            }),
             "nonactivating_panel": window.styleMask().contains(NSWindowStyleMask::NonactivatingPanel),
             "collection_behavior": window.collectionBehavior().bits(),
             "level": window.level(),
