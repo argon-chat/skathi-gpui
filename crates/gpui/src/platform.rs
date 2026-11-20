@@ -1313,6 +1313,10 @@ pub enum HapticPattern {
     InkContinuous,
     /// A pencil texture for a contacting pen.
     PencilContinuous,
+    /// A brush texture for a contacting pen.
+    BrushContinuous,
+    /// An eraser texture for a contacting pen.
+    EraserContinuous,
 }
 
 impl HapticPattern {
@@ -1331,11 +1335,19 @@ impl HapticPattern {
         ("grow", Self::Grow),
         ("ink-continuous", Self::InkContinuous),
         ("pencil-continuous", Self::PencilContinuous),
+        ("brush-continuous", Self::BrushContinuous),
+        ("eraser-continuous", Self::EraserContinuous),
     ];
 
     /// Whether the effect follows a pen stroke until it stops.
     pub fn is_continuous(self) -> bool {
-        matches!(self, Self::InkContinuous | Self::PencilContinuous)
+        matches!(
+            self,
+            Self::InkContinuous
+                | Self::PencilContinuous
+                | Self::BrushContinuous
+                | Self::EraserContinuous
+        )
     }
 }
 
@@ -1597,6 +1609,17 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     }
     fn vn_haptic_patterns(&self, _target: HapticTarget) -> Vec<HapticPattern> {
         Vec::new()
+    }
+    fn vn_prepare_haptic_pulse(&self, _target: HapticTarget) -> Option<Box<dyn Fn(f32) -> bool>> {
+        None
+    }
+    fn vn_haptic_at_strength(
+        &self,
+        patterns: &[HapticPattern],
+        target: HapticTarget,
+        strength: f32,
+    ) -> bool {
+        strength > 0.0 && strength <= 1.0 && self.vn_perform_first_haptic(patterns, target, false)
     }
     fn vn_perform_first_haptic(
         &self,

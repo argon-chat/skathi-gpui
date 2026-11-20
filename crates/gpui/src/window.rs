@@ -3756,6 +3756,26 @@ impl Window {
     }
 
     /// Submit the first available exact pattern to this device.
+    /// On fixed-strength hardware the device supplies its usual intensity.
+    pub fn vn_haptic_at_strength(
+        &self,
+        patterns: &[crate::HapticPattern],
+        target: crate::HapticTarget,
+        strength: f32,
+    ) -> bool {
+        self.platform_window
+            .vn_haptic_at_strength(patterns, target, strength)
+    }
+
+    /// Capture this device's discrete pulse for the lifetime of a timed sequence.
+    pub fn vn_prepare_haptic_pulse(
+        &self,
+        target: crate::HapticTarget,
+    ) -> Option<Box<dyn Fn(f32) -> bool>> {
+        self.platform_window.vn_prepare_haptic_pulse(target)
+    }
+
+    /// Submit the first available exact pattern to this device.
     pub fn vn_perform_first_haptic(
         &mut self,
         patterns: &[crate::HapticPattern],

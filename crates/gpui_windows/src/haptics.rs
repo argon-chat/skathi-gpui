@@ -10,6 +10,7 @@ struct Effect {
     controller: Controller,
     feedback: Feedback,
     continuous: bool,
+    strength: Option<f32>,
 }
 
 #[derive(Default)]
@@ -119,6 +120,28 @@ impl WindowHaptics {
         target: HapticTarget,
         deferred: bool,
     ) -> bool {
+        self.perform_at(patterns, target, deferred, None)
+    }
+
+    pub(crate) fn prepare_pulse(&self, target: HapticTarget) -> Option<Box<dyn Fn(f32) -> bool>> {
+        let (pen, controller) = self.controller(target)?;
+        let waves = advertised(&controller);
+        let wave = feedback_for(HapticPattern::Generic, pen.is_some(), &waves)?.clone();
+        Some(Box::new(move |strength| {
+            send(&controller, &wave, Some(strength))
+        }))
+    }
+
+    pub(crate) fn perform_at(
+        &mut self,
+        patterns: &[HapticPattern],
+        target: HapticTarget,
+        deferred: bool,
+        strength: Option<f32>,
+    ) -> bool {
+        if strength.is_some_and(|v| !(v > 0.0 && v <= 1.0)) {
+            return false;
+        }
         let Some((pen, controller)) = self.controller(target) else {
             return false;
         };
@@ -136,6 +159,7 @@ impl WindowHaptics {
             controller,
             feedback,
             continuous,
+            strength,
         };
         if deferred {
             if pen.is_some() {
@@ -150,11 +174,7 @@ impl WindowHaptics {
     }
 
     fn play(&mut self, effect: Effect) -> bool {
-        if effect
-            .controller
-            .SendHapticFeedback(&effect.feedback)
-            .is_err()
-        {
+        if !send(&effect.controller, &effect.feedback, effect.strength) {
             return false;
         }
         if effect.continuous {
@@ -193,6 +213,16 @@ impl WindowHaptics {
     }
 }
 
+fn send(controller: &Controller, feedback: &Feedback, strength: Option<f32>) -> bool {
+    match strength {
+        Some(v) if !(v > 0.0 && v <= 1.0) => false,
+        Some(v) if controller.IsIntensitySupported().unwrap_or(false) => controller
+            .SendHapticFeedbackWithIntensity(feedback, f64::from(v))
+            .is_ok(),
+        _ => controller.SendHapticFeedback(feedback).is_ok(),
+    }
+}
+
 fn advertised(controller: &Controller) -> Vec<(u16, Feedback)> {
     let Ok(feedbacks) = controller.SupportedFeedback() else {
         return Vec::new();
@@ -218,6 +248,8 @@ fn feedback_for<T>(pattern: HapticPattern, pen: bool, feedbacks: &[(u16, T)]) ->
         Error => &[0x100a],
         InkContinuous => &[0x100b],
         PencilContinuous => &[0x100c],
+        BrushContinuous => &[0x100f],
+        EraserContinuous => &[0x1010],
         Collide => &[0x1012],
         Alignment => &[0x1013],
         LevelChange => &[0x1014],
@@ -341,6 +373,16 @@ mod tests {
             Some(&InkContinuous)
         );
         assert_eq!(feedback_for(PencilContinuous, true, &pen), None);
+        assert_eq!(feedback_for(BrushContinuous, true, &pen), None);
+        let textures = [(0x100f, BrushContinuous), (0x1010, EraserContinuous)];
+        assert_eq!(
+            feedback_for(BrushContinuous, true, &textures),
+            Some(&BrushContinuous)
+        );
+        assert_eq!(
+            feedback_for(EraserContinuous, true, &textures),
+            Some(&EraserContinuous)
+        );
     }
 
     #[test]

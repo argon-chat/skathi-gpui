@@ -2408,6 +2408,30 @@ impl PlatformWindow for MacWindow {
         target != gpui::HapticTarget::Pen && crate::events::HAS_FORCE_TOUCH.get()
     }
 
+    fn vn_prepare_haptic_pulse(
+        &self,
+        target: gpui::HapticTarget,
+    ) -> Option<Box<dyn Fn(f32) -> bool>> {
+        use objc2_app_kit::{
+            NSHapticFeedbackManager, NSHapticFeedbackPattern, NSHapticFeedbackPerformanceTime,
+            NSHapticFeedbackPerformer,
+        };
+        if !self.vn_haptics_supported(target) {
+            return None;
+        }
+        let performer = NSHapticFeedbackManager::defaultPerformer();
+        Some(Box::new(move |strength| {
+            if !(strength > 0.0 && strength <= 1.0) {
+                return false;
+            }
+            performer.performFeedbackPattern_performanceTime(
+                NSHapticFeedbackPattern::Generic,
+                NSHapticFeedbackPerformanceTime::Now,
+            );
+            true
+        }))
+    }
+
     fn vn_haptic_patterns(&self, target: gpui::HapticTarget) -> Vec<gpui::HapticPattern> {
         if !self.vn_haptics_supported(target) {
             return Vec::new();

@@ -1139,6 +1139,22 @@ impl PlatformWindow for WindowsWindow {
         self.state.haptics.borrow().patterns(target)
     }
 
+    fn vn_prepare_haptic_pulse(&self, target: HapticTarget) -> Option<Box<dyn Fn(f32) -> bool>> {
+        self.state.haptics.borrow().prepare_pulse(target)
+    }
+
+    fn vn_haptic_at_strength(
+        &self,
+        patterns: &[HapticPattern],
+        target: HapticTarget,
+        strength: f32,
+    ) -> bool {
+        self.state
+            .haptics
+            .borrow_mut()
+            .perform_at(patterns, target, false, Some(strength))
+    }
+
     fn vn_perform_first_haptic(
         &self,
         patterns: &[HapticPattern],
