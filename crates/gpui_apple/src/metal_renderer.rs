@@ -586,6 +586,7 @@ impl MetalRenderer {
     /// Record whether a `CAMetalDisplayLink` drives the layer. While one
     /// does, frames are drawn only into the drawables it hands out.
     pub fn set_display_link_attached(&mut self, attached: bool) {
+        self.frame_target = None;
         self.display_link_mode = if attached {
             DisplayLinkMode::Attached { drawable: None }
         } else {
@@ -2673,7 +2674,9 @@ mod tests {
         assert!(renderer.set_frame_drawable(None).is_some());
 
         renderer.set_frame_drawable(Some(drawable));
+        renderer.set_frame_target(123.);
         renderer.set_display_link_attached(false);
+        assert_eq!(renderer.frame_target, None);
         assert!(matches!(
             renderer.display_link_mode,
             DisplayLinkMode::Detached

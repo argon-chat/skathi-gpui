@@ -1728,6 +1728,7 @@ impl VnEffectPointer {
 pub struct Window {
     pub(crate) handle: AnyWindowHandle,
     pub(crate) invalidator: WindowInvalidator,
+    surface_frame_waker: Option<crate::SurfaceFrameWaker>,
     pub(crate) removed: bool,
     pub(crate) platform_window: Box<dyn PlatformWindow>,
     pub(crate) display_id: Option<DisplayId>,
@@ -2794,6 +2795,10 @@ impl Window {
             }
         }));
         invalidator.set_platform_waker(platform_window.frame_waker());
+        let surface_frame_waker = platform_window.surface_frame_waker(Box::new({
+            let invalidator = invalidator.clone();
+            move || invalidator.set_dirty(true)
+        }));
         platform_window.on_visual_viewport_changed(Box::new({
             let mut cx = cx.to_async();
             move || {
@@ -3054,6 +3059,7 @@ impl Window {
         Ok(Window {
             handle,
             invalidator,
+            surface_frame_waker,
             removed: false,
             platform_window,
             display_id,
@@ -3525,6 +3531,11 @@ impl Window {
     /// Obtain a handle to the window that belongs to this context.
     pub fn window_handle(&self) -> AnyWindowHandle {
         self.handle
+    }
+
+    /// Wakes this window from a producer thread when a surface frame is ready.
+    pub fn surface_frame_waker(&self) -> Option<crate::SurfaceFrameWaker> {
+        self.surface_frame_waker.clone()
     }
 
     /// Mark the window as dirty, scheduling it to be redrawn on the next frame.

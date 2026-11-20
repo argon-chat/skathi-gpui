@@ -77,8 +77,7 @@ use std::{
 
 const WINDOW_STATE_IVAR: &CStr = c"windowState";
 
-mod timer_frames;
-use timer_frames::TimerFrames;
+mod surface_pacing;
 
 static RESTORES_WORKSPACE_AT_LAUNCH_DEFAULT: Once = Once::new();
 
@@ -658,7 +657,6 @@ unsafe fn apply_simple_fullscreen_plan(
 /// What paces a window's frames. The choice depends only on the OS version,
 /// so it is made once per window.
 enum FrameSource {
-    Timer(Rc<TimerFrames>),
     /// macOS 14+: a `CAMetalDisplayLink` that hands out each frame's drawable.
     Metal(Rc<MetalFrames>),
     /// Earlier systems: the shared `CVDisplayLink` registry, joined on first start.
@@ -681,6 +679,8 @@ struct MacWindowState {
     pointer_locked: bool,
     pointer_motion: Option<Point<Pixels>>,
     frame_source: FrameSource,
+    surface_waker: Option<gpui::SurfaceFrameWaker>,
+    surface_invalidator: Option<Box<dyn Fn()>>,
     draws_while_occluded: bool,
     // A `CAMetalDisplayLink` stops with its window covered: a covered window
     // that keeps drawing is paced by the `CVDisplayLink` registry instead.
@@ -923,16 +923,11 @@ impl MacWindowState {
         let fps = unsafe { screen.as_ref() }
             .map(|screen| unsafe { msg_send![screen, maximumFramesPerSecond] })
             .filter(|fps: &isize| *fps > 0);
-        let interval = Duration::from_secs_f64(1.0 / fps.unwrap_or(60) as f64);
-        if fps.is_some() || matches!(self.frame_source, FrameSource::Timer(_)) {
-            self.renderer.set_refresh_interval(interval);
+        if let Some(fps) = fps {
+            self.renderer.set_refresh_interval(Duration::from_secs_f64(1.0 / fps as f64));
         }
         let covered = !self.on_screen();
         match &mut self.frame_source {
-            FrameSource::Timer(timer) => {
-                timer.start(interval);
-                schedule_timer_frame(timer, &Rc::downgrade(window_state), &self.foreground_executor);
-            }
             FrameSource::Metal(_) if covered => {
                 let screen: *mut AnyObject = unsafe { msg_send![self.native_window, screen] };
                 let Some(display_id) = display_id_for_screen(screen) else {
@@ -981,7 +976,6 @@ impl MacWindowState {
             frame_source.stop();
         }
         match &mut self.frame_source {
-            FrameSource::Timer(timer) => timer.stop(),
             FrameSource::Metal(metal_frames) => {
                 if metal_frames.is_attached() {
                     // Detach the link rather than pause it, so that a synchronous
@@ -1223,8 +1217,7 @@ impl MacWindow {
             let native_view: *mut AnyObject = msg_send![native_view, initWithFrame: content_bounds];
             assert!(!native_view.is_null());
 
-            let metal_frames = (!low_latency_surface && MetalFrameSource::is_available())
-                .then(Rc::<MetalFrames>::default);
+            let metal_frames = MetalFrameSource::is_available().then(Rc::<MetalFrames>::default);
             let (foreground, background) =
                 (foreground_executor.clone(), background_executor.clone());
             let state = Rc::new(Mutex::new(MacWindowState {
@@ -1241,10 +1234,11 @@ impl MacWindow {
                 pointer_locked: false,
                 pointer_motion: None,
                 frame_source: match &metal_frames {
-                    _ if low_latency_surface => FrameSource::Timer(Rc::default()),
                     Some(metal_frames) => FrameSource::Metal(metal_frames.clone()),
                     None => FrameSource::DisplayLink(None),
                 },
+                surface_waker: None,
+                surface_invalidator: None,
                 draws_while_occluded: false,
                 occluded_frames: None,
                 renderer,
@@ -1309,6 +1303,10 @@ impl MacWindow {
                         .detach();
                 });
             }
+            if low_latency_surface {
+                let waker = surface_pacing::listen(&state);
+                state.lock().surface_waker = Some(waker);
+            }
             let initial = state.lock();
             let wake: Option<Rc<dyn Fn()>> = match &initial.frame_source {
                 FrameSource::Metal(frames) => {
@@ -1318,12 +1316,6 @@ impl MacWindow {
                             frames.wake();
                         }
                     }))
-                }
-                FrameSource::Timer(timer) => {
-                    let timer = Rc::clone(timer);
-                    let weak = Rc::downgrade(&state);
-                    let executor = initial.foreground_executor.clone();
-                    Some(Rc::new(move || schedule_timer_frame(&timer, &weak, &executor)))
                 }
                 FrameSource::DisplayLink(_) => None,
             };
@@ -1575,7 +1567,6 @@ impl Drop for MacWindow {
         let window = this.native_window;
         let sheet_parent = this.sheet_parent.take();
         match &mut this.frame_source {
-            FrameSource::Timer(timer) => timer.stop(),
             FrameSource::Metal(metal_frames) => metal_frames.replace(None),
             FrameSource::DisplayLink(frame_source) => drop(frame_source.take()),
         }
@@ -2650,12 +2641,7 @@ impl PlatformWindow for MacWindow {
     }
 
     fn draw(&self, scene: &gpui::Scene) {
-        let mut this = self.0.lock();
-        this.renderer.draw(scene);
-        if let FrameSource::Timer(timer) = &this.frame_source {
-            // Give passive callbacks and presentation feedback one tick after this draw.
-            schedule_timer_frame(timer, &Rc::downgrade(&self.0), &this.foreground_executor);
-        }
+        self.0.lock().renderer.draw(scene);
     }
 
     // GPUI calls this without waking the frame waker when a window only needs
@@ -2668,6 +2654,13 @@ impl PlatformWindow for MacWindow {
 
     fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
         self.2.clone()
+    }
+
+    fn surface_frame_waker(&self, mark_dirty: Box<dyn Fn()>) -> Option<gpui::SurfaceFrameWaker> {
+        let mut state = self.0.lock();
+        let waker = state.surface_waker.clone()?;
+        state.surface_invalidator = Some(mark_dirty);
+        Some(waker)
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
@@ -2751,8 +2744,8 @@ impl PlatformWindow for MacWindow {
             "screen_display_id": display_id_for_screen(screen),
             "frame": [frame.origin.x, frame.origin.y, frame.size.width, frame.size.height],
             "backing_scale_factor": window.backingScaleFactor(),
+            "low_latency_surface": state.surface_waker.is_some(),
             "frame_source": match &state.frame_source {
-                FrameSource::Timer(timer) => timer.debug_state(),
                 FrameSource::Metal(metal_frames) => metal_frames.debug_state(),
                 FrameSource::DisplayLink(Some(frame_source)) => frame_source.debug_state(),
                 FrameSource::DisplayLink(None) => serde_json::json!({
@@ -4316,41 +4309,6 @@ extern "C" fn step(view: *mut c_void) {
 
 const METAL_LINK_STALL: Duration = Duration::from_millis(500);
 
-fn schedule_timer_frame(
-    timer: &Rc<TimerFrames>,
-    window: &Weak<Mutex<MacWindowState>>,
-    executor: &ForegroundExecutor,
-) {
-    let Some((generation, delay)) = timer.next(std::time::Instant::now()) else {
-        return;
-    };
-    let timer = timer.clone();
-    let window = window.clone();
-    let alarm = (!delay.is_zero()).then(|| executor.scheduler_executor().timer(delay));
-    executor
-        .spawn(async move {
-            if let Some(alarm) = alarm {
-                alarm.await;
-            }
-            if !timer.fire(generation, std::time::Instant::now()) {
-                return;
-            }
-            let Some(window) = window.upgrade() else {
-                return;
-            };
-            let callback = window.lock().request_frame_callback.take();
-            if let Some(mut callback) = callback {
-                callback(RequestFrameOptions {
-                    signal_at: PlatformFrameSignal::capture(scheduler::Instant::now),
-                    signal_source: FrameRequestSource::LocalSchedule,
-                    ..Default::default()
-                });
-                window.lock().request_frame_callback = Some(callback);
-            }
-        })
-        .detach();
-}
-
 fn leave_stalled_metal_link(window_state: &Rc<Mutex<MacWindowState>>, updates: u64) {
     let mut lock = window_state.lock();
     let FrameSource::Metal(metal_frames) = &lock.frame_source else {
@@ -4378,6 +4336,11 @@ fn metal_frame(
         return;
     };
     let metal_frames = metal_frames.clone();
+    if lock.surface_waker.is_some() {
+        log::trace!(target: "gpui_macos::surface_pacing", "{} window={} display_link target_ns={}",
+            surface_pacing::host_ns(), lock.handle.window_id().as_u64(),
+            (update.targetPresentationTimestamp() * 1e9) as u64);
+    }
     metal_frames.note_update();
     let Some(mut callback) = lock.request_frame_callback.take() else {
         return;

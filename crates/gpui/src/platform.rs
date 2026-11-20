@@ -1492,6 +1492,10 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
         None
     }
+    /// Signals a ready frame from an embedded surface's producer thread.
+    fn surface_frame_waker(&self, _mark_dirty: Box<dyn Fn()>) -> Option<SurfaceFrameWaker> {
+        None
+    }
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>);
     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> DispatchEventResult>);
     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>);
@@ -1806,6 +1810,9 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
         false
     }
 }
+
+/// A thread-safe notification that a new surface frame is ready to draw.
+pub type SurfaceFrameWaker = Arc<dyn Fn() + Send + Sync>;
 
 /// vue-native fork: why [`PlatformWindow::lock_pointer`] did not lock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3368,7 +3375,7 @@ pub struct WindowOptions {
     /// Whether to render the window using the Display P3 color space on macOS.
     pub use_display_p3: bool,
 
-    /// Uses a demand-driven local timer for low-latency presentation on macOS.
+    /// Draws isolated surface frames immediately while the display link paces playback on macOS.
     pub low_latency_surface: bool,
 }
 
