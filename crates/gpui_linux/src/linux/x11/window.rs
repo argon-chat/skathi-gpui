@@ -19,7 +19,7 @@ use x11rb::{
     connection::Connection,
     cookie::{Cookie, VoidCookie},
     errors::ConnectionError,
-    properties::{WmHints, WmSizeHints},
+    properties::{AspectRatio, WmHints, WmSizeHints},
     protocol::{
         sync,
         xinput::{self, ConnectionExt as _},
@@ -88,6 +88,26 @@ x11rb::atom_manager! {
         _GTK_FRAME_EXTENTS,
         _GTK_EDGE_CONSTRAINTS,
         _NET_CLIENT_LIST_STACKING,
+    }
+}
+
+// ICCCM takes integer bounds. Rounding both to one side of 16:9 makes 352×198 an illegal size.
+fn aspect_hints(ratio: f32) -> (AspectRatio, AspectRatio) {
+    const DENOM: i32 = 10_000;
+    let scaled = (f64::from(ratio) * f64::from(DENOM)).clamp(1., f64::from(i32::MAX));
+    (
+        AspectRatio::new(scaled.floor() as i32, DENOM),
+        AspectRatio::new(scaled.ceil() as i32, DENOM),
+    )
+}
+
+#[test]
+fn aspect_hints_accept_windows_with_the_requested_ratio() {
+    for (w, h) in [(352, 198), (480, 640), (800, 600), (300, 300)] {
+        let (min, max) = aspect_hints(w as f32 / h as f32);
+        assert!(w * min.denominator >= h * min.numerator);
+        assert!(w * max.denominator <= h * max.numerator);
+        assert!(max.numerator - min.numerator <= 1);
     }
 }
 
@@ -1957,11 +1977,7 @@ impl PlatformWindow for X11Window {
         hints.max_size = Some(limits.max.map_or((cap, cap), |s| {
             (scaled(s.width).max(mw), scaled(s.height).max(mh))
         }));
-        hints.aspect = limits.aspect.map(|ratio| {
-            let aspect =
-                x11rb::properties::AspectRatio::new((ratio * 10000.).round().max(1.) as i32, 10000);
-            (aspect, aspect)
-        });
+        hints.aspect = limits.aspect.map(aspect_hints);
         check_reply(
             || "X11 window size constraints",
             hints.set_normal_hints(&*self.0.xcb, self.0.x_window),

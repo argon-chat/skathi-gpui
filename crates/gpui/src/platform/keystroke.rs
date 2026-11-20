@@ -470,6 +470,7 @@ fn is_printable_key(key: &str) -> bool {
             | "end"
             | "back"
             | "forward"
+            | "menu"
             | "escape"
     )
 }
