@@ -2408,6 +2408,16 @@ impl PlatformWindow for MacWindow {
         target != gpui::HapticTarget::Pen && crate::events::HAS_FORCE_TOUCH.get()
     }
 
+    fn vn_haptic_patterns(&self, target: gpui::HapticTarget) -> Vec<gpui::HapticPattern> {
+        if !self.vn_haptics_supported(target) {
+            return Vec::new();
+        }
+        gpui::HapticPattern::NAMED
+            .iter()
+            .filter_map(|&(_, p)| trackpad_pattern(p).map(|_| p))
+            .collect()
+    }
+
     fn vn_perform_haptic(
         &self,
         pattern: gpui::HapticPattern,
@@ -4961,6 +4971,8 @@ mod tests {
         assert_eq!(trackpad_pattern(Generic), Some(Pattern::Generic));
         assert_eq!(trackpad_pattern(Alignment), Some(Pattern::Alignment));
         assert_eq!(trackpad_pattern(LevelChange), Some(Pattern::LevelChange));
+        assert_eq!(trackpad_pattern(Hover), None);
+        assert_eq!(trackpad_pattern(Success), None);
         assert_eq!(trackpad_pattern(InkContinuous), None);
         assert_eq!(trackpad_pattern(PencilContinuous), None);
     }

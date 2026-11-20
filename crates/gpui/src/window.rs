@@ -3750,6 +3750,24 @@ impl Window {
         self.platform_window.vn_haptics_supported(target)
     }
 
+    /// Patterns this device implements directly, without playing feedback.
+    pub fn vn_haptic_patterns(&self, target: crate::HapticTarget) -> Vec<crate::HapticPattern> {
+        self.platform_window.vn_haptic_patterns(target)
+    }
+
+    /// Submit the first available exact pattern to this device.
+    pub fn vn_perform_first_haptic(
+        &mut self,
+        patterns: &[crate::HapticPattern],
+        target: crate::HapticTarget,
+        after_present: bool,
+    ) -> bool {
+        let accepted =
+            self.platform_window
+                .vn_perform_first_haptic(patterns, target, after_present);
+        self.finish_haptic_request(accepted, after_present)
+    }
+
     /// Submit an effect, optionally synchronized with the next window frame.
     pub fn vn_perform_haptic(
         &mut self,
@@ -3760,6 +3778,10 @@ impl Window {
         let accepted = self
             .platform_window
             .vn_perform_haptic(pattern, target, after_present);
+        self.finish_haptic_request(accepted, after_present)
+    }
+
+    fn finish_haptic_request(&mut self, accepted: bool, after_present: bool) -> bool {
         if accepted && after_present {
             self.refresh();
         }

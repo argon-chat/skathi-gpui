@@ -2,10 +2,7 @@
 //! selected controller with a queued effect so a later input cannot redirect it.
 use gpui::{HapticPattern, HapticTarget};
 use windows::Devices::{
-    Haptics::{
-        KnownSimpleHapticsControllerWaveforms as Waves, SimpleHapticsController as Controller,
-        SimpleHapticsControllerFeedback as Feedback,
-    },
+    Haptics::{SimpleHapticsController as Controller, SimpleHapticsControllerFeedback as Feedback},
     Input::PenDevice,
 };
 
@@ -85,27 +82,53 @@ impl WindowHaptics {
         })
     }
 
+    pub(crate) fn patterns(&self, target: HapticTarget) -> Vec<HapticPattern> {
+        let Some((pen, controller)) = self.controller(target) else {
+            return Vec::new();
+        };
+        let feedbacks = advertised(&controller);
+        HapticPattern::NAMED
+            .iter()
+            .map(|&(_, p)| p)
+            .filter(|p| {
+                (!p.is_continuous() || target == HapticTarget::Pen)
+                    && feedback_for(*p, pen.is_some(), &feedbacks).is_some()
+            })
+            .collect()
+    }
+
     pub(crate) fn perform(
         &mut self,
         pattern: HapticPattern,
         target: HapticTarget,
         deferred: bool,
     ) -> bool {
-        let continuous = pattern.is_continuous();
-        if continuous && (target != HapticTarget::Pen || !self.pen.is_some_and(|p| p.1)) {
-            return false;
-        }
+        use HapticPattern::*;
+        let candidates: &[HapticPattern] = match pattern {
+            Alignment => &[Alignment, Generic],
+            LevelChange => &[LevelChange, Press, Generic],
+            PencilContinuous => &[PencilContinuous, InkContinuous],
+            _ => std::slice::from_ref(&pattern),
+        };
+        self.perform_first(candidates, target, deferred)
+    }
+
+    pub(crate) fn perform_first(
+        &mut self,
+        patterns: &[HapticPattern],
+        target: HapticTarget,
+        deferred: bool,
+    ) -> bool {
         let Some((pen, controller)) = self.controller(target) else {
             return false;
         };
-        let Ok(feedbacks) = controller.SupportedFeedback() else {
-            return false;
-        };
-        let Some(feedback) = waveforms(pattern, pen.is_some()).find_map(|wave| {
-            feedbacks
-                .clone()
-                .into_iter()
-                .find(|f| f.Waveform().ok() == Some(wave))
+        let feedbacks = advertised(&controller);
+        let can_draw = target == HapticTarget::Pen && self.pen.is_some_and(|p| p.1);
+        let Some((feedback, continuous)) = patterns.iter().find_map(|&p| {
+            if p.is_continuous() && !can_draw {
+                return None;
+            }
+            feedback_for(p, pen.is_some(), &feedbacks).map(|f| (f.clone(), p.is_continuous()))
         }) else {
             return false;
         };
@@ -170,30 +193,46 @@ impl WindowHaptics {
     }
 }
 
-fn waveforms(pattern: HapticPattern, pen: bool) -> impl Iterator<Item = u16> {
-    let preferred = match pattern {
-        HapticPattern::Generic => [None, None],
-        HapticPattern::Alignment => [manager::detent(true), None],
-        HapticPattern::LevelChange => [manager::detent(false), Waves::Press().ok()],
-        HapticPattern::InkContinuous => [Waves::InkContinuous().ok(), None],
-        HapticPattern::PencilContinuous => {
-            [Waves::PencilContinuous().ok(), Waves::InkContinuous().ok()]
-        }
+fn advertised(controller: &Controller) -> Vec<(u16, Feedback)> {
+    let Ok(feedbacks) = controller.SupportedFeedback() else {
+        return Vec::new();
     };
-    // Windows defaults to Hover on mice and touchpads, and Click on pens.
-    let fallback = match (pattern.is_continuous(), pen) {
-        (true, _) => [None, None],
-        (false, true) => [Waves::Click().ok(), None],
-        (false, false) => [Waves::Hover().ok(), Waves::Click().ok()],
+    feedbacks
+        .into_iter()
+        .filter_map(|f| Some((f.Waveform().ok()?, f)))
+        .collect()
+}
+
+fn feedback_for<T>(pattern: HapticPattern, pen: bool, feedbacks: &[(u16, T)]) -> Option<&T> {
+    use HapticPattern::*;
+    // SimpleHapticsControllerFeedback.Waveform is a USB HID Haptics-page usage.
+    const HOVER: u16 = 0x1008;
+    const CLICK: u16 = 0x1003;
+    let waves: &[u16] = match pattern {
+        Generic if !pen => &[HOVER, CLICK],
+        Generic | Click => &[CLICK],
+        Hover => &[HOVER],
+        Press => &[0x1006],
+        Release => &[0x1007],
+        Success => &[0x1009],
+        Error => &[0x100a],
+        InkContinuous => &[0x100b],
+        PencilContinuous => &[0x100c],
+        Collide => &[0x1012],
+        Alignment => &[0x1013],
+        LevelChange => &[0x1014],
+        Grow => &[0x1015],
     };
-    preferred.into_iter().chain(fallback).flatten()
+    waves
+        .iter()
+        .find_map(|wave| feedbacks.iter().find(|(id, _)| id == wave).map(|(_, f)| f))
 }
 
 // windows-rs 0.62 predates the desktop haptics interfaces. These are the
 // vtable prefixes from Windows.Devices.Haptics.winmd (UniversalApiContract 19).
 // Activation and QueryInterface keep earlier versions of Windows loadable.
 mod manager {
-    use super::{Controller, Waves};
+    use super::Controller;
     use core::ffi::c_void;
     use windows_core::{HRESULT, IInspectable_Vtbl, Interface, RuntimeName, factory};
 
@@ -209,7 +248,6 @@ mod manager {
 
     type ObjectGetter = unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT;
     type BoolGetter = unsafe extern "system" fn(*mut c_void, *mut bool) -> HRESULT;
-    type WaveGetter = unsafe extern "system" fn(*mut c_void, *mut u16) -> HRESULT;
 
     windows_core::imp::define_interface!(
         Statics,
@@ -235,19 +273,6 @@ mod manager {
         thread_id: usize,
         device_type: unsafe extern "system" fn(*mut c_void, *mut i32) -> HRESULT,
         controller: ObjectGetter,
-    }
-
-    windows_core::imp::define_interface!(
-        Detents,
-        DetentsVtbl,
-        0xae480ce4_4ab6_5b2f_ad0b_cb52f37d45fb
-    );
-    #[repr(C)]
-    pub struct DetentsVtbl {
-        base: IInspectable_Vtbl,
-        collide: usize,
-        align: WaveGetter,
-        step: WaveGetter,
     }
 
     /// `get` must be this owner's WinRT getter for an owned interface of type `I`.
@@ -284,20 +309,6 @@ mod manager {
             Some((device, object(&manager, manager.vtable().controller)?))
         }
     }
-
-    pub(super) fn detent(alignment: bool) -> Option<u16> {
-        let api = factory::<Waves, Detents>().ok()?;
-        let mut wave = 0;
-        unsafe {
-            let get = if alignment {
-                api.vtable().align
-            } else {
-                api.vtable().step
-            };
-            get(api.as_raw(), &mut wave).ok().ok()?;
-        }
-        Some(wave)
-    }
 }
 
 #[cfg(test)]
@@ -305,30 +316,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mouse_and_touchpad_pulses_work_without_click() {
-        let hover = Waves::Hover().unwrap();
-        let click = Waves::Click().unwrap();
-        assert!(waveforms(HapticPattern::Generic, false).eq([hover, click]));
-        for pattern in [HapticPattern::Alignment, HapticPattern::LevelChange] {
-            assert_eq!(
-                waveforms(pattern, false).find(|&id| id == hover),
-                Some(hover)
-            );
-        }
+    fn capabilities_and_strict_fallback_use_the_advertised_mouse_waveforms() {
+        use HapticPattern::*;
+        let mouse = [(0x1013, Alignment), (0x1008, Hover), (0x1009, Success)];
+        assert_eq!(feedback_for(Generic, false, &mouse), Some(&Hover));
+        assert_eq!(feedback_for(Click, false, &mouse), None);
+        assert_eq!(feedback_for(Alignment, false, &mouse), Some(&Alignment));
+        assert_eq!(
+            [Click, Success, Generic]
+                .into_iter()
+                .find_map(|p| feedback_for(p, false, &mouse)),
+            Some(&Success)
+        );
+        assert_eq!(feedback_for(Press, false, &mouse), None);
     }
 
     #[test]
     fn pens_use_click_and_keep_continuous_feedback_on_stroke_waveforms() {
-        let click = Waves::Click().unwrap();
-        assert!(waveforms(HapticPattern::Generic, true).eq([click]));
+        use HapticPattern::*;
+        let pen = [(0x1003, Click), (0x100b, InkContinuous), (0x1008, Hover)];
+        assert_eq!(feedback_for(Generic, true, &pen), Some(&Click));
         assert_eq!(
-            waveforms(HapticPattern::Alignment, true).last(),
-            Some(click)
+            feedback_for(InkContinuous, true, &pen),
+            Some(&InkContinuous)
         );
-        assert!(waveforms(HapticPattern::PencilContinuous, true).eq([
-            Waves::PencilContinuous().unwrap(),
-            Waves::InkContinuous().unwrap()
-        ]));
+        assert_eq!(feedback_for(PencilContinuous, true, &pen), None);
     }
 
     #[test]

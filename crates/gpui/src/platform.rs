@@ -1293,6 +1293,22 @@ pub enum HapticPattern {
     Alignment,
     /// A discrete change in a control's value.
     LevelChange,
+    /// A light pulse when entering a target.
+    Hover,
+    /// A physical click waveform.
+    Click,
+    /// The start of a press.
+    Press,
+    /// The end of a press.
+    Release,
+    /// A successful action.
+    Success,
+    /// A rejected action.
+    Error,
+    /// Contact with a boundary.
+    Collide,
+    /// An expanding or transitioning control.
+    Grow,
     /// Continuous pen-tip feedback during an ink stroke.
     InkContinuous,
     /// A pencil texture for a contacting pen.
@@ -1300,6 +1316,23 @@ pub enum HapticPattern {
 }
 
 impl HapticPattern {
+    /// Names shared by device discovery and the application binding.
+    pub const NAMED: &'static [(&'static str, Self)] = &[
+        ("generic", Self::Generic),
+        ("alignment", Self::Alignment),
+        ("level-change", Self::LevelChange),
+        ("hover", Self::Hover),
+        ("click", Self::Click),
+        ("press", Self::Press),
+        ("release", Self::Release),
+        ("success", Self::Success),
+        ("error", Self::Error),
+        ("collide", Self::Collide),
+        ("grow", Self::Grow),
+        ("ink-continuous", Self::InkContinuous),
+        ("pencil-continuous", Self::PencilContinuous),
+    ];
+
     /// Whether the effect follows a pen stroke until it stops.
     pub fn is_continuous(self) -> bool {
         matches!(self, Self::InkContinuous | Self::PencilContinuous)
@@ -1561,6 +1594,21 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn vn_set_size_constraints(&self, _constraints: WindowSizeConstraints) {}
     fn vn_haptics_supported(&self, _target: HapticTarget) -> bool {
         false
+    }
+    fn vn_haptic_patterns(&self, _target: HapticTarget) -> Vec<HapticPattern> {
+        Vec::new()
+    }
+    fn vn_perform_first_haptic(
+        &self,
+        patterns: &[HapticPattern],
+        target: HapticTarget,
+        after_present: bool,
+    ) -> bool {
+        let available = self.vn_haptic_patterns(target);
+        patterns
+            .iter()
+            .find(|p| available.contains(p))
+            .is_some_and(|&p| self.vn_perform_haptic(p, target, after_present))
     }
     fn vn_perform_haptic(
         &self,

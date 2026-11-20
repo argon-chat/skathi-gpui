@@ -1135,6 +1135,22 @@ impl PlatformWindow for WindowsWindow {
         self.state.haptics.borrow().supported(target)
     }
 
+    fn vn_haptic_patterns(&self, target: HapticTarget) -> Vec<HapticPattern> {
+        self.state.haptics.borrow().patterns(target)
+    }
+
+    fn vn_perform_first_haptic(
+        &self,
+        patterns: &[HapticPattern],
+        target: HapticTarget,
+        after_present: bool,
+    ) -> bool {
+        self.state
+            .haptics
+            .borrow_mut()
+            .perform_first(patterns, target, after_present)
+    }
+
     fn vn_perform_haptic(
         &self,
         pattern: HapticPattern,
