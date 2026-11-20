@@ -702,6 +702,7 @@ struct MacWindowState {
     input_handler: Option<PlatformInputHandler>,
     last_key_equivalent: Option<KeyDownEvent>,
     last_left_mouse_down_event: Option<Retained<AnyObject>>,
+    document_drag: Option<crate::drag_source::Session>,
     synthetic_drag_counter: usize,
     traffic_light_position: Option<Point<Pixels>>,
     native_titlebar_visible: bool,
@@ -1209,7 +1210,7 @@ impl MacWindow {
             let () = msg_send![
                 native_window,
                 registerForDraggedTypes:
-                    &*NSArray::from_slice(&[NSFilenamesPboardType, &*NSString::from_str("public.utf8-plain-text"), &*NSString::from_str("public.url")])
+                    &*NSArray::from_slice(&[NSFilenamesPboardType, &*NSString::from_str("public.file-url"), &*NSString::from_str("public.utf8-plain-text"), &*NSString::from_str("public.url"), &*NSString::from_str("public.html"), &*NSString::from_str(crate::drag_source::NATIVE_MARKER)])
             ];
             let () = msg_send![
                 native_window,
@@ -1261,6 +1262,7 @@ impl MacWindow {
                 input_handler: None,
                 last_key_equivalent: None,
                 last_left_mouse_down_event: None,
+                document_drag: None,
                 synthetic_drag_counter: 0,
                 traffic_light_position: titlebar
                     .as_ref()
@@ -2872,6 +2874,63 @@ impl PlatformWindow for MacWindow {
         }
     }
 
+    fn can_start_document_drag(&self) -> bool {
+        let state = self.0.lock();
+        state.document_drag.is_none()
+            && state.last_left_mouse_down_event.is_some()
+            && objc2_app_kit::NSEvent::pressedMouseButtons() & 1 != 0
+    }
+
+    fn start_document_drag(
+        &self,
+        data: gpui::PlatformDragData,
+        done: Box<dyn FnOnce(gpui::DropOperation)>,
+    ) -> bool {
+        if !self.can_start_document_drag() {
+            return false;
+        }
+        let mut state = self.0.lock();
+        let Some(event) = state.last_left_mouse_down_event.clone() else {
+            return false;
+        };
+        state.document_drag = Some(crate::drag_source::Session {
+            allowed: data.allowed,
+            token: data
+                .strings
+                .iter()
+                .find(|(ty, _)| ty == crate::drag_source::MARKER)
+                .map(|(_, s)| s.clone()),
+            done,
+        });
+        let owner = self.0.clone();
+        // AppKit can synchronously call the receiver. Let the original
+        // mouse callback release its App and Window borrows before entering it.
+        state.foreground_executor.spawn(async move {
+            let (view, window, scale, closed) = {
+                let state = owner.lock();
+                (state.native_view.as_ptr(), state.native_window, state.scale_factor() as f64, state.closed.load(Ordering::Acquire))
+            };
+            let started = if closed || objc2_app_kit::NSEvent::pressedMouseButtons() & 1 == 0 { false } else {
+                unsafe {
+                    let at: NSPoint = msg_send![&*event, locationInWindow];
+                    let at: NSPoint = msg_send![view, convertPoint: at, fromView: ptr::null::<AnyObject>()];
+                    let items = crate::drag_source::items(&data, at, scale);
+                    let session: *mut AnyObject = if items.is_empty() { ptr::null_mut() } else {
+                        msg_send![view, beginDraggingSessionWithItems: &*items, event: &*event, source: window]
+                    };
+                    !session.is_null()
+                }
+            };
+            if started {
+                owner.lock().synthetic_drag_counter += 1;
+            } else {
+                let source = owner.lock().document_drag.take();
+                if let Some(source) = source { (source.done)(gpui::DropOperation::None); }
+            }
+        }).detach();
+        true
+    }
+
     fn can_start_external_drag(&self) -> bool {
         true
     }
@@ -4132,7 +4191,7 @@ extern "C" fn window_should_close(this: &AnyObject, _: Sel, _: *mut AnyObject) -
 
 extern "C" fn close_window(this: &AnyObject, _: Sel) {
     unsafe {
-        let (close_callback, simple_fullscreen_state) = {
+        let (close_callback, simple_fullscreen_state, document_drag) = {
             let window_state = get_window_state(this);
             let mut lock = window_state.as_ref().lock();
             lock.closed.store(true, Ordering::Release);
@@ -4140,8 +4199,12 @@ extern "C" fn close_window(this: &AnyObject, _: Sel) {
             (
                 lock.close_callback.take(),
                 lock.simple_fullscreen_state.take(),
+                lock.document_drag.take(),
             )
         };
+        if let Some(source) = document_drag {
+            (source.done)(gpui::DropOperation::None);
+        }
 
         if simple_fullscreen_state.is_some() {
             pop_simple_fullscreen_presentation_options();
@@ -4621,12 +4684,29 @@ fn drag_offer(info: *mut AnyObject, read_strings: bool) -> gpui::DragOffer {
             for (name, mime) in [
                 ("public.utf8-plain-text", "text/plain"),
                 ("public.url", "text/uri-list"),
+                ("public.html", "text/html"),
             ] {
                 let value: *mut NSString =
                     unsafe { msg_send![board, stringForType: &*NSString::from_str(name)] };
                 if let Some(s) = unsafe { value.as_ref() } {
                     offer.strings.push((mime.into(), s.to_string()));
                 }
+            }
+        }
+    }
+    if read_strings {
+        let source: *mut AnyObject = unsafe { msg_send![info, draggingSource] };
+        if !source.is_null() && unsafe { is_gpui_window(source) } {
+            let state = unsafe { get_window_state(&*source) };
+            if let Some(token) = state
+                .lock()
+                .document_drag
+                .as_ref()
+                .and_then(|s| s.token.clone())
+            {
+                offer
+                    .strings
+                    .push((crate::drag_source::MARKER.into(), token));
             }
         }
     }
@@ -4727,11 +4807,25 @@ extern "C" fn conclude_drag_operation(this: &AnyObject, _: Sel, _: *mut AnyObjec
 }
 
 extern "C" fn dragging_session_source_operation_mask(
-    _: &AnyObject,
+    this: &AnyObject,
     _: Sel,
     _: *mut AnyObject,
     context: NSDraggingContext,
 ) -> NSDragOperation {
+    let state = unsafe { get_window_state(this) };
+    if let Some(source) = &state.lock().document_drag {
+        let mut mask = NSDragOperation::None;
+        for op in [
+            gpui::DropOperation::Copy,
+            gpui::DropOperation::Move,
+            gpui::DropOperation::Link,
+        ] {
+            if source.allowed & op as u8 != 0 {
+                mask |= native_drag_operation(op);
+            }
+        }
+        return mask;
+    }
     let operation = match context {
         NSDraggingContext::OutsideApplication => NSDragOperation::Copy,
         NSDraggingContext::WithinApplication => NSDragOperation::Copy | NSDragOperation::Move,
@@ -4756,10 +4850,14 @@ extern "C" fn dragging_session_ended(
     // SAFETY: AppKit invokes this selector on the GPUIWindow instance registered in build_classes,
     // which always has WINDOW_STATE_IVAR initialized to the owning MacWindowState.
     let window_state = unsafe { get_window_state(this) };
-    {
+    let source = {
         let mut lock = window_state.lock();
         lock.synthetic_drag_counter += 1;
         lock.last_left_mouse_down_event = None;
+        lock.document_drag.take()
+    };
+    if let Some(source) = source {
+        (source.done)(crate::drag_source::effect(operation));
     }
     send_file_drop_event(window_state, FileDropEvent::Ended, Default::default());
 }

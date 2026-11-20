@@ -9611,6 +9611,20 @@ impl Window {
         }
     }
 
+    /// Whether the current button press has a native drag serial.
+    pub fn can_start_document_drag(&self) -> bool {
+        self.platform_window.can_start_document_drag()
+    }
+
+    /// Starts a desktop drag and reports its final negotiated operation.
+    pub fn start_document_drag(
+        &self,
+        data: crate::PlatformDragData,
+        done: Box<dyn FnOnce(crate::DropOperation)>,
+    ) -> bool {
+        self.platform_window.start_document_drag(data, done)
+    }
+
     fn promote_external_drag_to_platform(&mut self, event: &PlatformInput, cx: &mut App) {
         let PlatformInput::MouseMove(mouse_move) = event else {
             return;

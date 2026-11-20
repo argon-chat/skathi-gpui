@@ -16,6 +16,7 @@ mod directx_renderer;
 mod directx12;
 mod dispatcher;
 mod display;
+mod drag_source;
 mod events;
 mod frame_pacing;
 mod haptics;

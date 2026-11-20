@@ -1,5 +1,7 @@
 mod dispatcher;
 mod display_connection;
+#[cfg(any(feature = "wayland", feature = "x11"))]
+mod drag_source;
 mod headless;
 mod keyboard;
 mod platform;

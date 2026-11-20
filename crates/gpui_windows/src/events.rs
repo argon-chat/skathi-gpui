@@ -32,6 +32,7 @@ pub(crate) const WM_GPUI_GPU_DEVICE_REMOVED: u32 = WM_USER + 8;
 /// To the platform window: no new GPU device could be made.
 pub(crate) const WM_GPUI_GPU_DEVICE_FAILED: u32 = WM_USER + 9;
 pub(crate) const WM_GPUI_DISPLAYS_CHANGED: u32 = WM_USER + 10;
+pub(crate) const WM_GPUI_DOCUMENT_DRAG: u32 = WM_USER + 11;
 
 const SIZE_MOVE_LOOP_TIMER_ID: usize = 1;
 
@@ -175,6 +176,13 @@ impl WindowsWindowInner {
             WM_SYSCOMMAND
                 if wparam.0 as u32 & 0xfff0 == SC_MAXIMIZE && !self.state.maximizable.get() =>
             {
+                Some(0)
+            }
+            WM_GPUI_DOCUMENT_DRAG => {
+                let pending = self.document_drag.take();
+                if let Some((data, done)) = pending {
+                    done(crate::drag_source::perform(data));
+                }
                 Some(0)
             }
             WM_GPUI_CURSOR_STYLE_CHANGED

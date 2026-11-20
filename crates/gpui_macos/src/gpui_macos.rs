@@ -7,6 +7,7 @@
 mod desktop_picture;
 mod display;
 mod display_link;
+mod drag_source;
 mod events;
 mod fullscreen_backdrop;
 mod keyboard;

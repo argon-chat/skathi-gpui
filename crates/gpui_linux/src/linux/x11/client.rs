@@ -1,3 +1,4 @@
+mod document_drag;
 use anyhow::{Context as _, anyhow};
 use ashpd::WindowIdentifier;
 use calloop::{
@@ -244,6 +245,8 @@ pub struct X11ClientState {
     pub(crate) clipboard: Clipboard,
     pub(crate) clipboard_item: Option<ClipboardItem>,
     pub(crate) xdnd_state: Xdnd,
+    document_drag: Option<document_drag::Session>,
+    document_increments: BTreeMap<(u32, u32), document_drag::Increment>,
 }
 
 #[derive(Clone)]
@@ -573,6 +576,8 @@ impl X11Connection {
                 clipboard,
                 clipboard_item: None,
                 xdnd_state: Xdnd::default(),
+                document_drag: None,
+                document_increments: BTreeMap::new(),
             })
         })));
         // From here on, `Drop` removes whatever was registered if a later step fails.
@@ -858,6 +863,9 @@ impl X11Client {
     }
 
     fn handle_event(&self, event: Event) -> Option<()> {
+        if self.document_event(&event) {
+            return Some(());
+        }
         match event {
             Event::UnmapNotify(event) => {
                 let mut state = self.0.borrow_mut();
@@ -928,7 +936,13 @@ impl X11Client {
                             })
                         })
                         .unwrap_or(0);
-                    if (arg1 & 0x1) == 0x1 {
+                    if state
+                        .document_drag
+                        .as_ref()
+                        .is_some_and(|s| s.source_window() == atom)
+                    {
+                        state.xdnd_state.drag_type = state.atoms.SKATHI_DRAG;
+                    } else if (arg1 & 0x1) == 0x1 {
                         state.xdnd_state.drag_type = xdnd_get_supported_atom(
                             &state.xcb_connection,
                             &state.atoms,
@@ -1096,7 +1110,14 @@ impl X11Client {
                             strings.push(("text/uri-list".into(), urls.join("\r\n")));
                         }
                     } else {
-                        strings.push(("text/plain".into(), text.to_string()));
+                        let mime = if event.target == state.atoms.SKATHI_DRAG {
+                            crate::linux::drag_source::MARKER
+                        } else if event.target == state.atoms.TEXT_HTML {
+                            "text/html"
+                        } else {
+                            "text/plain"
+                        };
+                        strings.push((mime.into(), text.to_string()));
                     }
                 }
                 let position = state.xdnd_state.position;
@@ -2489,6 +2510,7 @@ fn xdnd_is_atom_supported(atom: u32, atoms: &XcbAtoms) -> bool {
         || atom == atoms.TEXT_PLAIN
         || atom == atoms.TEXT_PLAIN_UTF8
         || atom == atoms.TextUriList
+        || atom == atoms.TEXT_HTML
 }
 
 fn xdnd_get_supported_atom(

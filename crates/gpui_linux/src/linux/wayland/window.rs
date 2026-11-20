@@ -2247,6 +2247,25 @@ impl PlatformWindow for WaylandWindow {
         }
     }
 
+    fn can_start_document_drag(&self) -> bool {
+        let state = self.borrow();
+        state.client.can_start_document_drag(&state.surface)
+    }
+
+    fn start_document_drag(
+        &self,
+        data: gpui::PlatformDragData,
+        done: Box<dyn FnOnce(gpui::DropOperation)>,
+    ) -> bool {
+        let state = self.borrow();
+        state.client.start_document_drag(
+            &state.surface,
+            data,
+            self.scale_factor().round() as i32,
+            done,
+        )
+    }
+
     fn can_start_external_drag(&self) -> bool {
         true
     }

@@ -51,6 +51,11 @@ x11rb::atom_manager! {
         XdndActionMove,
         XdndActionLink,
         XdndActionList,
+        XdndProxy,
+        TARGETS,
+        INCR_DND: b"INCR",
+        SKATHI_DRAG: b"application/x-skathi-drag-session",
+        TEXT_HTML: b"text/html",
         TextUriList: b"text/uri-list",
         UTF8_STRING,
         TEXT,
@@ -2264,6 +2269,28 @@ impl PlatformWindow for X11Window {
             ),
         )
         .log_err();
+    }
+
+    fn can_start_document_drag(&self) -> bool {
+        self.0
+            .state
+            .borrow()
+            .client
+            .get_client()
+            .is_some_and(|client| client.can_start_document_drag(self.0.x_window))
+    }
+
+    fn start_document_drag(
+        &self,
+        data: gpui::PlatformDragData,
+        done: Box<dyn FnOnce(gpui::DropOperation)>,
+    ) -> bool {
+        self.0
+            .state
+            .borrow()
+            .client
+            .get_client()
+            .is_some_and(|client| client.start_document_drag(self.0.x_window, data, done))
     }
 
     fn start_window_move(&self) {

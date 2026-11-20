@@ -102,6 +102,7 @@ pub struct WindowsWindowState {
 
 pub(crate) struct WindowsWindowInner {
     hwnd: HWND,
+    pub(crate) document_drag: RefCell<Option<(PlatformDragData, Box<dyn FnOnce(DropOperation)>)>>,
     pub(crate) dialog_owner: Rc<crate::dialog::DialogOwner>,
     drop_target_helper: IDropTargetHelper,
     pub(crate) state: WindowsWindowState,
@@ -311,6 +312,7 @@ impl WindowsWindowInner {
             hwnd,
             dialog_owner: crate::dialog::DialogOwner::new(hwnd),
             drop_target_helper: context.drop_target_helper.clone(),
+            document_drag: RefCell::new(None),
             state,
             handle: context.handle,
             hide_title_bar: context.hide_title_bar,
@@ -665,6 +667,9 @@ impl rwh::HasDisplayHandle for WindowsWindow {
 
 impl Drop for WindowsWindow {
     fn drop(&mut self) {
+        if let Some((_, done)) = self.document_drag.take() {
+            done(DropOperation::None);
+        }
         self.0.dialog_owner.close();
         // gpui has let go of the window: what destroying it reports has nothing to notify.
         let callbacks = &self.0.state.callbacks;
@@ -696,6 +701,39 @@ impl Drop for WindowsWindow {
 }
 
 impl PlatformWindow for WindowsWindow {
+    fn can_start_document_drag(&self) -> bool {
+        unsafe {
+            GetAsyncKeyState(VK_LBUTTON.0 as i32) < 0 && self.document_drag.borrow().is_none()
+        }
+    }
+
+    fn start_document_drag(
+        &self,
+        data: PlatformDragData,
+        done: Box<dyn FnOnce(DropOperation)>,
+    ) -> bool {
+        if data.allowed == 0 || !self.can_start_document_drag() {
+            return false;
+        }
+        self.document_drag.replace(Some((data, done)));
+        // Enter OLE once the mouse dispatch has released gpui's input callback.
+        // Its nested message loop can then deliver the source window's own drops.
+        if unsafe {
+            PostMessageW(
+                Some(self.hwnd),
+                crate::events::WM_GPUI_DOCUMENT_DRAG,
+                WPARAM(0),
+                LPARAM(0),
+            )
+        }
+        .is_err()
+        {
+            self.document_drag.take();
+            return false;
+        }
+        true
+    }
+
     fn bounds(&self) -> Bounds<Pixels> {
         self.state.bounds()
     }
@@ -1527,6 +1565,9 @@ fn drag_wide_string(global: HGLOBAL) -> Option<String> {
     use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
     unsafe {
         let n = GlobalSize(global) / 2;
+        if n > (4 << 20) {
+            return None;
+        }
         let p = GlobalLock(global) as *const u16;
         if p.is_null() {
             return None;
@@ -1536,6 +1577,66 @@ fn drag_wide_string(global: HGLOBAL) -> Option<String> {
             String::from_utf16_lossy(&slice[..slice.iter().position(|&c| c == 0).unwrap_or(n)]);
         let _ = GlobalUnlock(global);
         Some(value)
+    }
+}
+
+fn drag_mime_strings(object: &IDataObject, offer: &mut DragOffer) {
+    use windows::Win32::System::{
+        DataExchange::GetClipboardFormatNameW,
+        Memory::{GlobalLock, GlobalSize, GlobalUnlock},
+    };
+    unsafe {
+        let Ok(formats) = object.EnumFormatEtc(DATADIR_GET.0 as u32) else {
+            return;
+        };
+        let mut left = 8 << 20;
+        for _ in 0..128 {
+            let mut fmt = [FORMATETC::default()];
+            if formats.Next(&mut fmt, None) != S_OK {
+                break;
+            }
+            let fmt = &fmt[0];
+            if !fmt.ptd.is_null() {
+                CoTaskMemFree(Some(fmt.ptd.cast()));
+            }
+            if fmt.cfFormat < 0xc000 || fmt.lindex != -1 || fmt.tymed & TYMED_HGLOBAL.0 as u32 == 0
+            {
+                continue;
+            }
+            let mut name = [0u16; 256];
+            let n = GetClipboardFormatNameW(fmt.cfFormat as u32, &mut name);
+            if n <= 0 {
+                continue;
+            }
+            let mime = String::from_utf16_lossy(&name[..n as usize]).to_ascii_lowercase();
+            if !mime.contains('/')
+                || !mime.bytes().all(|b| b.is_ascii_graphic())
+                || offer.strings.iter().any(|(m, _)| *m == mime)
+            {
+                continue;
+            }
+            let value = drop_data(object, fmt.cfFormat, |h| {
+                let n = GlobalSize(h);
+                if n > left {
+                    return None;
+                }
+                let p = GlobalLock(h) as *const u8;
+                if p.is_null() {
+                    return None;
+                }
+                let bytes = std::slice::from_raw_parts(p, n);
+                let s = std::str::from_utf8(bytes.strip_suffix(&[0]).unwrap_or(bytes))
+                    .ok()
+                    .map(str::to_owned);
+                let _ = GlobalUnlock(h);
+                s
+            })
+            .flatten();
+            if let Some(v) = value {
+                left -= v.len();
+                offer.strings.push((mime, v));
+            }
+        }
     }
 }
 
@@ -1570,6 +1671,7 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
                     offer.strings.push((mime.into(), text));
                 }
             }
+            drag_mime_strings(object, &mut offer);
             let op = if paths.is_empty() && offer.strings.is_empty() {
                 DropOperation::None
             } else {

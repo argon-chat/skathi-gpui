@@ -550,8 +550,70 @@ pub(crate) enum DataSourceKind {
 
 pub(crate) struct ExternalDrag {
     source: wl_data_source::WlDataSource,
-    bytes: Vec<u8>,
+    offer: std::sync::Arc<crate::linux::drag_source::Offer>,
     window: WaylandWindowStatePtr,
+    action: gpui::DropOperation,
+    done: Option<Box<dyn FnOnce(gpui::DropOperation)>>,
+    _icon: Option<DragIcon>,
+}
+
+struct DragIcon {
+    surface: wl_surface::WlSurface,
+    buffer: wl_buffer::WlBuffer,
+}
+
+impl Drop for DragIcon {
+    fn drop(&mut self) {
+        self.surface.destroy();
+        self.buffer.destroy();
+    }
+}
+
+impl DragIcon {
+    fn new(globals: &Globals, image: &gpui::PlatformDragImage, scale: i32) -> Option<Self> {
+        use std::{io::Write, os::fd::AsFd};
+        let w = i32::try_from(image.width).ok()?;
+        let h = i32::try_from(image.height).ok()?;
+        if !(1..=1024).contains(&w)
+            || !(1..=1024).contains(&h)
+            || image.rgba.len() != (w * h * 4) as usize
+        {
+            return None;
+        }
+        let mut bytes = Vec::with_capacity(image.rgba.len());
+        for pixel in image.rgba.chunks_exact(4) {
+            let a = u32::from(pixel[3]);
+            let premul = |n: u8| (u32::from(n) * a + 127) / 255;
+            bytes.extend_from_slice(
+                &(a << 24 | premul(pixel[0]) << 16 | premul(pixel[1]) << 8 | premul(pixel[2]))
+                    .to_ne_bytes(),
+            );
+        }
+        let mut file = tempfile::tempfile().ok()?;
+        file.write_all(&bytes).ok()?;
+        let qh = &globals.qh;
+        let pool = globals
+            .shm
+            .create_pool(file.as_fd(), bytes.len() as i32, qh, ());
+        let buffer = pool.create_buffer(0, w, h, w * 4, wl_shm::Format::Argb8888, qh, ());
+        pool.destroy();
+        let surface = globals.compositor.create_surface(qh, ());
+        let scale = if surface.version() >= 3 && w % scale == 0 && h % scale == 0 {
+            surface.set_buffer_scale(scale);
+            scale
+        } else {
+            1
+        };
+        let (dx, dy) = (-image.hotspot.0 / scale, -image.hotspot.1 / scale);
+        if surface.version() >= 5 {
+            surface.offset(dx, dy);
+            surface.attach(Some(&buffer), 0, 0);
+        } else {
+            surface.attach(Some(&buffer), dx, dy);
+        }
+        surface.damage(0, 0, i32::MAX, i32::MAX);
+        Some(Self { surface, buffer })
+    }
 }
 
 fn file_uri_list(paths: &FileDragPaths) -> String {
@@ -705,6 +767,63 @@ impl WaylandClientStatePtr {
         surface: &wl_surface::WlSurface,
         payload: &ExternalDragPayload,
     ) -> bool {
+        let ExternalDragPayload::Files(paths) = payload;
+        let list = file_uri_list(paths);
+        if list.is_empty() {
+            return false;
+        }
+        self.start_source(
+            surface,
+            crate::linux::drag_source::Offer::paths(list),
+            3,
+            None,
+            None,
+        )
+    }
+
+    pub fn can_start_document_drag(&self, surface: &wl_surface::WlSurface) -> bool {
+        let client = self.get_client();
+        let state = client.borrow();
+        state.external_drag.is_none()
+            && state.button_pressed == Some(MouseButton::Left)
+            && state
+                .mouse_focused_window
+                .as_ref()
+                .is_some_and(|window| window.surface().id() == surface.id())
+            && state.globals.data_device_manager.is_some()
+            && state.data_device.is_some()
+    }
+
+    pub fn start_document_drag(
+        &self,
+        surface: &wl_surface::WlSurface,
+        data: gpui::PlatformDragData,
+        scale: i32,
+        done: Box<dyn FnOnce(gpui::DropOperation)>,
+    ) -> bool {
+        if !self.can_start_document_drag(surface) {
+            return false;
+        }
+        let icon = data.image.as_deref().and_then(|image| {
+            DragIcon::new(&self.get_client().borrow().globals, image, scale.max(1))
+        });
+        self.start_source(
+            surface,
+            crate::linux::drag_source::Offer::document(&data),
+            data.allowed,
+            Some(done),
+            icon,
+        )
+    }
+
+    fn start_source(
+        &self,
+        surface: &wl_surface::WlSurface,
+        offer: std::sync::Arc<crate::linux::drag_source::Offer>,
+        allowed: u8,
+        done: Option<Box<dyn FnOnce(gpui::DropOperation)>>,
+        icon: Option<DragIcon>,
+    ) -> bool {
         let client = self.get_client();
         let mut state = client.borrow_mut();
 
@@ -719,23 +838,42 @@ impl WaylandClientStatePtr {
             return false;
         };
 
-        let ExternalDragPayload::Files(paths) = payload;
-        let uri_list = file_uri_list(paths);
-        if uri_list.is_empty() {
+        let mut actions = DndAction::empty();
+        if allowed & 1 != 0 {
+            actions |= DndAction::Copy;
+        }
+        if allowed & 2 != 0 {
+            actions |= DndAction::Move;
+        }
+        if actions.is_empty() || state.external_drag.is_some() {
             return false;
         }
-
         let serial = state.serial_tracker.get(SerialKind::MousePress);
         let source =
             data_device_manager.create_data_source(&state.globals.qh, DataSourceKind::Drag);
-        source.offer(FILE_LIST_MIME_TYPE.to_string());
-        source.set_actions(DndAction::Copy | DndAction::Move);
-        data_device.start_drag(Some(&source), surface, None, serial.as_raw());
+        for mime in offer.types() {
+            source.offer(mime.to_owned());
+        }
+        if source.version() >= 3 {
+            source.set_actions(actions);
+        }
+        data_device.start_drag(
+            Some(&source),
+            surface,
+            icon.as_ref().map(|i| &i.surface),
+            serial.as_raw(),
+        );
+        if let Some(icon) = &icon {
+            icon.surface.commit();
+        }
 
         state.external_drag = Some(ExternalDrag {
             source,
-            bytes: uri_list.into_bytes(),
+            offer,
             window,
+            action: gpui::DropOperation::None,
+            done,
+            _icon: icon,
         });
         true
     }
@@ -2965,9 +3103,15 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                     else {
                         return;
                     };
-                    let Some(mime) = [FILE_LIST_MIME_TYPE]
+                    let private = state
+                        .external_drag
+                        .is_some()
+                        .then_some(crate::linux::drag_source::MARKER);
+                    let Some(mime) = private
                         .into_iter()
+                        .chain([FILE_LIST_MIME_TYPE])
                         .chain(TEXT_MIME_TYPES)
+                        .chain(["text/html"])
                         .find(|m| offer.has_mime_type(m))
                     else {
                         data_offer.accept(serial, None);
@@ -3023,7 +3167,11 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                                     strings.push(("text/uri-list".into(), urls.join("\r\n")));
                                 }
                             } else {
-                                strings.push(("text/plain".into(), text));
+                                let ty = match mime {
+                                    crate::linux::drag_source::MARKER | "text/html" => mime,
+                                    _ => "text/plain",
+                                };
+                                strings.push((ty.into(), text));
                             }
                             if paths.is_empty() && strings.is_empty() {
                                 data_offer.destroy();
@@ -3182,24 +3330,61 @@ impl Dispatch<wl_data_source::WlDataSource, DataSourceKind> for WaylandClientSta
             (DataSourceKind::Clipboard, wl_data_source::Event::Cancelled) => {
                 data_source.destroy();
             }
-            (DataSourceKind::Drag, wl_data_source::Event::Send { fd, .. }) => {
-                let Some(external_drag) = state.external_drag.as_ref() else {
+            (DataSourceKind::Drag, wl_data_source::Event::Send { mime_type, fd }) => {
+                let Some(source) = state
+                    .external_drag
+                    .as_ref()
+                    .filter(|s| &s.source == data_source)
+                else {
                     return;
                 };
-                let bytes = external_drag.bytes.clone();
-                state.clipboard.send_bytes(fd, bytes);
+                let offer = source.offer.clone();
+                let bg = state.common.borrow().background_executor.clone();
+                let fg = state.common.borrow().foreground_executor.clone();
+                let client = client.clone();
+                fg.spawn(async move {
+                    if let Ok(bytes) = bg.spawn(async move { offer.bytes(&mime_type) }).await {
+                        client.borrow().clipboard.send_bytes(fd, bytes);
+                    }
+                })
+                .detach();
+            }
+            (DataSourceKind::Drag, wl_data_source::Event::Action { dnd_action }) => {
+                if let Some(source) = state
+                    .external_drag
+                    .as_mut()
+                    .filter(|s| &s.source == data_source)
+                {
+                    source.action = match dnd_action {
+                        wayland_client::WEnum::Value(DndAction::Copy) => gpui::DropOperation::Copy,
+                        wayland_client::WEnum::Value(DndAction::Move) => gpui::DropOperation::Move,
+                        _ => gpui::DropOperation::None,
+                    };
+                }
             }
             (
                 DataSourceKind::Drag,
-                wl_data_source::Event::DndFinished | wl_data_source::Event::Cancelled,
+                event @ (wl_data_source::Event::DndFinished | wl_data_source::Event::Cancelled),
             ) => {
-                let Some(external_drag) = state.external_drag.take() else {
+                if !state
+                    .external_drag
+                    .as_ref()
+                    .is_some_and(|source| &source.source == data_source)
+                {
                     return;
-                };
+                }
+                let external_drag = state.external_drag.take().unwrap();
                 external_drag.source.destroy();
 
                 let input = PlatformInput::FileDrop(FileDropEvent::Ended);
                 drop(state);
+                if let Some(done) = external_drag.done {
+                    done(if matches!(event, wl_data_source::Event::DndFinished) {
+                        external_drag.action
+                    } else {
+                        gpui::DropOperation::None
+                    });
+                }
                 external_drag.window.handle_input(input);
             }
             _ => {}

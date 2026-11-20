@@ -1709,6 +1709,20 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn start_external_drag(&self, _payload: &ExternalDragPayload) -> bool {
         false
     }
+    /// Whether the current physical gesture can start a native drag.
+    fn can_start_document_drag(&self) -> bool {
+        false
+    }
+
+    /// Starts a real OS drag for the current physical gesture. Its completion
+    /// runs on the source UI thread after the platform has chosen the final effect.
+    fn start_document_drag(
+        &self,
+        _data: crate::PlatformDragData,
+        _done: Box<dyn FnOnce(crate::DropOperation)>,
+    ) -> bool {
+        false
+    }
     fn start_window_resize(&self, _edge: ResizeEdge) {}
     fn set_exclusive_zone(&self, _zone: Pixels) {}
     #[cfg(all(target_os = "linux", feature = "wayland"))]
