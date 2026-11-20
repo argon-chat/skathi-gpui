@@ -7,7 +7,10 @@ pub(super) struct PlayerChrome {
     pub(super) parked: Option<Retained<NSWindow>>,
     pub(super) buttons_hidden: bool,
     pub(super) button_opacity: Option<f32>,
-    pub(super) transitioning: bool,
+    /// AppKit owns the window from will-enter until did-exit (including cancelled transitions).
+    pub(super) fullscreen: bool,
+    /// The requested windowed level. Sheets and popups keep their own native roles.
+    pub(super) windowed_level: Option<NSInteger>,
     switching_panel: bool,
     pub(super) windowed_behavior: Option<NSWindowCollectionBehavior>,
     pub(super) cover: Option<Retained<NSView>>,
@@ -15,6 +18,23 @@ pub(super) struct PlayerChrome {
 
 pub(super) extern "C" fn cannot_become_main(_: &AnyObject, _: Sel) -> Bool {
     Bool::NO
+}
+
+pub(super) fn is_workspace_panel(window: &AnyObject) -> bool {
+    // AppKit can install a KVO subclass on either window during a fullscreen transition.
+    unsafe { msg_send![window, isKindOfClass: WORKSPACE_PANEL_CLASS] }
+}
+
+pub(super) fn for_kind(kind: &WindowKind) -> PlayerChrome {
+    let windowed_level = match kind {
+        WindowKind::Normal => Some(NSNormalWindowLevel),
+        WindowKind::Floating => Some(NSFloatingWindowLevel),
+        _ => None,
+    };
+    PlayerChrome {
+        windowed_level,
+        ..PlayerChrome::default()
+    }
 }
 
 pub(super) extern "C" fn sheet_ended(this: &AnyObject, _: Sel, _: *mut AnyObject) {
@@ -118,8 +138,9 @@ fn new_panel(state: &Rc<Mutex<MacWindowState>>, source: &NSWindow) -> Retained<N
     }
 }
 
-fn copy_window_settings(source: &NSWindow, target: &NSWindow, is_panel: bool) {
+fn copy_window_settings(source: &NSWindow, target: &NSWindow, is_panel: bool, level: NSInteger) {
     let mut style = source.styleMask();
+    style.remove(NSWindowStyleMask::FullScreen);
     style.set(NSWindowStyleMask::NonactivatingPanel, is_panel);
     target.setStyleMask(style);
     target.setTitle(&source.title());
@@ -135,7 +156,7 @@ fn copy_window_settings(source: &NSWindow, target: &NSWindow, is_panel: bool) {
     target.setBackgroundColor(Some(&source.backgroundColor()));
     target.setHasShadow(source.hasShadow());
     target.setAlphaValue(source.alphaValue());
-    target.setLevel(source.level());
+    target.setLevel(level);
     target.setCollectionBehavior(source.collectionBehavior());
     target.setContentMaxSize(source.contentMaxSize());
     target.setContentMinSize(source.contentMinSize());
@@ -156,28 +177,24 @@ fn copy_window_settings(source: &NSWindow, target: &NSWindow, is_panel: bool) {
 }
 
 pub(super) fn sync_panel(state: &Rc<Mutex<MacWindowState>>) {
-    let (source_ptr, enter, other) = {
+    let (source_ptr, enter, level, other) = {
         let mut s = state.lock();
+        let Some(level) = s.player_chrome.windowed_level else {
+            return;
+        };
         let w = s.native_window();
         let enter = s.spaces_before_override.is_some()
             && s.player_chrome.windowed_behavior.is_none()
-            && w.level() == NSFloatingWindowLevel;
-        let current = unsafe { (*s.native_window).class() };
-        if s.player_chrome.transitioning
+            && level == NSFloatingWindowLevel;
+        if s.player_chrome.fullscreen
             || s.player_chrome.switching_panel
-            || s.is_fullscreen()
             || w.attachedSheet().is_some()
-            || std::ptr::eq(current, unsafe { WORKSPACE_PANEL_CLASS }) == enter
-            || (enter
-                && (s.sheet_parent.is_some()
-                    || w.styleMask().contains(NSWindowStyleMask::NonactivatingPanel)
-                    || (!std::ptr::eq(current, unsafe { WINDOW_CLASS })
-                        && !std::ptr::eq(current, unsafe { PANEL_CLASS }))))
+            || is_workspace_panel(unsafe { &*s.native_window }) == enter
         {
             return;
         }
         s.player_chrome.switching_panel = true;
-        (s.native_window, enter, s.player_chrome.parked.take())
+        (s.native_window, enter, level, s.player_chrome.parked.take())
     };
 
     // SAFETY: MacWindow owns one +1 reference to its active window. Move that reference to
@@ -190,7 +207,7 @@ pub(super) fn sync_panel(state: &Rc<Mutex<MacWindowState>>) {
     let visible = source.isVisible();
     let target_ptr = Retained::as_ptr(&target).cast_mut().cast::<AnyObject>();
     source.setDelegate(None);
-    copy_window_settings(&source, &target, enter);
+    copy_window_settings(&source, &target, enter, level);
     {
         let mut s = state.lock();
         s.restore_traffic_light();
@@ -236,9 +253,7 @@ pub(super) fn toggle_fullscreen(state: &Rc<Mutex<MacWindowState>>, fade: bool) {
                 if s.closed.load(Ordering::Acquire) {
                     return;
                 }
-                if std::ptr::eq(unsafe { (*s.native_window).class() }, unsafe {
-                    WORKSPACE_PANEL_CLASS
-                }) {
+                if is_workspace_panel(unsafe { &*s.native_window }) {
                     s.player_chrome.windowed_behavior =
                         Some(s.native_window().collectionBehavior());
                 }
@@ -287,23 +302,13 @@ pub(super) fn toggle_fullscreen(state: &Rc<Mutex<MacWindowState>>, fade: bool) {
 }
 
 pub(super) fn finish_fullscreen(state: &Rc<Mutex<MacWindowState>>, fullscreen: bool) {
-    let (cover, executor, behavior, raw) = {
+    let (cover, executor) = {
         let mut s = state.lock();
-        s.player_chrome.transitioning = false;
+        s.player_chrome.fullscreen = fullscreen;
         if s.player_chrome.button_opacity.is_some() {
             show_buttons(&s, !s.player_chrome.buttons_hidden);
         }
-        let behavior = if fullscreen {
-            None
-        } else {
-            s.player_chrome.windowed_behavior.take()
-        };
-        (
-            s.player_chrome.cover.take(),
-            s.foreground_executor.clone(),
-            behavior,
-            s.native_window,
-        )
+        (s.player_chrome.cover.take(), s.foreground_executor.clone())
     };
     if let Some(cover) = cover {
         NSAnimationContext::runAnimationGroup_completionHandler(
@@ -318,17 +323,34 @@ pub(super) fn finish_fullscreen(state: &Rc<Mutex<MacWindowState>>, fullscreen: b
             })),
         );
     }
-    if let Some(behavior) = behavior {
-        unsafe { &*raw.cast::<NSWindow>() }.setCollectionBehavior(behavior);
+    if fullscreen {
+        return;
     }
+    // Restore the window after AppKit's delegate returns. Its style and level can still
+    // describe the fullscreen Space while didExitFullScreen is being delivered.
     let weak = Rc::downgrade(state);
     executor
         .spawn(async move {
-            if let Some(s) = weak.upgrade() {
-                if !s.lock().closed.load(Ordering::Acquire) {
-                    sync_panel(&s);
+            let Some(state) = weak.upgrade() else { return };
+            let (raw, behavior, level) = {
+                let mut s = state.lock();
+                if s.closed.load(Ordering::Acquire) || s.player_chrome.fullscreen {
+                    return;
                 }
+                (
+                    s.native_window,
+                    s.player_chrome.windowed_behavior.take(),
+                    s.player_chrome.windowed_level,
+                )
+            };
+            let window = unsafe { &*raw.cast::<NSWindow>() };
+            if let Some(behavior) = behavior {
+                window.setCollectionBehavior(behavior);
             }
+            if let Some(level) = level {
+                window.setLevel(level);
+            }
+            sync_panel(&state);
         })
         .detach();
 }

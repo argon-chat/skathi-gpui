@@ -1285,7 +1285,7 @@ impl MacWindow {
                 is_exiting_fullscreen: false,
                 fullscreen_changed: None,
                 spaces_before_override: None,
-                player_chrome: Default::default(),
+                player_chrome: player_chrome::for_kind(&kind),
                 simple_fullscreen_state: None,
                 move_tab_to_new_window_callback: None,
                 merge_all_windows_callback: None,
@@ -1501,7 +1501,7 @@ impl MacWindow {
             let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
             let main_window: *mut AnyObject = msg_send![app, mainWindow];
             let key_window: *mut AnyObject = msg_send![app, keyWindow];
-            if !key_window.is_null() && std::ptr::eq((*key_window).class(), WORKSPACE_PANEL_CLASS) {
+            if !key_window.is_null() && player_chrome::is_workspace_panel(&*key_window) {
                 return Some(get_window_state(&*key_window).lock().handle);
             }
             if !main_window.is_null() && msg_send![main_window, isKindOfClass: WINDOW_CLASS] {
@@ -1523,7 +1523,7 @@ impl MacWindow {
             for i in 0..count {
                 let window: *mut AnyObject = msg_send![windows, objectAtIndex:i];
                 if msg_send![window, isKindOfClass: WINDOW_CLASS]
-                    || std::ptr::eq((*window).class(), WORKSPACE_PANEL_CLASS)
+                    || player_chrome::is_workspace_panel(&*window)
                 {
                     if !(*window.cast::<NSWindow>()).isVisible()
                         && (*window.cast::<NSWindow>()).delegate().is_none()
@@ -2506,7 +2506,7 @@ impl PlatformWindow for MacWindow {
         } else {
             return true;
         };
-        if state.player_chrome.windowed_behavior.is_some() {
+        if state.player_chrome.windowed_behavior.is_some() || state.player_chrome.fullscreen {
             state.player_chrome.windowed_behavior = Some(next);
             return true;
         }
@@ -2523,11 +2523,20 @@ impl PlatformWindow for MacWindow {
     }
 
     fn vn_set_always_on_top(&self, on: bool) -> bool {
-        let window = self.0.lock().native_window;
         let level = if on {
             NSFloatingWindowLevel
         } else {
             NSNormalWindowLevel
+        };
+        let window = {
+            let mut state = self.0.lock();
+            if state.player_chrome.windowed_level.is_some() {
+                state.player_chrome.windowed_level = Some(level);
+                if state.player_chrome.fullscreen {
+                    return true;
+                }
+            }
+            state.native_window
         };
         unsafe {
             let _: () = msg_send![window, setLevel: level];
@@ -2774,6 +2783,9 @@ impl PlatformWindow for MacWindow {
                 "contents_scale": layer.contentsScale(),
             })
         });
+        let object = unsafe { &*state.native_window };
+        let view = unsafe { &*state.native_view.as_ptr().cast::<NSView>() };
+        let native_class: &AnyClass = unsafe { msg_send![object, class] };
         serde_json::json!({
             "window_number": window.windowNumber(),
             "occlusion_state_visible": window
@@ -2782,8 +2794,10 @@ impl PlatformWindow for MacWindow {
             "is_visible": window.isVisible(),
             "is_key_window": window.isKeyWindow(),
             "is_main_window": window.isMainWindow(),
-            "window_class": unsafe { (*state.native_window).class() }.name().to_string_lossy(),
-            "window_number": window.windowNumber(),
+            "window_class": native_class.name().to_string_lossy(),
+            "window_runtime_class": object.class().name().to_string_lossy(),
+            "workspace_panel": player_chrome::is_workspace_panel(object),
+            "content_window_number": view.window().map(|owner| owner.windowNumber()),
             "nonactivating_panel": window.styleMask().contains(NSWindowStyleMask::NonactivatingPanel),
             "collection_behavior": window.collectionBehavior().bits(),
             "level": window.level(),
@@ -3850,7 +3864,7 @@ extern "C" fn window_will_enter_fullscreen(this: &AnyObject, _: Sel, _: *mut Any
     unsafe { get_window_state(this) }
         .lock()
         .player_chrome
-        .transitioning = true;
+        .fullscreen = true;
     report_fullscreen_transition(this, gpui::WindowFullscreenTransition::Will(true));
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.as_ref().lock();
@@ -4026,7 +4040,7 @@ extern "C" fn window_will_exit_fullscreen(this: &AnyObject, _: Sel, _: *mut AnyO
     unsafe { get_window_state(this) }
         .lock()
         .player_chrome
-        .transitioning = true;
+        .fullscreen = true;
     report_fullscreen_transition(this, gpui::WindowFullscreenTransition::Will(false));
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.as_ref().lock();
