@@ -101,7 +101,7 @@ impl WindowHaptics {
         let Ok(feedbacks) = controller.SupportedFeedback() else {
             return false;
         };
-        let Some(feedback) = waveforms(pattern).into_iter().flatten().find_map(|wave| {
+        let Some(feedback) = waveforms(pattern, pen.is_some()).find_map(|wave| {
             feedbacks
                 .clone()
                 .into_iter()
@@ -170,22 +170,23 @@ impl WindowHaptics {
     }
 }
 
-fn waveforms(pattern: HapticPattern) -> [Option<u16>; 3] {
-    match pattern {
-        HapticPattern::Generic => [Waves::Click().ok(), None, None],
-        HapticPattern::Alignment => [manager::detent(true), Waves::Click().ok(), None],
-        HapticPattern::LevelChange => [
-            manager::detent(false),
-            Waves::Press().ok(),
-            Waves::Click().ok(),
-        ],
-        HapticPattern::InkContinuous => [Waves::InkContinuous().ok(), None, None],
-        HapticPattern::PencilContinuous => [
-            Waves::PencilContinuous().ok(),
-            Waves::InkContinuous().ok(),
-            None,
-        ],
-    }
+fn waveforms(pattern: HapticPattern, pen: bool) -> impl Iterator<Item = u16> {
+    let preferred = match pattern {
+        HapticPattern::Generic => [None, None],
+        HapticPattern::Alignment => [manager::detent(true), None],
+        HapticPattern::LevelChange => [manager::detent(false), Waves::Press().ok()],
+        HapticPattern::InkContinuous => [Waves::InkContinuous().ok(), None],
+        HapticPattern::PencilContinuous => {
+            [Waves::PencilContinuous().ok(), Waves::InkContinuous().ok()]
+        }
+    };
+    // Windows defaults to Hover on mice and touchpads, and Click on pens.
+    let fallback = match (pattern.is_continuous(), pen) {
+        (true, _) => [None, None],
+        (false, true) => [Waves::Click().ok(), None],
+        (false, false) => [Waves::Hover().ok(), Waves::Click().ok()],
+    };
+    preferred.into_iter().chain(fallback).flatten()
 }
 
 // windows-rs 0.62 predates the desktop haptics interfaces. These are the
@@ -304,23 +305,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pen_patterns_request_their_advertised_waveforms() {
+    fn mouse_and_touchpad_pulses_work_without_click() {
+        let hover = Waves::Hover().unwrap();
+        let click = Waves::Click().unwrap();
+        assert!(waveforms(HapticPattern::Generic, false).eq([hover, click]));
+        for pattern in [HapticPattern::Alignment, HapticPattern::LevelChange] {
+            assert_eq!(
+                waveforms(pattern, false).find(|&id| id == hover),
+                Some(hover)
+            );
+        }
+    }
+
+    #[test]
+    fn pens_use_click_and_keep_continuous_feedback_on_stroke_waveforms() {
+        let click = Waves::Click().unwrap();
+        assert!(waveforms(HapticPattern::Generic, true).eq([click]));
         assert_eq!(
-            waveforms(HapticPattern::Generic)[0],
-            Some(Waves::Click().unwrap())
+            waveforms(HapticPattern::Alignment, true).last(),
+            Some(click)
         );
-        assert_eq!(
-            waveforms(HapticPattern::PencilContinuous),
-            [
-                Some(Waves::PencilContinuous().unwrap()),
-                Some(Waves::InkContinuous().unwrap()),
-                None
-            ]
-        );
-        assert_eq!(
-            waveforms(HapticPattern::Alignment)[1],
-            Some(Waves::Click().unwrap())
-        );
+        assert!(waveforms(HapticPattern::PencilContinuous, true).eq([
+            Waves::PencilContinuous().unwrap(),
+            Waves::InkContinuous().unwrap()
+        ]));
     }
 
     #[test]
