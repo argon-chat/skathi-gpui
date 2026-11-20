@@ -1584,8 +1584,8 @@ impl X11Client {
                 let modifiers = modifiers_from_xinput_info(event.mods);
                 state.modifiers = modifiers;
                 let position = point(
-                    px(event.event_x as f32 / u16::MAX as f32 / state.scale_factor),
-                    px(event.event_y as f32 / u16::MAX as f32 / state.scale_factor),
+                    px(event.event_x as f32 / 65536.0 / state.scale_factor),
+                    px(event.event_y as f32 / 65536.0 / state.scale_factor),
                 );
                 drop(state);
                 window.handle_input(PlatformInput::Pinch(gpui::PinchEvent {
@@ -1601,13 +1601,16 @@ impl X11Client {
                 let modifiers = modifiers_from_xinput_info(event.mods);
                 state.modifiers = modifiers;
                 let position = point(
-                    px(event.event_x as f32 / u16::MAX as f32 / state.scale_factor),
-                    px(event.event_y as f32 / u16::MAX as f32 / state.scale_factor),
+                    px(event.event_x as f32 / 65536.0 / state.scale_factor),
+                    px(event.event_y as f32 / 65536.0 / state.scale_factor),
                 );
                 // scale is in FP16.16 format: divide by 65536 to get the float value
                 let new_absolute_scale = event.scale as f32 / 65536.0;
+                if new_absolute_scale <= 0.0 {
+                    return Some(());
+                }
                 let previous_scale = state.pinch_scale;
-                let zoom_delta = new_absolute_scale - previous_scale;
+                let zoom_delta = new_absolute_scale / previous_scale - 1.0;
                 state.pinch_scale = new_absolute_scale;
                 drop(state);
                 window.handle_input(PlatformInput::Pinch(gpui::PinchEvent {
@@ -1624,15 +1627,22 @@ impl X11Client {
                 let modifiers = modifiers_from_xinput_info(event.mods);
                 state.modifiers = modifiers;
                 let position = point(
-                    px(event.event_x as f32 / u16::MAX as f32 / state.scale_factor),
-                    px(event.event_y as f32 / u16::MAX as f32 / state.scale_factor),
+                    px(event.event_x as f32 / 65536.0 / state.scale_factor),
+                    px(event.event_y as f32 / 65536.0 / state.scale_factor),
                 );
                 drop(state);
                 window.handle_input(PlatformInput::Pinch(gpui::PinchEvent {
                     position,
                     delta: 0.0,
                     modifiers,
-                    phase: gpui::TouchPhase::Ended,
+                    phase: if u32::from(
+                        event.flags & xinput::GesturePinchEventFlags::GESTURE_PINCH_CANCELLED,
+                    ) != 0
+                    {
+                        gpui::TouchPhase::Cancelled
+                    } else {
+                        gpui::TouchPhase::Ended
+                    },
                 }));
             }
             _ => {}

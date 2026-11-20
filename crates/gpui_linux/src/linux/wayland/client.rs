@@ -2972,8 +2972,11 @@ impl Dispatch<zwp_pointer_gesture_pinch_v1::ZwpPointerGesturePinchV1, ()>
             }
             zwp_pointer_gesture_pinch_v1::Event::Update { time: _, scale, .. } => {
                 let new_absolute_scale = scale as f32;
+                if !new_absolute_scale.is_finite() || new_absolute_scale <= 0.0 {
+                    return;
+                }
                 let previous_scale = state.pinch_scale;
-                let zoom_delta = new_absolute_scale - previous_scale;
+                let zoom_delta = new_absolute_scale / previous_scale - 1.0;
                 state.pinch_scale = new_absolute_scale;
 
                 let input = PlatformInput::Pinch(PinchEvent {
@@ -2985,17 +2988,17 @@ impl Dispatch<zwp_pointer_gesture_pinch_v1::ZwpPointerGesturePinchV1, ()>
                 drop(state);
                 window.handle_input(input);
             }
-            zwp_pointer_gesture_pinch_v1::Event::End {
-                serial: _,
-                time: _,
-                cancelled: _,
-            } => {
+            zwp_pointer_gesture_pinch_v1::Event::End { cancelled, .. } => {
                 state.pinch_scale = 1.0;
                 let input = PlatformInput::Pinch(PinchEvent {
                     position: state.mouse_location.unwrap_or(point(px(0.0), px(0.0))),
                     delta: 0.0,
                     modifiers: state.modifiers,
-                    phase: TouchPhase::Ended,
+                    phase: if cancelled != 0 {
+                        TouchPhase::Cancelled
+                    } else {
+                        TouchPhase::Ended
+                    },
                 });
                 drop(state);
                 window.handle_input(input);
