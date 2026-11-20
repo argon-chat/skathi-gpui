@@ -4477,6 +4477,25 @@ pub(crate) mod effect_layer_tests {
 
         #[::core::prelude::v1::test]
         #[ignore = "requires a D3D11 adapter; run explicitly for renderer qualification"]
+        fn d3d11_hdr_output_preserves_signed_surfaces() -> Result<()> {
+            use gpui::hdr_test_scene::{self as hdr_tests, HEIGHT, SDR_WHITE, SIGNED_WIDTH};
+            let mut renderer = offscreen(SIGNED_WIDTH, HEIGHT)?;
+            let scene = hdr_tests::signed_scene(&*renderer.atlas)?;
+            let opaque = WindowBackgroundAppearance::Opaque;
+            let sdr = renderer.render_to_image(&scene, opaque)?;
+            assert!(renderer.set_hdr_output(Some(HdrOutput {
+                sdr_white: SDR_WHITE,
+                content_headroom: 5.0,
+            })));
+            renderer.render(&scene, opaque)?;
+            hdr_tests::check_signed(&sdr, &renderer.read_hdr_output()?)?;
+            renderer.set_hdr_output(None);
+            assert_eq!(renderer.render_to_image(&scene, opaque)?, sdr);
+            Ok(())
+        }
+
+        #[::core::prelude::v1::test]
+        #[ignore = "requires a D3D11 adapter; run explicitly for renderer qualification"]
         fn d3d11_hdr_output_keeps_sdr_at_sdr_white_and_passes_hdr_tiles_to_their_headroom()
         -> Result<()> {
             use gpui::hdr_test_scene::{self as hdr_tests, HEIGHT, SDR_WHITE, WIDTH};

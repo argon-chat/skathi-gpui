@@ -188,7 +188,7 @@ fn fs_vn_layer(input: VnLayerVarying) -> @location(0) vec4<f32> {
             straight = vec4<f32>(color.rgb / color.a, color.a);
         }
         if (layer.matrix_mode == 1u) {
-            straight = vec4<f32>(srgb_to_linear(straight.rgb), straight.a);
+            straight = vec4<f32>(extended_srgb_to_linear(straight.rgb), straight.a);
         }
         var filtered = saturate(straight * layer.color_rows + layer.color_bias);
         if (layer.matrix_mode == 1u) {

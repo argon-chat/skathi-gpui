@@ -2964,6 +2964,30 @@ mod tests {
     }
 
     #[test]
+    fn hdr_output_preserves_signed_surfaces() -> anyhow::Result<()> {
+        use gpui::PlatformHeadlessRenderer as _;
+        use gpui::hdr_test_scene::{self as hdr_tests, HEIGHT, SDR_WHITE, SIGNED_WIDTH};
+        let mut renderer = WgpuHeadlessRenderer::new()?;
+        let scene = hdr_tests::signed_scene(&*renderer.core.atlas)?;
+        let size = gpui::size(
+            gpui::DevicePixels(SIGNED_WIDTH as i32),
+            gpui::DevicePixels(HEIGHT as i32),
+        );
+        let sdr = renderer.render_scene_to_image(&scene, size)?;
+        let (_, output) = renderer.render_hdr(
+            &scene,
+            size,
+            HdrOutput {
+                sdr_white: SDR_WHITE,
+                content_headroom: 5.0,
+            },
+        )?;
+        hdr_tests::check_signed(&sdr, &output)?;
+        assert_eq!(renderer.render_scene_to_image(&scene, size)?, sdr);
+        Ok(())
+    }
+
+    #[test]
     fn webgl_shader_is_valid_wgsl_without_storage_buffers() {
         assert!(!WEBGL_SHADERS.contains("var<storage"));
         validate_wgsl(WEBGL_SHADERS, naga::valid::Capabilities::empty());

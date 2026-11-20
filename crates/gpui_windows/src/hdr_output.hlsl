@@ -18,7 +18,9 @@ float4 hdr_output_vertex(uint id : SV_VertexID) : SV_Position {
 float4 hdr_output_fragment(float4 position : SV_Position) : SV_Target {
     float4 color = hdr_scene.Load(int3(position.xy, 0));
     float alpha = saturate(color.a);
-    float3 encoded = alpha > 0.0 ? max(color.rgb, 0.0) / alpha : float3(0.0, 0.0, 0.0);
-    float3 light = lerp(encoded / 12.92, pow((encoded + 0.055) / 1.055, 2.4), step(0.04045, encoded));
+    float3 encoded = alpha > 0.0 ? color.rgb / alpha : float3(0.0, 0.0, 0.0);
+    float3 magnitude = abs(encoded);
+    float3 light = sign(encoded) * lerp(magnitude / 12.92,
+        pow((magnitude + 0.055) / 1.055, 2.4), step(0.04045, magnitude));
     return float4(light * (sdr_white * alpha), alpha);
 }

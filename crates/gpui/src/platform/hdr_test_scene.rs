@@ -40,6 +40,21 @@ fn encode(linear: f32) -> f32 {
     }
 }
 
+fn encode_signed(linear: f32) -> f32 {
+    encode(linear.abs()).copysign(linear)
+}
+
+/// Decode one channel of an extended sRGB render target.
+pub fn decode_signed(encoded: f32) -> f32 {
+    let magnitude = encoded.abs();
+    let linear = if magnitude <= 0.04045 {
+        magnitude / 12.92
+    } else {
+        ((magnitude + 0.055) / 1.055).powf(2.4)
+    };
+    linear.copysign(encoded)
+}
+
 fn eotf(code: u8) -> f32 {
     let c = f32::from(code) / 255.0;
     if c <= 0.04045 {
@@ -144,7 +159,7 @@ pub fn scene(atlas: &dyn PlatformAtlas) -> Result<Scene> {
     for (x, mode) in [(64., 1), (80., 4)] {
         scene.insert_primitive(PolychromeSprite {
             order: 0,
-            pad: PolychromeSprite::sampling_word(Some(3.), mode),
+            pad: PolychromeSprite::sampling_word(Some(3.), mode, false),
             tile: tile.clone(),
             grayscale: false.into(),
             opacity: 1.,
@@ -226,4 +241,193 @@ pub fn halves_to_pixels(halves: &[u16]) -> Vec<[f32; 4]> {
         .chunks_exact(4)
         .map(|px| std::array::from_fn(|i| half_to_f32(px[i])))
         .collect()
+}
+
+/// Width of the signed surface test scene.
+pub const SIGNED_WIDTH: u32 = 128;
+const RED: [f32; 3] = [4.15, -0.14, -0.05];
+const GREEN: [f32; 3] = [-0.61, 2.83, -0.21];
+const NEAR_ZERO: [f32; 3] = [-0.002, 0.002, -0.004];
+const NEGATIVE: [f32; 3] = [-0.61, -0.14, -0.05];
+
+/// Draw signed surfaces through sampling, blending, sprite styling and filters.
+pub fn signed_scene(atlas: &dyn PlatformAtlas) -> Result<Scene> {
+    let content_mask = ContentMask {
+        bounds: rect(0., SIGNED_WIDTH as f32),
+        ..Default::default()
+    };
+    let hdr_tile = |index: usize, pixels: &[[f32; 3]]| {
+        let bytes: Vec<_> = pixels
+            .iter()
+            .flat_map(|&[r, g, b]| [r, g, b, 1.])
+            .flat_map(|c| f32_to_half(c).to_le_bytes())
+            .collect();
+        atlas
+            .write_hdr_bytes(
+                &AtlasKey::Image(RenderImageParams {
+                    image_id: ImageId(0x4d52_0100 + index),
+                    frame_index: 0,
+                }),
+                size(DevicePixels(pixels.len() as i32), DevicePixels(1)),
+                &bytes,
+            )?
+            .context("the signed HDR tile was not allocated")
+    };
+    let red = hdr_tile(0, &[RED])?;
+    let green = hdr_tile(1, &[GREEN])?;
+    let near_zero = hdr_tile(2, &[NEAR_ZERO])?;
+    let negative = hdr_tile(3, &[NEGATIVE])?;
+    let mut stripe = hdr_tile(4, &[2., -0.61, -0.61, -0.14, -0.14, 2.].map(|c| [c; 3]))?;
+    stripe.bounds.origin.x.0 += 1;
+    stripe.bounds.size.width.0 = 4;
+    let sprite = |x, width, tile, mode| PolychromeSprite {
+        order: 0,
+        pad: PolychromeSprite::sampling_word(Some(5.), mode, true),
+        tile,
+        grayscale: false.into(),
+        opacity: 1.,
+        bounds: rect(x, width),
+        content_mask,
+        corner_radii: Corners::default(),
+        transformation: TransformationMatrix::unit(),
+        tint: Hsla::transparent_black(),
+        corner_shapes: CornerShapes::default(),
+    };
+
+    let mut scene = Scene::default();
+    scene.insert_primitive(sprite(0., 8., red.clone(), 0));
+    scene.insert_primitive(sprite(8., 8., green.clone(), 4));
+    scene.insert_primitive(sprite(16., 8., near_zero, 0));
+    scene.insert_primitive(sprite(24., 8., red.clone(), 0));
+    scene.insert_primitive(Quad {
+        bounds: rect(24., 8.),
+        background: rgba(0x30303080).into(),
+        content_mask,
+        ..Default::default()
+    });
+    scene.insert_primitive(PolychromeSprite {
+        grayscale: true.into(),
+        tint: rgba(0xff000040).into(),
+        ..sprite(32., 8., negative, 0)
+    });
+    scene.insert_primitive(PolychromeSprite {
+        pad: PolychromeSprite::sampling_word(Some(5.), 0, false),
+        ..sprite(40., 8., red, 0)
+    });
+    scene.insert_primitive(sprite(48., 16., stripe.clone(), 1));
+    scene.insert_primitive(sprite(64., 16., stripe, 4));
+
+    let boundary = HEIGHT as f32;
+    for (x, linear_rgb) in [(80., true), (88., false)] {
+        let mut values = VnColorMatrix::IDENTITY;
+        if linear_rgb {
+            values[0] = -1.;
+        }
+        scene.vn_push_isolation(VnIsolation {
+            geometry: std::sync::Arc::new(VnClipGeometry {
+                fill_rule: VnFillRule::NonZero,
+                bounds: rect(x, 8.),
+                segments: vec![
+                    [x, 0., x + 8., 0.],
+                    [x + 8., 0., x + 8., boundary],
+                    [x + 8., boundary, x, boundary],
+                    [x, boundary, x, 0.],
+                ],
+            }),
+            color_matrix: Some(VnColorMatrix {
+                group_id: x as u64,
+                values,
+                linear_rgb,
+            }),
+            text_paint: None,
+            content_mask,
+            capture: None,
+        });
+        scene.insert_primitive(sprite(x, 8., green.clone(), 0));
+        scene.vn_pop_isolation();
+    }
+    scene.insert_primitive(PolychromeSprite {
+        pad: PolychromeSprite::sampling_word(Some(2.5), 0, true),
+        ..sprite(96., 32., green, 0)
+    });
+    scene.insert_primitive(BackdropBlurRect {
+        bounds: rect(104., 16.),
+        content_mask,
+        blur_radius: ScaledPixels(5.),
+        ..Default::default()
+    });
+    scene.insert_primitive(EffectQuad {
+        effect_id: effect_id::FROST,
+        bounds: rect(120., 8.),
+        content_mask,
+        params: EffectQuad::params_from(&[0.5]),
+        opacity: 1.,
+        scale: 1.,
+        flags: EFFECT_FLAG_NEEDS_BACKDROP,
+        ..Default::default()
+    });
+    scene.finish();
+    Ok(scene)
+}
+
+/// Check output pixels against the signed transfer curve and the 8-bit clamp.
+pub fn check_signed(sdr: &image::RgbaImage, output: &[[f32; 4]]) -> Result<()> {
+    let y = HEIGHT / 2;
+    let check = |x, expected: [f32; 3], name| {
+        let actual = output[(y * SIGNED_WIDTH + x) as usize];
+        for (actual, expected) in actual.into_iter().zip(expected.map(|c| c * SDR_WHITE)) {
+            // The source, encoded intermediate and linear output all round to FP16.
+            anyhow::ensure!(
+                (actual - expected).abs() <= expected.abs() * 0.0025 + 0.000003,
+                "{name}, channel with expected {expected}: {actual}"
+            );
+        }
+        anyhow::ensure!(actual[3] == 1., "{name}: alpha {}", actual[3]);
+        eprintln!("{name}: scRGB {actual:.5?}");
+        Ok(())
+    };
+    let half = |c| half_to_f32(f32_to_half(c));
+    let red = RED.map(half);
+    let green = GREEN.map(half);
+    check(4, red, "bilinear signed red")?;
+    check(12, green, "nearest signed green")?;
+    check(20, NEAR_ZERO.map(half), "transfer curve around zero")?;
+
+    let alpha = 128. / 255.;
+    let overlay = 48. / 255.;
+    let blend = red.map(|c| decode_signed(encode_signed(c) * (1. - alpha) + overlay * alpha));
+    check(28, blend, "translucent overlay on wide-gamut red")?;
+
+    let tint = 64. / 255.;
+    let [r, g, b] = NEGATIVE.map(half).map(encode_signed);
+    let grayscale = (r * (1. - tint) + tint) * 0.2126 + (g * 0.7152 + b * 0.0722) * (1. - tint);
+    check(
+        36,
+        [decode_signed(grayscale); 3],
+        "signed tint and grayscale",
+    )?;
+    check(44, [red[0], 0., 0.], "legacy HDR word")?;
+
+    let low = half(-0.61);
+    let high = half(-0.14);
+    check(48, [low; 3], "bounded cubic crop edge")?;
+    check(52, [low; 3], "bounded cubic dark plateau")?;
+    check(
+        55,
+        [low + (high - low) * 0.345_703_125; 3],
+        "signed cubic edge",
+    )?;
+    check(63, [high; 3], "bounded cubic bright plateau")?;
+    check(71, [low; 3], "nearest before edge")?;
+    check(72, [high; 3], "nearest after edge")?;
+
+    check(84, [-green[0], 1., 0.], "linear SVG color matrix")?;
+    check(92, [0., 1., 0.], "sRGB SVG color matrix clamp")?;
+    check(100, [green[0], 2.5, green[2]], "signed surface headroom")?;
+    check(112, [0., 1., 0.], "backdrop blur clamp")?;
+    check(124, [0., 1., 0.], "frost clamp")?;
+
+    assert_eq!(sdr.get_pixel(4, y).0, [255, 0, 0, 255]);
+    assert_eq!(sdr.get_pixel(12, y).0, [0, 255, 0, 255]);
+    Ok(())
 }

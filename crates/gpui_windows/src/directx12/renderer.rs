@@ -3094,6 +3094,36 @@ mod tests {
 
     #[::core::prelude::v1::test]
     #[ignore = "requires a native D3D12 hardware adapter; run explicitly for renderer qualification"]
+    fn native_hdr_output_preserves_signed_surfaces() -> Result<()> {
+        use gpui::hdr_test_scene::{self as hdr_tests, HEIGHT, SDR_WHITE, SIGNED_WIDTH};
+        let mut renderer = offscreen(SIGNED_WIDTH, HEIGHT)?;
+        let scene = hdr_tests::signed_scene(&*renderer.atlas)?;
+        let opaque = WindowBackgroundAppearance::Opaque;
+        let sdr = renderer.render_to_image(&scene, opaque)?;
+        renderer.set_hdr_output(Some(HdrOutput {
+            sdr_white: SDR_WHITE,
+            content_headroom: 5.0,
+        }));
+        renderer.apply_hdr_output()?;
+        let output = Target::new_in(&renderer.gpu, HDR_FORMAT, SIGNED_WIDTH, HEIGHT, 1)?;
+        let mut uploads = UploadPool::default();
+        uploads.begin(renderer.gpu.completed_value(), 0)?;
+        renderer.render(&scene, opaque, output.clone(), true, &mut uploads)?;
+        uploads.finish();
+        let halves: Vec<u16> = renderer
+            .read_target(output)?
+            .chunks_exact(2)
+            .map(|half| u16::from_le_bytes([half[0], half[1]]))
+            .collect();
+        hdr_tests::check_signed(&sdr, &hdr_tests::halves_to_pixels(&halves))?;
+        renderer.set_hdr_output(None);
+        renderer.apply_hdr_output()?;
+        assert_eq!(renderer.render_to_image(&scene, opaque)?, sdr);
+        Ok(())
+    }
+
+    #[::core::prelude::v1::test]
+    #[ignore = "requires a native D3D12 hardware adapter; run explicitly for renderer qualification"]
     fn native_hdr_output_keeps_sdr_at_sdr_white_and_passes_hdr_tiles_to_their_headroom()
     -> Result<()> {
         use gpui::hdr_test_scene::{self as hdr_tests, HEIGHT, SDR_WHITE, WIDTH};

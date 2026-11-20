@@ -1756,9 +1756,8 @@ pub struct Window {
     /// vue-native fork: the colour [`Window::paint_image`] tints with
     /// ([`Window::with_image_tint`]); transparent outside a tint scope.
     element_image_tint: Hsla,
-    /// vue-native fork: the brightest value an HDR image tile paints with
-    /// ([`Window::with_image_headroom`]).
-    element_image_headroom: f32,
+    /// The HDR tile's headroom and whether to preserve signed RGB.
+    element_image_headroom: (f32, bool),
     /// The composed CSS `transform` of every ancestor currently being painted,
     /// in DEVICE space. Identity outside a `Style::vn_transform`.
     ///
@@ -3084,7 +3083,7 @@ impl Window {
             vn_capture_records: FxHashMap::default(),
             element_opacity: 1.0,
             element_image_tint: Hsla::transparent_black(),
-            element_image_headroom: 1.0,
+            element_image_headroom: (1.0, false),
             element_transform: TransformationMatrix::unit(),
             vn_hitbox_tag: 0,
             vn_tag_fresh: false,
@@ -6410,13 +6409,31 @@ impl Window {
     /// [`AtlasTextureKind::PolychromeHdr`] image painted inside `f` reaches; 1.0 outside any
     /// scope. CSS `dynamic-range-limit` applied to the display's headroom.
     pub fn with_image_headroom<R>(&mut self, headroom: f32, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.with_image_headroom_mode(headroom, false, f)
+    }
+
+    /// Paints half-float surface tiles with signed RGB up to the given headroom.
+    pub fn with_signed_image_headroom<R>(
+        &mut self,
+        headroom: f32,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.with_image_headroom_mode(headroom, true, f)
+    }
+
+    fn with_image_headroom_mode<R>(
+        &mut self,
+        headroom: f32,
+        signed: bool,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
         self.invalidator.debug_assert_paint_or_prepaint();
         let headroom = if headroom.is_finite() {
             headroom.max(1.0)
         } else {
             1.0
         };
-        let previous = std::mem::replace(&mut self.element_image_headroom, headroom);
+        let previous = std::mem::replace(&mut self.element_image_headroom, (headroom, signed));
         let result = f(self);
         self.element_image_headroom = previous;
         result
@@ -8208,11 +8225,12 @@ impl Window {
             .scale(self.scale_factor());
         let opacity = self.element_opacity();
 
-        let headroom = (sub_tile.texture_id.kind == AtlasTextureKind::PolychromeHdr)
-            .then_some(self.element_image_headroom);
+        let (headroom, signed) = self.element_image_headroom;
+        let headroom =
+            (sub_tile.texture_id.kind == AtlasTextureKind::PolychromeHdr).then_some(headroom);
         self.next_frame.scene.insert_primitive(PolychromeSprite {
             order: 0,
-            pad: PolychromeSprite::sampling_word(headroom, sampling_mode),
+            pad: PolychromeSprite::sampling_word(headroom, sampling_mode, signed),
             grayscale: grayscale.into(),
             bounds: visible_bounds_snapped,
             content_mask,
@@ -13207,7 +13225,7 @@ mod tests {
         use crate::{DragOffer, DropOperation, FileDropEvent, Modifiers, PlatformInput};
         let mut cx = TestAppContext::single();
         let window = cx.add_window(|_, _| RootView {
-            auto_sized: false,
+            explicit_size: false,
             child_bounds: Rc::new(Cell::new(Bounds::default())),
         });
         window

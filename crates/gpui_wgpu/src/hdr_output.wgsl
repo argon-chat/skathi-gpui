@@ -24,14 +24,19 @@ fn fs_hdr_output(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f3
     let color = textureLoad(hdr_scene, vec2<i32>(position.xy), 0);
     let alpha = saturate(color.a);
     let premultiplied = params.premultiplied != 0u;
-    var encoded = max(color.rgb, vec3<f32>(0.0));
+    var encoded = color.rgb;
     if (premultiplied) {
-        encoded = select(vec3<f32>(0.0), encoded / alpha, alpha > 0.0);
+        if (alpha > 0.0) {
+            encoded /= alpha;
+        } else {
+            encoded = vec3<f32>(0.0);
+        }
     }
-    let light = select(
-        pow((encoded + 0.055) / 1.055, vec3<f32>(2.4)),
-        encoded / 12.92,
-        encoded < vec3<f32>(0.04045),
+    let magnitude = abs(encoded);
+    let light = sign(encoded) * select(
+        pow((magnitude + 0.055) / 1.055, vec3<f32>(2.4)),
+        magnitude / 12.92,
+        magnitude < vec3<f32>(0.04045),
     );
     let scale = params.sdr_white * select(1.0, alpha, premultiplied);
     return vec4<f32>(light * scale, alpha);

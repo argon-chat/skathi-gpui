@@ -1009,7 +1009,8 @@ fragment float4 polychrome_sprite_fragment(
   PolychromeSprite sprite = sprites[input.sprite_id];
   constexpr sampler atlas_texture_sampler(mag_filter::linear,
                                           min_filter::linear);
-  uint mode = (sprite.pad & 0x80000000u) != 0u ? (sprite.pad >> 27) & 7u : 0u;
+  bool packed_word = (sprite.pad & 0x80000000u) != 0u;
+  uint mode = packed_word ? (sprite.pad >> 27) & 7u : 0u;
   float4 sample = mode != 0u
       ? sample_surface(atlas_texture, input.tile_position, sprite, mode)
       : atlas_texture.sample(atlas_texture_sampler,
@@ -1022,10 +1023,13 @@ fragment float4 polychrome_sprite_fragment(
   float4 color = sample;
   // See PolychromeSprite::sampling_word for the surface tag and legacy HDR word.
   uint code = sprite.pad & 0x07ffffffu;
-  uint headroom = mode == 0u ? sprite.pad : (code == 0u ? 0u : code + 0x3f7fffffu);
+  uint headroom = packed_word ? (code == 0u ? 0u : code + 0x3f7fffffu) : sprite.pad;
   if (headroom != 0u) {
-    color = float4(linear_to_srgb(clamp(color.rgb, float3(0.0), float3(as_type<float>(headroom)))),
-                   saturate(color.a));
+    float3 light = min(color.rgb, float3(as_type<float>(headroom)));
+    bool signed_hdr = (sprite.pad & 0xc0000000u) == 0xc0000000u;
+    float3 encoded = signed_hdr ? sign(light) * linear_to_srgb(abs(light))
+                                : linear_to_srgb(max(light, float3(0.0)));
+    color = float4(encoded, saturate(color.a));
   }
   // vue-native fork: the tint takes the pixels by its alpha, keeping theirs
   // (canvas `source-atop`, in straight alpha). `PolychromeSprite` comes from
@@ -2197,7 +2201,7 @@ float vn_clip_coverage(float2 p, constant float4 *segments, uint start,
 // The exact sRGB curves, as DirectX and wgpu apply a color matrix in
 // linearRGB.
 float3 vn_srgb_to_linear(float3 c) {
-  return select(pow((c + 0.055) / 1.055, float3(2.4)), c / 12.92, c < 0.04045);
+  return sign(c) * srgb_to_linear(abs(c));
 }
 
 float3 vn_linear_to_srgb(float3 c) {

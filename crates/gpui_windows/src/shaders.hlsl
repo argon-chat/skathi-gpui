@@ -185,6 +185,10 @@ float3 srgb_to_linear(float3 color) {
     return lerp(color / 12.92, pow((color + 0.055) / 1.055, 2.4), step(0.04045, color));
 }
 
+float3 extended_srgb_to_linear(float3 color) {
+    return sign(color) * srgb_to_linear(abs(color));
+}
+
 /// Hsla to linear RGBA conversion.
 float4 hsla_to_rgba(Hsla hsla) {
     float h = hsla.h * 6.0; // Now, it's an angle but scaled in [0, 6) range
@@ -2117,7 +2121,8 @@ float4 polychrome_sprite_fragment(PolychromeSpriteFragmentInput input): SV_Targe
     PolychromeSprite sprite = poly_sprites[input.sprite_id];
     float4 tile_clamp = to_tile_clamp(sprite.tile);
     float4 sample;
-    uint mode = (sprite.pad & 0x80000000u) != 0u ? (sprite.pad >> 27) & 7u : 0u;
+    bool packed_word = (sprite.pad & 0x80000000u) != 0u;
+    uint mode = packed_word ? (sprite.pad >> 27) & 7u : 0u;
     [branch] if (mode != 0u) {
         sample = sample_surface(input.tile_position, sprite, mode);
     } else {
@@ -2128,9 +2133,13 @@ float4 polychrome_sprite_fragment(PolychromeSpriteFragmentInput input): SV_Targe
     float4 color = sample;
     // See PolychromeSprite::sampling_word for the surface tag and legacy HDR word.
     uint code = sprite.pad & 0x07ffffffu;
-    uint headroom = mode == 0u ? sprite.pad : (code == 0u ? 0u : code + 0x3f7fffffu);
+    uint headroom = packed_word ? (code == 0u ? 0u : code + 0x3f7fffffu) : sprite.pad;
     if (headroom != 0u) {
-        color = float4(linear_to_srgb(clamp(color.rgb, 0.0, asfloat(headroom))), saturate(color.a));
+        float3 light = min(color.rgb, asfloat(headroom));
+        bool signed_hdr = (sprite.pad & 0xc0000000u) == 0xc0000000u;
+        float3 encoded = signed_hdr ? sign(light) * linear_to_srgb(abs(light))
+                                    : linear_to_srgb(max(light, 0.0));
+        color = float4(encoded, saturate(color.a));
     }
     // vue-native fork: the tint takes the pixels by its alpha, keeping theirs
     // (canvas `source-atop`, in straight alpha).
@@ -2296,8 +2305,7 @@ float4 vn_layer_fragment(VnLayerFragmentInput input): SV_Target {
     if (layer.pad0 != 0u) {
         float4 straight = color.a > 0.0 ? float4(color.rgb / color.a, color.a) : 0.0;
         if (layer.pad0 == 1u) {
-            straight.rgb = lerp(straight.rgb / 12.92,
-                pow((straight.rgb + 0.055) / 1.055, 2.4), step(0.04045, straight.rgb));
+            straight.rgb = extended_srgb_to_linear(straight.rgb);
         }
         float4 filtered = saturate(float4(
             dot(layer.color_row0, straight), dot(layer.color_row1, straight),

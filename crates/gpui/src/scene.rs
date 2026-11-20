@@ -3124,14 +3124,15 @@ pub struct PolychromeSprite {
 }
 
 impl PolychromeSprite {
-    /// Linear sprites keep their existing headroom word. A filtered sprite uses its sign bit
-    /// as a tag: bits 27–29 select the filter and bits 0–26 preserve every useful FP16 headroom.
-    pub(crate) fn sampling_word(headroom: Option<f32>, mode: u32) -> u32 {
-        if mode == 0 {
+    /// The tag at bit 31 distinguishes this packed word from a legacy HDR float.
+    /// Bit 30 enables signed HDR, independently of the sampling mode in bits 27–29.
+    pub(crate) fn sampling_word(headroom: Option<f32>, mode: u32, signed: bool) -> u32 {
+        let signed = signed && headroom.is_some();
+        if mode == 0 && !signed {
             return headroom.map_or(0, f32::to_bits);
         }
         let code = headroom.map_or(0, |h| h.clamp(1., 65504.).to_bits() - 1f32.to_bits() + 1);
-        (1 << 31) | (mode << 27) | code
+        (1 << 31) | (u32::from(signed) << 30) | (mode << 27) | code
     }
 }
 

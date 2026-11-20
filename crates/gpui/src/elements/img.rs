@@ -834,15 +834,32 @@ mod tests {
     #[test]
     fn sampling_tag_preserves_legacy_hdr_and_all_representable_highlights() {
         use crate::PolychromeSprite;
-        assert_eq!(PolychromeSprite::sampling_word(None, 0), 0);
-        for h in [1., f32::from_bits(1f32.to_bits() + 1), 2.345678, 65504., f32::MAX] {
-            assert_eq!(PolychromeSprite::sampling_word(Some(h), 0), h.to_bits());
-            for mode in 1..=4 {
-                let word = PolychromeSprite::sampling_word(Some(h), mode);
+        assert_eq!(PolychromeSprite::sampling_word(None, 0, false), 0);
+        assert_eq!(PolychromeSprite::sampling_word(None, 0, true), 0);
+        for h in [
+            1.,
+            f32::from_bits(1f32.to_bits() + 1),
+            2.345678,
+            65504.,
+            f32::MAX,
+        ] {
+            assert_eq!(
+                PolychromeSprite::sampling_word(Some(h), 0, false),
+                h.to_bits()
+            );
+            for mode in 0..=4 {
+                let word = PolychromeSprite::sampling_word(Some(h), mode, true);
+                assert_eq!(word >> 30, 3);
                 assert_eq!((word >> 27) & 7, mode);
                 let code = word & 0x07ff_ffff;
                 assert_eq!(f32::from_bits(code + 0x3f7f_ffff), h.min(65504.));
-                assert_eq!(PolychromeSprite::sampling_word(None, mode) & 0x07ff_ffff, 0);
+                let sdr = PolychromeSprite::sampling_word(None, mode, false);
+                assert_eq!(PolychromeSprite::sampling_word(None, mode, true), sdr);
+                assert_eq!(sdr & 0x47ff_ffff, 0);
+                if mode != 0 {
+                    let legacy = PolychromeSprite::sampling_word(Some(h), mode, false);
+                    assert_eq!(legacy, word & !(1 << 30));
+                }
             }
         }
     }
@@ -927,7 +944,10 @@ mod tests {
                 size(crate::DevicePixels(1), crate::DevicePixels(1))
             );
             assert!(!sprite.grayscale.as_bool());
-            assert_eq!(sprite.pad, crate::PolychromeSprite::sampling_word(None, 4));
+            assert_eq!(
+                sprite.pad,
+                crate::PolychromeSprite::sampling_word(None, 4, false)
+            );
         });
     }
 
@@ -942,14 +962,14 @@ mod tests {
                 .into_any_element()
         });
         let full_tile_bounds = window.update(|window, _| {
-            window
+            let sprite = window
                 .rendered_frame
                 .scene
                 .polychrome_sprites
                 .last()
-                .expect("fill image should paint a sprite")
-                .tile
-                .bounds
+                .expect("fill image should paint a sprite");
+            assert_eq!(sprite.pad, 0);
+            sprite.tile.bounds
         });
 
         window.draw(point(px(10.), px(20.)), size(px(100.), px(100.)), |_, _| {

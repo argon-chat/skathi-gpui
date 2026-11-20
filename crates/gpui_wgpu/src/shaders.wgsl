@@ -269,6 +269,10 @@ fn srgb_to_linear_component(a: f32) -> f32 {
     return select(higher, lower, cutoff);
 }
 
+fn extended_srgb_to_linear(color: vec3<f32>) -> vec3<f32> {
+    return sign(color) * srgb_to_linear(abs(color));
+}
+
 fn linear_to_srgb(linear: vec3<f32>) -> vec3<f32> {
     let cutoff = linear < vec3<f32>(0.0031308);
     let higher = vec3<f32>(1.055) * pow(linear, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
@@ -1973,15 +1977,20 @@ fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
 
     var color = sample;
     // See PolychromeSprite::sampling_word for the surface tag and legacy HDR word.
-    let mode = select(0u, (sprite.pad >> 27u) & 7u, (sprite.pad & 0x80000000u) != 0u);
+    let packed_word = (sprite.pad & 0x80000000u) != 0u;
+    let mode = select(0u, (sprite.pad >> 27u) & 7u, packed_word);
     if (mode != 0u) {
         color = sample_surface(input.tile_position, sprite, mode);
     }
     let code = sprite.pad & 0x07ffffffu;
-    let headroom_bits = select(sprite.pad, select(0u, code + 0x3f7fffffu, code != 0u), mode != 0u);
+    let headroom_bits = select(sprite.pad, select(0u, code + 0x3f7fffffu, code != 0u), packed_word);
     if (headroom_bits != 0u) {
-        let headroom = vec3<f32>(bitcast<f32>(headroom_bits));
-        color = vec4<f32>(linear_to_srgb(clamp(color.rgb, vec3<f32>(0.0), headroom)), saturate(color.a));
+        let light = min(color.rgb, vec3<f32>(bitcast<f32>(headroom_bits)));
+        if ((sprite.pad & 0xc0000000u) == 0xc0000000u) {
+            color = vec4<f32>(sign(light) * linear_to_srgb(abs(light)), saturate(color.a));
+        } else {
+            color = vec4<f32>(linear_to_srgb(max(light, vec3<f32>(0.0))), saturate(color.a));
+        }
     }
     // vue-native fork: the tint takes the pixels by its alpha, keeping theirs
     // (canvas `source-atop`, in straight alpha).

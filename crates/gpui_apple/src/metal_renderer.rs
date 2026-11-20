@@ -2314,26 +2314,48 @@ mod tests {
         let encoded = read_texture_to_image(&texture)?;
         let output: Vec<[f32; 4]> = hdr_tests::halves_to_pixels(&read_texture_halves(&texture))
             .into_iter()
-            .map(|[r, g, b, a]| {
-                let light = |c: f32| {
-                    if c < 0.04045 {
-                        c / 12.92
-                    } else {
-                        ((c + 0.055) / 1.055).powf(2.4)
-                    }
-                };
-                [
-                    light(r) * SDR_WHITE,
-                    light(g) * SDR_WHITE,
-                    light(b) * SDR_WHITE,
-                    a,
-                ]
+            .map(|mut pixel| {
+                for component in &mut pixel[..3] {
+                    *component = hdr_tests::decode_signed(*component) * SDR_WHITE;
+                }
+                pixel
             })
             .collect();
         hdr_tests::check(&sdr, &encoded, &output)?;
         assert!(renderer.set_hdr_output(None));
         let again = renderer.render_scene_to_image(&scene, size)?;
         assert!(again == sdr, "back on SDR, every pixel is as before");
+        Ok(())
+    }
+
+    #[test]
+    fn hdr_output_preserves_signed_surfaces() -> Result<()> {
+        use gpui::hdr_test_scene::{self as hdr_tests, HEIGHT, SDR_WHITE, SIGNED_WIDTH};
+        let Ok(device) = MetalRenderer::create_device() else {
+            eprintln!("Metal HDR output tests skipped: no Metal GPU available");
+            return Ok(());
+        };
+        let mut renderer = MetalRenderer::new_internal(device, None, true, Default::default())?;
+        let atlas = renderer.sprite_atlas().clone();
+        let scene = hdr_tests::signed_scene(&*atlas)?;
+        let size = size(DevicePixels(SIGNED_WIDTH as i32), DevicePixels(HEIGHT as i32));
+        let sdr = renderer.render_scene_to_image(&scene, size)?;
+        assert!(renderer.set_hdr_output(Some(HdrOutput {
+            sdr_white: 1.0,
+            content_headroom: 5.0,
+        })));
+        let texture =
+            objc2::rc::autoreleasepool(|_| renderer.render_offscreen_texture(&scene, size))?;
+        assert_eq!(texture.pixelFormat(), MTLPixelFormat::RGBA16Float);
+        let mut output = hdr_tests::halves_to_pixels(&read_texture_halves(&texture));
+        for pixel in &mut output {
+            for component in &mut pixel[..3] {
+                *component = hdr_tests::decode_signed(*component) * SDR_WHITE;
+            }
+        }
+        hdr_tests::check_signed(&sdr, &output)?;
+        assert!(renderer.set_hdr_output(None));
+        assert_eq!(renderer.render_scene_to_image(&scene, size)?, sdr);
         Ok(())
     }
 
