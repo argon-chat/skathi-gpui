@@ -372,7 +372,7 @@ pub(crate) struct WaylandClientState {
     wl_seat: wl_seat::WlSeat, // TODO: Multi seat support
     wl_pointer: Option<wl_pointer::WlPointer>,
     pinch_gesture: Option<zwp_pointer_gesture_pinch_v1::ZwpPointerGesturePinchV1>,
-    pinch_scale: f32,
+    active_pinch: Option<(ObjectId, crate::linux::pinch::PinchMotion)>,
     wl_keyboard: Option<wl_keyboard::WlKeyboard>,
     cursor_shape_device: Option<wp_cursor_shape_device_v1::WpCursorShapeDeviceV1>,
     _tablet_seat:
@@ -974,6 +974,13 @@ impl WaylandClientStatePtr {
         let client = self.get_client();
         let mut state = client.borrow_mut();
         let closed_window = state.windows.remove(surface_id).unwrap();
+        if state
+            .active_pinch
+            .as_ref()
+            .is_some_and(|(surface, _)| surface == surface_id)
+        {
+            state.active_pinch = None;
+        }
         if let Some(window) = state.mouse_focused_window.take()
             && !window.ptr_eq(&closed_window)
         {
@@ -1241,7 +1248,7 @@ impl WaylandConnection {
             wl_pointer: None,
             wl_keyboard: None,
             pinch_gesture: None,
-            pinch_scale: 1.0,
+            active_pinch: None,
             cursor_shape_device: None,
             _tablet_seat: tablet_seat,
             tablet_tools: HashMap::default(),
@@ -2944,67 +2951,52 @@ impl Dispatch<zwp_pointer_gesture_pinch_v1::ZwpPointerGesturePinchV1, ()>
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        use crate::linux::pinch::PinchMotion;
         use gpui::PinchEvent;
 
         let client = this.get_client();
         let mut state = client.borrow_mut();
 
-        let Some(window) = state.mouse_focused_window.clone() else {
-            return;
-        };
-
-        match event {
-            zwp_pointer_gesture_pinch_v1::Event::Begin {
-                serial: _,
-                time: _,
-                surface: _,
-                fingers: _,
-            } => {
-                state.pinch_scale = 1.0;
-                let input = PlatformInput::Pinch(PinchEvent {
-                    position: state.mouse_location.unwrap_or(point(px(0.0), px(0.0))),
-                    delta: 0.0,
-                    modifiers: state.modifiers,
-                    phase: TouchPhase::Started,
-                });
-                drop(state);
-                window.handle_input(input);
+        let (surface, position, delta, phase) = match event {
+            zwp_pointer_gesture_pinch_v1::Event::Begin { surface, .. } => {
+                let position = state.mouse_location.unwrap_or_default();
+                state.active_pinch = Some((surface.id(), PinchMotion::new(position)));
+                (surface.id(), position, 0.0, TouchPhase::Started)
             }
-            zwp_pointer_gesture_pinch_v1::Event::Update { time: _, scale, .. } => {
-                let new_absolute_scale = scale as f32;
-                if !new_absolute_scale.is_finite() || new_absolute_scale <= 0.0 {
+            zwp_pointer_gesture_pinch_v1::Event::Update { dx, dy, scale, .. } => {
+                let Some((surface, motion)) = state.active_pinch.as_mut() else {
                     return;
-                }
-                let previous_scale = state.pinch_scale;
-                let zoom_delta = new_absolute_scale / previous_scale - 1.0;
-                state.pinch_scale = new_absolute_scale;
-
-                let input = PlatformInput::Pinch(PinchEvent {
-                    position: state.mouse_location.unwrap_or(point(px(0.0), px(0.0))),
-                    delta: zoom_delta,
-                    modifiers: state.modifiers,
-                    phase: TouchPhase::Moved,
-                });
-                drop(state);
-                window.handle_input(input);
+                };
+                let Some(delta) = motion.update(point(px(dx as f32), px(dy as f32)), scale as f32)
+                else {
+                    return;
+                };
+                (surface.clone(), motion.position, delta, TouchPhase::Moved)
             }
             zwp_pointer_gesture_pinch_v1::Event::End { cancelled, .. } => {
-                state.pinch_scale = 1.0;
-                let input = PlatformInput::Pinch(PinchEvent {
-                    position: state.mouse_location.unwrap_or(point(px(0.0), px(0.0))),
-                    delta: 0.0,
-                    modifiers: state.modifiers,
-                    phase: if cancelled != 0 {
-                        TouchPhase::Cancelled
-                    } else {
-                        TouchPhase::Ended
-                    },
-                });
-                drop(state);
-                window.handle_input(input);
+                let Some((surface, motion)) = state.active_pinch.take() else {
+                    return;
+                };
+                let phase = if cancelled != 0 {
+                    TouchPhase::Cancelled
+                } else {
+                    TouchPhase::Ended
+                };
+                (surface, motion.position, 0.0, phase)
             }
-            _ => {}
-        }
+            _ => return,
+        };
+        let Some(window) = get_window(&mut state, &surface) else {
+            return;
+        };
+        let modifiers = state.modifiers;
+        drop(state);
+        window.handle_input(PlatformInput::Pinch(PinchEvent {
+            position,
+            delta,
+            modifiers,
+            phase,
+        }));
     }
 }
 

@@ -4,6 +4,8 @@ mod display_connection;
 mod drag_source;
 mod headless;
 mod keyboard;
+#[cfg(any(feature = "wayland", feature = "x11"))]
+mod pinch;
 mod platform;
 #[cfg(any(feature = "wayland", feature = "x11"))]
 mod power;

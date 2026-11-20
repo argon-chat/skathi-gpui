@@ -1,4 +1,5 @@
 mod document_drag;
+use crate::linux::pinch::PinchMotion;
 use anyhow::{Context as _, anyhow};
 use ashpd::WindowIdentifier;
 use calloop::{
@@ -197,7 +198,7 @@ pub struct X11ClientState {
     pub(crate) last_mouse_button: Option<MouseButton>,
     pub(crate) last_location: Point<Pixels>,
     pub(crate) current_count: usize,
-    pub(crate) pinch_scale: f32,
+    pinches: HashMap<(xproto::Window, xinput::DeviceId), PinchMotion>,
 
     pub(crate) gpu_context: GpuContext,
     pub(crate) compositor_gpu: Option<CompositorGpuHint>,
@@ -263,6 +264,7 @@ impl X11ClientStatePtr {
         };
         let mut state = client.0.borrow_mut();
 
+        state.pinches.retain(|(window, _), _| *window != x_window);
         if let Some(window_ref) = state.windows.remove(&x_window)
             && let Some(RefreshState::PeriodicRefresh {
                 event_loop_token, ..
@@ -538,7 +540,7 @@ impl X11Connection {
                 last_mouse_button: None,
                 last_location: Point::new(px(0.0), px(0.0)),
                 current_count: 0,
-                pinch_scale: 1.0,
+                pinches: HashMap::default(),
                 gpu_context: Rc::new(RefCell::new(None)),
                 compositor_gpu,
                 scale_factor,
@@ -1580,13 +1582,15 @@ impl X11Client {
             Event::XinputGesturePinchBegin(event) => {
                 let window = self.get_window(event.event)?;
                 let mut state = self.0.borrow_mut();
-                state.pinch_scale = 1.0;
                 let modifiers = modifiers_from_xinput_info(event.mods);
                 state.modifiers = modifiers;
                 let position = point(
                     px(event.event_x as f32 / 65536.0 / state.scale_factor),
                     px(event.event_y as f32 / 65536.0 / state.scale_factor),
                 );
+                state
+                    .pinches
+                    .insert((event.event, event.sourceid), PinchMotion::new(position));
                 drop(state);
                 window.handle_input(PlatformInput::Pinch(gpui::PinchEvent {
                     position,
@@ -1600,18 +1604,13 @@ impl X11Client {
                 let mut state = self.0.borrow_mut();
                 let modifiers = modifiers_from_xinput_info(event.mods);
                 state.modifiers = modifiers;
-                let position = point(
-                    px(event.event_x as f32 / 65536.0 / state.scale_factor),
-                    px(event.event_y as f32 / 65536.0 / state.scale_factor),
+                let movement = point(
+                    px(event.delta_x as f32 / 65536.0 / state.scale_factor),
+                    px(event.delta_y as f32 / 65536.0 / state.scale_factor),
                 );
-                // scale is in FP16.16 format: divide by 65536 to get the float value
-                let new_absolute_scale = event.scale as f32 / 65536.0;
-                if new_absolute_scale <= 0.0 {
-                    return Some(());
-                }
-                let previous_scale = state.pinch_scale;
-                let zoom_delta = new_absolute_scale / previous_scale - 1.0;
-                state.pinch_scale = new_absolute_scale;
+                let motion = state.pinches.get_mut(&(event.event, event.sourceid))?;
+                let zoom_delta = motion.update(movement, event.scale as f32 / 65536.0)?;
+                let position = motion.position;
                 drop(state);
                 window.handle_input(PlatformInput::Pinch(gpui::PinchEvent {
                     position,
@@ -1623,16 +1622,12 @@ impl X11Client {
             Event::XinputGesturePinchEnd(event) => {
                 let window = self.get_window(event.event)?;
                 let mut state = self.0.borrow_mut();
-                state.pinch_scale = 1.0;
+                let motion = state.pinches.remove(&(event.event, event.sourceid))?;
                 let modifiers = modifiers_from_xinput_info(event.mods);
                 state.modifiers = modifiers;
-                let position = point(
-                    px(event.event_x as f32 / 65536.0 / state.scale_factor),
-                    px(event.event_y as f32 / 65536.0 / state.scale_factor),
-                );
                 drop(state);
                 window.handle_input(PlatformInput::Pinch(gpui::PinchEvent {
-                    position,
+                    position: motion.position,
                     delta: 0.0,
                     modifiers,
                     phase: if u32::from(
