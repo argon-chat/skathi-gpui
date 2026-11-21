@@ -940,7 +940,8 @@ impl MacWindowState {
             .map(|screen| unsafe { msg_send![screen, maximumFramesPerSecond] })
             .filter(|fps: &isize| *fps > 0);
         if let Some(fps) = fps {
-            self.renderer.set_refresh_interval(Duration::from_secs_f64(1.0 / fps as f64));
+            self.renderer
+                .set_refresh_interval(Duration::from_secs_f64(1.0 / fps as f64));
         }
         let covered = !self.on_screen();
         match &mut self.frame_source {
@@ -1620,7 +1621,9 @@ fn if_window_not_closed(closed: Arc<AtomicBool>, f: impl FnOnce()) {
     }
 }
 
-fn trackpad_pattern(pattern: gpui::HapticPattern) -> Option<objc2_app_kit::NSHapticFeedbackPattern> {
+fn trackpad_pattern(
+    pattern: gpui::HapticPattern,
+) -> Option<objc2_app_kit::NSHapticFeedbackPattern> {
     use objc2_app_kit::NSHapticFeedbackPattern as Pattern;
     match pattern {
         gpui::HapticPattern::Generic => Some(Pattern::Generic),
@@ -2468,7 +2471,8 @@ impl PlatformWindow for MacWindow {
         after_present: bool,
     ) -> bool {
         use objc2_app_kit::{
-            NSHapticFeedbackManager, NSHapticFeedbackPerformanceTime as Time, NSHapticFeedbackPerformer,
+            NSHapticFeedbackManager, NSHapticFeedbackPerformanceTime as Time,
+            NSHapticFeedbackPerformer,
         };
         if !self.vn_haptics_supported(target) {
             return false;
@@ -4445,7 +4449,8 @@ fn metal_frame(
         return;
     };
     lock.renderer.set_frame_drawable(Some(update.drawable()));
-    lock.renderer.set_frame_target(update.targetPresentationTimestamp());
+    lock.renderer
+        .set_frame_target(update.targetPresentationTimestamp());
     drop(lock);
     metal_frames.begin_frame();
     callback(RequestFrameOptions {

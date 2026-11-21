@@ -1,6 +1,5 @@
 use etagere::BucketedAtlasAllocator;
 use parking_lot::Mutex;
-use windows::core::Interface;
 use windows::Win32::Graphics::{
     Direct3D11::{
         D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
@@ -8,10 +7,12 @@ use windows::Win32::Graphics::{
     },
     Dxgi::Common::*,
 };
+use windows::core::Interface;
 
 use gpui::{
-    AtlasBackend, AtlasKey, AtlasState, AtlasStats, AtlasTextureId, AtlasTextureKind, AtlasTextureList,
-    AtlasTile, Bounds, DevicePixels, GpuTextureHandle, PlatformAtlas, Point, Size,
+    AtlasBackend, AtlasKey, AtlasState, AtlasStats, AtlasTextureId, AtlasTextureKind,
+    AtlasTextureList, AtlasTile, Bounds, DevicePixels, GpuTextureHandle, PlatformAtlas, Point,
+    Size,
 };
 
 pub(crate) struct DirectXAtlas(Mutex<AtlasState<DirectXAtlasTextures>>);
@@ -789,7 +790,13 @@ mod tests {
         use windows::Win32::Graphics::Direct3D11::{
             D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_USAGE_STAGING,
         };
-        let source = atlas.0.lock().backend.texture(tile.texture_id)?.texture.clone();
+        let source = atlas
+            .0
+            .lock()
+            .backend
+            .texture(tile.texture_id)?
+            .texture
+            .clone();
         let desc = D3D11_TEXTURE2D_DESC {
             Width: 1,
             Height: 1,
@@ -819,7 +826,9 @@ mod tests {
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         unsafe {
             context.CopySubresourceRegion(&staging, 0, 0, 0, 0, &source, 0, Some(&region));
-            context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)).ok()?;
+            context
+                .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .ok()?;
             let px = std::slice::from_raw_parts(mapped.pData as *const u8, 4);
             let out = [px[0], px[1], px[2], px[3]];
             context.Unmap(&staging, 0);
@@ -849,14 +858,20 @@ mod tests {
             .unwrap()
             .expect("the first write takes a tile");
         assert_eq!(atlas.tile(&key), Some(first));
-        assert_eq!(first_pixel(&device, &context, &atlas, first), Some([1, 2, 3, 255]));
+        assert_eq!(
+            first_pixel(&device, &context, &atlas, first),
+            Some([1, 2, 3, 255])
+        );
 
         let second = atlas
             .write_bytes(&key, size, &frame([9, 8, 7, 255]))
             .unwrap()
             .expect("a second write is accepted");
         assert_eq!(second, first, "the same tile, overwritten in place");
-        assert_eq!(first_pixel(&device, &context, &atlas, second), Some([9, 8, 7, 255]));
+        assert_eq!(
+            first_pixel(&device, &context, &atlas, second),
+            Some([9, 8, 7, 255])
+        );
 
         let bigger = Size {
             width: DevicePixels(16),
@@ -903,7 +918,11 @@ mod tests {
         };
         assert!(
             atlas
-                .upload_from_gpu(&make_image_key(21), size, GpuTextureHandle(foreign.as_raw()))
+                .upload_from_gpu(
+                    &make_image_key(21),
+                    size,
+                    GpuTextureHandle(foreign.as_raw())
+                )
                 .unwrap()
                 .is_none(),
             "a texture from another device must be refused, not silently copied"

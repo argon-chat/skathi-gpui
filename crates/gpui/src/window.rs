@@ -8,18 +8,17 @@ use crate::subscription::SingleSubscriberSet;
 use crate::taffy::TaffyLayoutEngine;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AtlasKey, AtlasStats, AtlasTextureKind, AtlasTile, AvailableSpace, BackdropBlurRect, Background, BorderStyle,
-    EffectQuad, EffectSpec,
-    Bounds, BoxShadow,
-    Capslock, Context, CornerShape, CornerShapes, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
-    DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
-    EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
-    GlyphShadowParams, GpuTextureHandle, HdrOutput,
-    Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent,
-    Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent,
-    MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, PaintedPath, Path,
-    Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow,
-    Point, PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
+    AsyncWindowContext, AtlasKey, AtlasStats, AtlasTextureKind, AtlasTile, AvailableSpace,
+    BackdropBlurRect, Background, BorderStyle, Bounds, BoxShadow, Capslock, Context, CornerShape,
+    CornerShapes, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
+    DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, EffectQuad,
+    EffectSpec, Entity, EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId,
+    GlyphId, GlyphShadowParams, GpuSpecs, GpuTextureHandle, HdrOutput, Hsla, InputHandler,
+    InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke,
+    KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite,
+    MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, PaintedPath, Path, Pixels,
+    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
+    PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
     RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
     SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
     SpriteAnimation, SpriteAnimationId, StrikethroughStyle, Style, SubpixelSprite, Subscription,
@@ -407,7 +406,12 @@ pub fn observe_frames(observer: fn(FrameWork)) {
 
 fn report_frame(window_id: WindowId, started: Instant, outcome: FrameOutcome) {
     if let Some(observer) = FRAME_OBSERVER.get() {
-        observer(FrameWork { window_id, started, ended: Instant::now(), outcome });
+        observer(FrameWork {
+            window_id,
+            started,
+            ended: Instant::now(),
+            outcome,
+        });
     }
 }
 
@@ -932,7 +936,10 @@ fn transform_bounds(
     // floats), so the conversion is explicit: logical in, device through the
     // matrix, logical out.
     let map = |p: Point<Pixels>| {
-        let d = matrix.apply(Point::new(px(p.x.0 * scale_factor), px(p.y.0 * scale_factor)));
+        let d = matrix.apply(Point::new(
+            px(p.x.0 * scale_factor),
+            px(p.y.0 * scale_factor),
+        ));
         Point::new(px(d.x.0 / scale_factor), px(d.y.0 / scale_factor))
     };
     let corners = [
@@ -1022,7 +1029,8 @@ fn transform_mask(
     let [[a, b], [c, d]] = matrix.rotation_scale;
     let (corner_radii, corner_shapes) = if b == 0. && c == 0. && a > 0. && d > 0. {
         let factor = a.min(d);
-        let radii = mask.corner_radii
+        let radii = mask
+            .corner_radii
             .map(|radius| *radius * factor)
             .clamp_radii_for_quad_size(bounds.size);
         (radii, mask.corner_shapes.scale(factor))
@@ -1621,7 +1629,11 @@ impl Frame {
     fn topmost_hitboxes(&self) -> impl Iterator<Item = &Hitbox> {
         let in_paint_order = self.vn_hit_order.len() == self.hitboxes.len();
         (0..self.hitboxes.len()).rev().map(move |index| {
-            let index = if in_paint_order { self.vn_hit_order[index] as usize } else { index };
+            let index = if in_paint_order {
+                self.vn_hit_order[index] as usize
+            } else {
+                index
+            };
             &self.hitboxes[index]
         })
     }
@@ -2969,7 +2981,8 @@ impl Window {
                         // after a cached repaint. The previous input's hit set
                         // may name another point/frame, or be narrowed to a DOM
                         // event path; it is not a native caption hit test.
-                        let position = position.unwrap_or_else(|| window.platform_window.mouse_position());
+                        let position =
+                            position.unwrap_or_else(|| window.platform_window.mouse_position());
                         window.window_control_area_at(position)
                     })
                     .with_context(|| {
@@ -3274,28 +3287,58 @@ where
             return ContentMask::rect(bounds);
         }
         let at = |mask: &Self, left: bool, top: bool| {
-            let x = if left { mask.bounds.left() } else { mask.bounds.right() };
-            let y = if top { mask.bounds.top() } else { mask.bounds.bottom() };
+            let x = if left {
+                mask.bounds.left()
+            } else {
+                mask.bounds.right()
+            };
+            let y = if top {
+                mask.bounds.top()
+            } else {
+                mask.bounds.bottom()
+            };
             (x, y)
         };
         let radius = |left: bool, top: bool, mine: (P, u32), theirs: (P, u32)| {
             let here = at(&ContentMask::rect(bounds), left, top);
-            let mine = if at(self, left, top) == here { mine } else { (P::default(), 0) };
-            let theirs = if at(other, left, top) == here { theirs } else { (P::default(), 0) };
+            let mine = if at(self, left, top) == here {
+                mine
+            } else {
+                (P::default(), 0)
+            };
+            let theirs = if at(other, left, top) == here {
+                theirs
+            } else {
+                (P::default(), 0)
+            };
             if theirs.0 > mine.0 { theirs } else { mine }
         };
         let (a, b) = (&self.corner_radii, &other.corner_radii);
         let (sa, sb) = (self.corner_shapes.corners(), other.corner_shapes.corners());
-        let top_left = radius(true, true, (a.top_left, sa.top_left), (b.top_left, sb.top_left));
-        let top_right = radius(false, true, (a.top_right, sa.top_right), (b.top_right, sb.top_right));
+        let top_left = radius(
+            true,
+            true,
+            (a.top_left, sa.top_left),
+            (b.top_left, sb.top_left),
+        );
+        let top_right = radius(
+            false,
+            true,
+            (a.top_right, sa.top_right),
+            (b.top_right, sb.top_right),
+        );
         let bottom_right = radius(
             false,
             false,
             (a.bottom_right, sa.bottom_right),
             (b.bottom_right, sb.bottom_right),
         );
-        let bottom_left =
-            radius(true, false, (a.bottom_left, sa.bottom_left), (b.bottom_left, sb.bottom_left));
+        let bottom_left = radius(
+            true,
+            false,
+            (a.bottom_left, sa.bottom_left),
+            (b.bottom_left, sb.bottom_left),
+        );
         let corner_radii = Corners {
             top_left: top_left.0,
             top_right: top_right.0,
@@ -3336,10 +3379,34 @@ where
         let b = &self.bounds;
         let r = &self.corner_radii;
         for (radius, cx, cy, left, top) in [
-            (r.top_left, b.left() + r.top_left, b.top() + r.top_left, true, true),
-            (r.top_right, b.right() - r.top_right, b.top() + r.top_right, false, true),
-            (r.bottom_right, b.right() - r.bottom_right, b.bottom() - r.bottom_right, false, false),
-            (r.bottom_left, b.left() + r.bottom_left, b.bottom() - r.bottom_left, true, false),
+            (
+                r.top_left,
+                b.left() + r.top_left,
+                b.top() + r.top_left,
+                true,
+                true,
+            ),
+            (
+                r.top_right,
+                b.right() - r.top_right,
+                b.top() + r.top_right,
+                false,
+                true,
+            ),
+            (
+                r.bottom_right,
+                b.right() - r.bottom_right,
+                b.bottom() - r.bottom_right,
+                false,
+                false,
+            ),
+            (
+                r.bottom_left,
+                b.left() + r.bottom_left,
+                b.bottom() - r.bottom_left,
+                true,
+                false,
+            ),
         ] {
             let in_x = if left { point.x < cx } else { point.x > cx };
             let in_y = if top { point.y < cy } else { point.y > cy };
@@ -5038,7 +5105,8 @@ impl Window {
         }
 
         {
-            let _profile = crate::native_profiling::current_span("native", "GPUI finish layout and text");
+            let _profile =
+                crate::native_profiling::current_span("native", "GPUI finish layout and text");
             self.layout_engine.as_mut().unwrap().clear();
             self.text_system().finish_frame();
         }
@@ -5055,7 +5123,8 @@ impl Window {
         self.scene_animation_interval
             .set(self.rendered_frame.scene.animation_frame_interval());
         {
-            let _profile = crate::native_profiling::current_span("native", "GPUI clear previous frame");
+            let _profile =
+                crate::native_profiling::current_span("native", "GPUI clear previous frame");
             self.next_frame.clear();
         }
         let current_focus_path = self.rendered_frame.focus_path();
@@ -5287,7 +5356,9 @@ impl Window {
         }
 
         self.compute_hit_order(deferred_hitboxes);
-        self.mouse_hit_test = self.next_frame.hit_test(self.mouse_position, self.scale_factor);
+        self.mouse_hit_test = self
+            .next_frame
+            .hit_test(self.mouse_position, self.scale_factor);
 
         // Now actually paint the elements.
         #[cfg(feature = "profiler")]
@@ -5319,7 +5390,8 @@ impl Window {
                 paint: Instant::now().duration_since(paint_start),
             });
 
-        let _profile = crate::native_profiling::current_span("native", "GPUI postpaint accessibility");
+        let _profile =
+            crate::native_profiling::current_span("native", "GPUI postpaint accessibility");
         // a11y may have been activated/deactivated halfway through the frame
         let a11y_active_start_of_frame = self.a11y.is_active();
         self.a11y.sync_active_flag();
@@ -5504,15 +5576,27 @@ impl Window {
                                 // Masks are captured before transforms, in window space.
                                 window.with_content_mask(content_mask, |window| {
                                     window.vn_with_absolute_clip_stack(vn_clip, |window| {
-                                        window.with_absolute_element_opacity(element_opacity, |window| {
-                                            window.with_absolute_element_transform(element_transform, |window| {
-                                                window.with_absolute_element_offset(absolute_offset, |window| {
-                                                    let outer = mem::replace(&mut window.vn_defer_scope, vn_scope);
-                                                    element.prepaint(window, cx);
-                                                    window.vn_defer_scope = outer;
-                                                });
-                                            });
-                                        });
+                                        window.with_absolute_element_opacity(
+                                            element_opacity,
+                                            |window| {
+                                                window.with_absolute_element_transform(
+                                                    element_transform,
+                                                    |window| {
+                                                        window.with_absolute_element_offset(
+                                                            absolute_offset,
+                                                            |window| {
+                                                                let outer = mem::replace(
+                                                                    &mut window.vn_defer_scope,
+                                                                    vn_scope,
+                                                                );
+                                                                element.prepaint(window, cx);
+                                                                window.vn_defer_scope = outer;
+                                                            },
+                                                        );
+                                                    },
+                                                );
+                                            },
+                                        );
                                     });
                                 });
                             });
@@ -5521,7 +5605,8 @@ impl Window {
                     if a11y_parent.is_some() {
                         self.a11y.nodes.end_adopted();
                     }
-                    self.next_frame.deferred_draws[deferred_draw_ix].accessed_entities = accessed_entities;
+                    self.next_frame.deferred_draws[deferred_draw_ix].accessed_entities =
+                        accessed_entities;
                     self.next_frame.deferred_draws[deferred_draw_ix].element = Some(element);
                 } else {
                     cx.entities.extend_accessed(
@@ -5617,11 +5702,14 @@ impl Window {
                     window.with_content_mask(content_mask, |window| {
                         window.vn_reopen_clip_layers(vn_clip, base, cx, |window, cx| {
                             window.with_absolute_element_opacity(element_opacity, |window| {
-                                window.with_absolute_element_transform(element_transform, |window| {
-                                    window.with_rem_size(Some(rem_size), |window| {
-                                        element.paint(window, cx);
-                                    });
-                                });
+                                window.with_absolute_element_transform(
+                                    element_transform,
+                                    |window| {
+                                        window.with_rem_size(Some(rem_size), |window| {
+                                            element.paint(window, cx);
+                                        });
+                                    },
+                                );
                             });
                         });
                     });
@@ -5846,8 +5934,8 @@ impl Window {
         // Dropping this span makes a retained titlebar stop dragging, and
         // loses NoDrag cutouts when only an ancestor repaints.
         self.next_frame.window_control_hitboxes.extend(
-            self.rendered_frame.window_control_hitboxes
-                [range.start.window_control_hitboxes_index..range.end.window_control_hitboxes_index]
+            self.rendered_frame.window_control_hitboxes[range.start.window_control_hitboxes_index
+                ..range.end.window_control_hitboxes_index]
                 .iter()
                 .cloned(),
         );
@@ -6028,8 +6116,10 @@ impl Window {
         let geometry = Arc::new(crate::VnClipGeometry {
             fill_rule: crate::VnFillRule::NonZero,
             segments: vec![
-                [left, top, right, top], [right, top, right, bottom],
-                [right, bottom, left, bottom], [left, bottom, left, top],
+                [left, top, right, top],
+                [right, top, right, bottom],
+                [right, bottom, left, bottom],
+                [left, bottom, left, top],
             ],
             bounds,
         });
@@ -6047,30 +6137,63 @@ impl Window {
     }
 
     /// Resolve a text brush once at its owner, before descendant overflow masks.
-    pub fn vn_text_paint(&self, fill: crate::VnTextFill, bounds: Bounds<Pixels>) -> Arc<crate::VnTextPaint> {
-        let x = bounds.origin.x.0; let y = bounds.origin.y.0;
-        let right = x + bounds.size.width.0; let bottom = y + bounds.size.height.0;
+    pub fn vn_text_paint(
+        &self,
+        fill: crate::VnTextFill,
+        bounds: Bounds<Pixels>,
+    ) -> Arc<crate::VnTextPaint> {
+        let x = bounds.origin.x.0;
+        let y = bounds.origin.y.0;
+        let right = x + bounds.size.width.0;
+        let bottom = y + bounds.size.height.0;
         let outline = crate::VnClipOutline {
             fill_rule: crate::VnFillRule::NonZero,
-            verbs: vec![crate::VnPathVerb::MoveTo([x,y]), crate::VnPathVerb::LineTo([right,y]),
-                crate::VnPathVerb::LineTo([right,bottom]), crate::VnPathVerb::LineTo([x,bottom]), crate::VnPathVerb::Close],
+            verbs: vec![
+                crate::VnPathVerb::MoveTo([x, y]),
+                crate::VnPathVerb::LineTo([right, y]),
+                crate::VnPathVerb::LineTo([right, bottom]),
+                crate::VnPathVerb::LineTo([x, bottom]),
+                crate::VnPathVerb::Close,
+            ],
         };
-        let m = self.element_transform.inverse().unwrap_or_else(TransformationMatrix::unit);
+        let m = self
+            .element_transform
+            .inverse()
+            .unwrap_or_else(TransformationMatrix::unit);
         Arc::new(crate::VnTextPaint {
-            fill, bounds: [x, y, bounds.size.width.0, bounds.size.height.0],
-            inverse: [m.rotation_scale[0][0], m.rotation_scale[0][1], m.rotation_scale[1][0], m.rotation_scale[1][1], m.translation[0], m.translation[1]],
+            fill,
+            bounds: [x, y, bounds.size.width.0, bounds.size.height.0],
+            inverse: [
+                m.rotation_scale[0][0],
+                m.rotation_scale[0][1],
+                m.rotation_scale[1][0],
+                m.rotation_scale[1][1],
+                m.translation[0],
+                m.translation[1],
+            ],
             scale_factor: self.scale_factor,
-            geometry: Arc::new(crate::VnClipGeometry::new(&outline, self.scale_factor, self.element_transform)),
+            geometry: Arc::new(crate::VnClipGeometry::new(
+                &outline,
+                self.scale_factor,
+                self.element_transform,
+            )),
             content_mask: self.snapped_content_mask(),
         })
     }
 
     /// Paint only glyph alpha into the owner's shared mask. Child overflow
     /// masks still apply to their sprites without clipping later sibling glyphs.
-    pub fn vn_with_text_mask<R>(&mut self, paint: Arc<crate::VnTextPaint>, f: impl FnOnce(&mut Self) -> R) -> R {
+    pub fn vn_with_text_mask<R>(
+        &mut self,
+        paint: Arc<crate::VnTextPaint>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
         self.next_frame.scene.vn_push_isolation(crate::VnIsolation {
-            geometry: paint.geometry.clone(), color_matrix: None,
-            content_mask: paint.content_mask, text_paint: Some(paint), capture: None,
+            geometry: paint.geometry.clone(),
+            color_matrix: None,
+            content_mask: paint.content_mask,
+            text_paint: Some(paint),
+            capture: None,
         });
         let result = f(self);
         self.next_frame.scene.vn_pop_isolation();
@@ -6127,7 +6250,9 @@ impl Window {
     /// Ends the content of `node`'s open layer with its mask, if it has one.
     fn vn_paint_mask(&mut self, node: &crate::VnClipNode, cx: &mut App) {
         let Some(clip) = &node.mask else { return };
-        let Some(paint) = clip.mask.paint.clone() else { return };
+        let Some(paint) = clip.mask.paint.clone() else {
+            return;
+        };
         self.next_frame.scene.vn_begin_mask(clip.mask.luminance);
         // The content already carries the element's opacity; the mask must not
         // apply it a second time.
@@ -6216,13 +6341,16 @@ impl Window {
         self.vn_with_absolute_clip_stack(clip, |window| {
             for node in &chain {
                 let content_mask = window.snapped_content_mask();
-                window.next_frame.scene.vn_push_isolation(crate::VnIsolation {
-                    geometry: node.geometry.clone(),
-                    color_matrix: node.color_matrix,
-                    text_paint: None,
-                    content_mask,
-                    capture: node.capture,
-                });
+                window
+                    .next_frame
+                    .scene
+                    .vn_push_isolation(crate::VnIsolation {
+                        geometry: node.geometry.clone(),
+                        color_matrix: node.color_matrix,
+                        text_paint: None,
+                        content_mask,
+                        capture: node.capture,
+                    });
             }
             let result = f(window, cx);
             for node in chain.iter().rev() {
@@ -6247,7 +6375,10 @@ impl Window {
     ) -> R {
         let Some(id) = id else { return f(self) };
         let scale_factor = self.scale_factor();
-        let viewport = Bounds { origin: Point::default(), size: self.viewport_size };
+        let viewport = Bounds {
+            origin: Point::default(),
+            size: self.viewport_size,
+        };
         let device = viewport.scale(scale_factor);
         let info = crate::VnCaptureInfo {
             id,
@@ -6268,13 +6399,16 @@ impl Window {
                 if !window.invalidator.is_painting() {
                     return f(window);
                 }
-                window.next_frame.scene.vn_push_isolation(crate::VnIsolation {
-                    geometry: node.geometry.clone(),
-                    color_matrix: None,
-                    text_paint: None,
-                    content_mask: ContentMask::rect(device),
-                    capture: Some(info),
-                });
+                window
+                    .next_frame
+                    .scene
+                    .vn_push_isolation(crate::VnIsolation {
+                        geometry: node.geometry.clone(),
+                        color_matrix: None,
+                        text_paint: None,
+                        content_mask: ContentMask::rect(device),
+                        capture: Some(info),
+                    });
                 let result = f(window);
                 window.next_frame.scene.vn_pop_isolation();
                 result
@@ -6291,7 +6425,11 @@ impl Window {
         if !isolate || !self.invalidator.is_painting() {
             return f(self);
         }
-        let device = Bounds { origin: Point::default(), size: self.viewport_size }.scale(self.scale_factor());
+        let device = Bounds {
+            origin: Point::default(),
+            size: self.viewport_size,
+        }
+        .scale(self.scale_factor());
         let content_mask = self.snapped_content_mask();
         self.next_frame.scene.vn_push_isolation(crate::VnIsolation {
             geometry: Arc::new(crate::VnClipGeometry::rect(device)),
@@ -6316,7 +6454,9 @@ impl Window {
         if device.size.width.0 <= 0. || device.size.height.0 <= 0. {
             return;
         }
-        let Some(inverse) = self.element_transform.inverse() else { return };
+        let Some(inverse) = self.element_transform.inverse() else {
+            return;
+        };
         let (w, h) = (device.size.width.0, device.size.height.0);
         let [[a, b], [c, d]] = inverse.rotation_scale;
         let [tx, ty] = inverse.translation;
@@ -6324,7 +6464,10 @@ impl Window {
         let to_unit = [a / w, b / w, (tx - x) / w, c / h, d / h, (ty - y) / h];
         let covered = crate::scene::transformed_bounds(device, self.element_transform);
         let covered = Bounds::from_corners(
-            point(ScaledPixels(covered.origin.x.0.floor()), ScaledPixels(covered.origin.y.0.floor())),
+            point(
+                ScaledPixels(covered.origin.x.0.floor()),
+                ScaledPixels(covered.origin.y.0.floor()),
+            ),
             point(
                 ScaledPixels((covered.origin.x.0 + covered.size.width.0).ceil()),
                 ScaledPixels((covered.origin.y.0 + covered.size.height.0).ceil()),
@@ -6332,33 +6475,41 @@ impl Window {
         );
         let opacity = self.element_opacity;
         let content_mask = self.snapped_content_mask();
-        self.next_frame.scene.vn_insert_snapshot(crate::VnSnapshotPaint {
-            id,
-            to_unit,
-            bounds: covered,
-            content_mask,
-            opacity,
-            plus_lighter,
-            in_place: false,
-        });
+        self.next_frame
+            .scene
+            .vn_insert_snapshot(crate::VnSnapshotPaint {
+                id,
+                to_unit,
+                bounds: covered,
+                content_mask,
+                opacity,
+                plus_lighter,
+                in_place: false,
+            });
     }
 
     /// vue-native fork: draws the snapshot `id` where its element was when
     /// captured, through the opacity in force.
     pub fn vn_paint_snapshot_in_place(&mut self, id: u64) {
         self.invalidator.debug_assert_paint();
-        let viewport = Bounds { origin: Point::default(), size: self.viewport_size }.scale(self.scale_factor());
+        let viewport = Bounds {
+            origin: Point::default(),
+            size: self.viewport_size,
+        }
+        .scale(self.scale_factor());
         let opacity = self.element_opacity;
         let content_mask = self.snapped_content_mask();
-        self.next_frame.scene.vn_insert_snapshot(crate::VnSnapshotPaint {
-            id,
-            to_unit: [0.; 6],
-            bounds: viewport,
-            content_mask,
-            opacity,
-            plus_lighter: false,
-            in_place: true,
-        });
+        self.next_frame
+            .scene
+            .vn_insert_snapshot(crate::VnSnapshotPaint {
+                id,
+                to_unit: [0.; 6],
+                bounds: viewport,
+                content_mask,
+                opacity,
+                plus_lighter: false,
+                in_place: true,
+            });
     }
 
     /// vue-native fork: what the last drawn frame knows of capture `id`:
@@ -6382,11 +6533,16 @@ impl Window {
     }
 
     fn vn_settle_captures(&mut self) {
-        let viewport = Bounds { origin: Point::default(), size: self.viewport_size }.scale(self.scale_factor());
+        let viewport = Bounds {
+            origin: Point::default(),
+            size: self.viewport_size,
+        }
+        .scale(self.scale_factor());
         let scene = &mut self.next_frame.scene;
         for capture in &mut scene.vn_captures {
             capture.ink = capture.ink.intersect(&viewport);
-            self.vn_capture_records.insert(capture.info.id, (capture.info, capture.ink));
+            self.vn_capture_records
+                .insert(capture.info.id, (capture.info, capture.ink));
         }
         let records = &self.vn_capture_records;
         scene.vn_resolve_snapshots(|id| records.get(&id).copied());
@@ -6677,15 +6833,12 @@ impl Window {
     /// Obtain the current content mask. This method should only be called during element drawing.
     pub fn content_mask(&self) -> ContentMask<Pixels> {
         self.invalidator.debug_assert_paint_or_prepaint();
-        self.content_mask_stack
-            .last()
-            .cloned()
-            .unwrap_or_else(|| {
-                ContentMask::rect(Bounds {
-                    origin: Point::default(),
-                    size: self.viewport_size,
-                })
+        self.content_mask_stack.last().cloned().unwrap_or_else(|| {
+            ContentMask::rect(Bounds {
+                origin: Point::default(),
+                size: self.viewport_size,
             })
+        })
     }
 
     /// Provide elements in the called function with a new namespace in which their identifiers must be unique.
@@ -6901,10 +7054,7 @@ impl Window {
             element: Some(element),
             absolute_offset,
             element_transform: self.element_transform,
-            a11y_parent: self
-                .a11y
-                .is_active()
-                .then(|| self.a11y.nodes.current_id()),
+            a11y_parent: self.a11y.is_active().then(|| self.a11y.nodes.current_id()),
             vn_stack: stack_key,
             element_opacity: self.element_opacity,
             vn_clip: if content_mask.is_some() {
@@ -6952,7 +7102,13 @@ impl Window {
         corner_radii: Corners<Pixels>,
         shadows: &[BoxShadow],
     ) {
-        self.paint_outer_shadows(bounds, corner_radii, Corners::default(), shadows, SHADOW_OUTSIDE_BOX);
+        self.paint_outer_shadows(
+            bounds,
+            corner_radii,
+            Corners::default(),
+            shadows,
+            SHADOW_OUTSIDE_BOX,
+        );
     }
 
     /// vue-native fork: [`Self::paint_drop_shadows`] without the cut-out: the
@@ -6964,7 +7120,13 @@ impl Window {
         corner_radii: Corners<Pixels>,
         shadows: &[BoxShadow],
     ) {
-        self.paint_outer_shadows(bounds, corner_radii, Corners::default(), shadows, SHADOW_UNDER_BOX);
+        self.paint_outer_shadows(
+            bounds,
+            corner_radii,
+            Corners::default(),
+            shadows,
+            SHADOW_UNDER_BOX,
+        );
     }
 
     /// vue-native fork: [`Self::paint_drop_shadows`] (or, with `under_box`,
@@ -6977,7 +7139,11 @@ impl Window {
         shadows: &[BoxShadow],
         under_box: bool,
     ) {
-        let kind = if under_box { SHADOW_UNDER_BOX } else { SHADOW_OUTSIDE_BOX };
+        let kind = if under_box {
+            SHADOW_UNDER_BOX
+        } else {
+            SHADOW_OUTSIDE_BOX
+        };
         self.paint_outer_shadows(bounds, corner_radii, corner_shapes, shadows, kind);
     }
 
@@ -7072,7 +7238,11 @@ impl Window {
             let zero = Pixels::ZERO;
             let spread = shadow.spread_radius;
             let hole_radius = |radius: Pixels, shape: CornerShape| {
-                if shape.is_round() || spread <= zero { (radius - spread).max(zero) } else { radius }
+                if shape.is_round() || spread <= zero {
+                    (radius - spread).max(zero)
+                } else {
+                    radius
+                }
             };
             let hole_corner_radii = Corners {
                 top_left: hole_radius(corner_radii.top_left, corner_shapes.top_left),
@@ -7094,13 +7264,12 @@ impl Window {
                 pad: 0,
                 transformation: self.element_transform,
                 element_bounds,
-                corner_shapes: CornerShapes::new(&corner_shapes)
-                    .with_insets(Corners {
-                        top_left: (inset, inset),
-                        top_right: (inset, inset),
-                        bottom_right: (inset, inset),
-                        bottom_left: (inset, inset),
-                    }),
+                corner_shapes: CornerShapes::new(&corner_shapes).with_insets(Corners {
+                    top_left: (inset, inset),
+                    top_right: (inset, inset),
+                    bottom_right: (inset, inset),
+                    bottom_left: (inset, inset),
+                }),
             });
         }
     }
@@ -7323,7 +7492,9 @@ impl Window {
             let tint = effect.tint.opacity(opacity);
             if tint.a > 0. {
                 self.paint_quad(
-                    fill(bounds, tint).corner_radii(corner_radii).corner_shapes(corner_shapes),
+                    fill(bounds, tint)
+                        .corner_radii(corner_radii)
+                        .corner_shapes(corner_shapes),
                 );
             }
             return;
@@ -7390,7 +7561,14 @@ impl Window {
         spec: EffectSpec,
         element: u64,
     ) {
-        self.vn_paint_effect_with(bounds, corner_radii, Corners::default(), spec, element, None);
+        self.vn_paint_effect_with(
+            bounds,
+            corner_radii,
+            Corners::default(),
+            spec,
+            element,
+            None,
+        );
     }
 
     /// vue-native: [`Self::vn_paint_effect`] with the images `spec` samples,
@@ -7419,9 +7597,15 @@ impl Window {
     ) {
         self.invalidator.debug_assert_paint();
         let opacity = self.element_opacity();
-        let Some(mut quad) =
-            self.vn_effect_quad(bounds, corner_radii, corner_shapes, spec, element, opacity, textures.as_deref())
-        else {
+        let Some(mut quad) = self.vn_effect_quad(
+            bounds,
+            corner_radii,
+            corner_shapes,
+            spec,
+            element,
+            opacity,
+            textures.as_deref(),
+        ) else {
             return;
         };
         quad.flags &= !crate::EFFECT_FLAG_NEEDS_CONTENT;
@@ -7979,8 +8163,7 @@ impl Window {
             return Ok(());
         };
         let bounds = Bounds {
-            origin: integer_origin
-                + raster_bounds.origin.map(Into::into)
+            origin: integer_origin + raster_bounds.origin.map(Into::into)
                 - point(ScaledPixels(padding as f32), ScaledPixels(padding as f32)),
             size: tile.bounds.size.map(Into::into),
         };
@@ -8172,10 +8355,10 @@ impl Window {
             transformation: self.element_transform.compose(transformation),
         };
         match animation {
-            Some(animation) => self.next_frame.scene.insert_animated_sprite(
-                sprite,
-                animation.under(self.element_transform),
-            ),
+            Some(animation) => self
+                .next_frame
+                .scene
+                .insert_animated_sprite(sprite, animation.under(self.element_transform)),
             None => self.next_frame.scene.insert_primitive(sprite),
         }
 
@@ -8255,10 +8438,16 @@ impl Window {
             frame_index,
         };
 
-        let tile = self.sprite_atlas.get_or_insert_with(params.into(), &mut || {
-            Ok(data.as_bytes(frame_index).map(|bytes| (data.size(frame_index), Cow::Borrowed(bytes))))
-        })?;
-        let Some(tile) = tile else { return Ok(()); };
+        let tile = self
+            .sprite_atlas
+            .get_or_insert_with(params.into(), &mut || {
+                Ok(data
+                    .as_bytes(frame_index)
+                    .map(|bytes| (data.size(frame_index), Cow::Borrowed(bytes))))
+            })?;
+        let Some(tile) = tile else {
+            return Ok(());
+        };
 
         let visible_bounds_snapped = self.snap_bounds(visible_bounds);
         let sampling_mode = sampling.mode(
@@ -8389,7 +8578,10 @@ impl Window {
         frame_index: usize,
         texture: GpuTextureHandle,
     ) -> Result<bool> {
-        Ok(self.write_image_tile(data, frame_index, TileSource::Gpu(texture))? != TileWrite::Refused)
+        Ok(
+            self.write_image_tile(data, frame_index, TileSource::Gpu(texture))?
+                != TileWrite::Refused,
+        )
     }
 
     /// vue-native fork: writes a new frame into the sprite-atlas tile that backs
@@ -8499,12 +8691,10 @@ impl Window {
         }
         .into();
         let before = self.sprite_atlas.tile(&key);
-        let Some(after) = self.sprite_atlas.upload_from_d3d12(
-            &key,
-            image.size(frame_index),
-            texture,
-            owner,
-        )? else {
+        let Some(after) =
+            self.sprite_atlas
+                .upload_from_d3d12(&key, image.size(frame_index), texture, owner)?
+        else {
             return Ok(TileWrite::Refused);
         };
         Ok(match before {
@@ -8529,9 +8719,13 @@ impl Window {
         }
         .into();
         let before = self.sprite_atlas.tile(&key);
-        let Some(after) =
-            self.sprite_atlas
-                .upload_from_metal(&key, image.size(frame_index), texture, ready, owner)?
+        let Some(after) = self.sprite_atlas.upload_from_metal(
+            &key,
+            image.size(frame_index),
+            texture,
+            ready,
+            owner,
+        )?
         else {
             return Ok(TileWrite::Refused);
         };
@@ -8575,7 +8769,15 @@ impl Window {
 
     /// Reports a live atlas tile on backends supporting GPU image imports.
     pub fn has_image_atlas_tile(&self, data: &RenderImage, frame_index: usize) -> bool {
-        self.sprite_atlas.tile(&RenderImageParams {image_id:data.id,frame_index}.into()).is_some()
+        self.sprite_atlas
+            .tile(
+                &RenderImageParams {
+                    image_id: data.id,
+                    frame_index,
+                }
+                .into(),
+            )
+            .is_some()
     }
 
     /// Returns whether every frame of an image is present in the sprite atlas.
@@ -8716,7 +8918,9 @@ impl Window {
 
     /// The containing block's percentage basis for a box in the current prepaint, in logical pixels.
     pub fn vn_percentage_basis(&self, layout_id: LayoutId) -> Option<Size<Pixels>> {
-        self.layout_engine.as_ref()?.percentage_basis(layout_id, self.scale_factor())
+        self.layout_engine
+            .as_ref()?
+            .percentage_basis(layout_id, self.scale_factor())
     }
 
     /// Obtain the bounds computed for the given LayoutId relative to the window. This method will usually be invoked by
@@ -8884,7 +9088,9 @@ impl Window {
         let tagged = &frame.vn_tagged_hitboxes;
         let mut out = Vec::new();
         let mut visit = |(tag, hitbox): &(u32, Hitbox)| {
-            if tag & VN_TAG_PASSIVE != 0 || !Frame::box_contains(hitbox, position, self.scale_factor) {
+            if tag & VN_TAG_PASSIVE != 0
+                || !Frame::box_contains(hitbox, position, self.scale_factor)
+            {
                 return true;
             }
             out.push(*tag);
@@ -9142,7 +9348,10 @@ impl Window {
             if !Frame::box_contains(hitbox, position, self.scale_factor) {
                 continue;
             }
-            if let Some((area, _)) = self.rendered_frame.window_control_hitboxes.iter()
+            if let Some((area, _)) = self
+                .rendered_frame
+                .window_control_hitboxes
+                .iter()
                 .find(|(_, control)| control.id == hitbox.id)
             {
                 return Some(*area);
@@ -9944,7 +10153,9 @@ impl Window {
     }
 
     fn dispatch_mouse_event(&mut self, event: &dyn Any, cx: &mut App) {
-        self.mouse_hit_test = self.rendered_frame.hit_test(self.mouse_position(), self.scale_factor);
+        self.mouse_hit_test = self
+            .rendered_frame
+            .hit_test(self.mouse_position(), self.scale_factor);
 
         // vue-native fork: the embedder narrows a press, a release or a wheel
         // to the hitboxes it is FOR, before anyone hears it.
@@ -10716,7 +10927,8 @@ impl Window {
         should_show: impl FnOnce() -> bool + 'static,
         completed: impl FnOnce(bool) + 'static,
     ) -> bool {
-        self.platform_window.show_window(activate, Box::new(should_show), Box::new(completed))
+        self.platform_window
+            .show_window(activate, Box::new(should_show), Box::new(completed))
     }
 
     /// Requests that the operating system draw attention to this window.
@@ -13082,18 +13294,40 @@ mod tests {
         window
             .update(cx, {
                 let runs = runs.clone();
-                move |_, window, _| window.on_next_frame_passive(move |window, _| rearm(window, runs))
+                move |_, window, _| {
+                    window.on_next_frame_passive(move |window, _| rearm(window, runs))
+                }
             })
             .unwrap();
-        assert_eq!(test_window.frame_wake_count(), baseline, "queueing a passive callback is not demand");
+        assert_eq!(
+            test_window.frame_wake_count(),
+            baseline,
+            "queueing a passive callback is not demand"
+        );
 
-        test_window.simulate_frame_request(RequestFrameOptions { require_presentation: true, ..Default::default() });
-        test_window.simulate_frame_request(RequestFrameOptions { require_presentation: true, ..Default::default() });
-        assert_eq!(runs.get(), 2, "a passive callback runs with every delivered frame");
-        assert_eq!(test_window.frame_wake_count(), baseline, "a re-arming passive pump never wakes the frame source");
+        test_window.simulate_frame_request(RequestFrameOptions {
+            require_presentation: true,
+            ..Default::default()
+        });
+        test_window.simulate_frame_request(RequestFrameOptions {
+            require_presentation: true,
+            ..Default::default()
+        });
+        assert_eq!(
+            runs.get(),
+            2,
+            "a passive callback runs with every delivered frame"
+        );
+        assert_eq!(
+            test_window.frame_wake_count(),
+            baseline,
+            "a re-arming passive pump never wakes the frame source"
+        );
 
         // Real demand next to the passive pump still wakes it.
-        window.update(cx, |_, window, _| window.on_next_frame(|_, _| {})).unwrap();
+        window
+            .update(cx, |_, window, _| window.on_next_frame(|_, _| {}))
+            .unwrap();
         assert!(test_window.frame_wake_count() > baseline);
     }
 
@@ -14347,10 +14581,12 @@ mod tests {
             canvas(
                 |_, _, _| {},
                 move |_, _, window, _| {
-                    window.content_mask_stack.push(ContentMask::rect(Bounds::from_corners(
-                        point(px(-1000.), px(-1000.)),
-                        point(px(1000.), px(1000.)),
-                    )));
+                    window
+                        .content_mask_stack
+                        .push(ContentMask::rect(Bounds::from_corners(
+                            point(px(-1000.), px(-1000.)),
+                            point(px(1000.), px(1000.)),
+                        )));
                     paint(window);
                     window.content_mask_stack.pop();
                 },
@@ -14910,8 +15146,13 @@ mod vn_assume_active_tests {
         let counter = focused.clone();
         let window = cx.open_window(size(px(200.), px(200.)), move |window, cx| {
             let handle = cx.focus_handle();
-            let on_focus = cx.on_focus(&handle, window, move |_, _, _| counter.set(counter.get() + 1));
-            Focusable { handle, _on_focus: on_focus }
+            let on_focus = cx.on_focus(&handle, window, move |_, _, _| {
+                counter.set(counter.get() + 1)
+            });
+            Focusable {
+                handle,
+                _on_focus: on_focus,
+            }
         });
         let platform = cx.test_window(window.into());
         platform.simulate_active_status_change(false);
@@ -15008,7 +15249,13 @@ mod vn_shadow_tests {
                     .scene
                     .shadows
                     .iter()
-                    .map(|s| (s.inset, s.shape_corner_radii.top_left.0, s.corner_radii.top_left.0))
+                    .map(|s| {
+                        (
+                            s.inset,
+                            s.shape_corner_radii.top_left.0,
+                            s.corner_radii.top_left.0,
+                        )
+                    })
                     .collect();
                 (shadows, window.scale_factor())
             })
@@ -15020,14 +15267,26 @@ mod vn_shadow_tests {
         cx: &mut TestAppContext,
     ) {
         let (shadows, scale) = paint(false, cx);
-        let outer = shadows.iter().find(|s| s.0 != SHADOW_INSET).expect("the outer shadow");
-        assert_eq!(outer.0, SHADOW_OUTSIDE_BOX, "the shaders cut the border box out of it");
+        let outer = shadows
+            .iter()
+            .find(|s| s.0 != SHADOW_INSET)
+            .expect("the outer shadow");
+        assert_eq!(
+            outer.0, SHADOW_OUTSIDE_BOX,
+            "the shaders cut the border box out of it"
+        );
         assert_eq!(outer.1, 9. * scale, "6px corner + 3px spread");
         assert_eq!(outer.2, 6. * scale, "the cut-out is the border box itself");
-        assert!(shadows.iter().any(|s| s.0 == SHADOW_INSET), "the inset shadow is unchanged");
+        assert!(
+            shadows.iter().any(|s| s.0 == SHADOW_INSET),
+            "the inset shadow is unchanged"
+        );
 
         let (shadows, _) = paint(true, cx);
-        let outer = shadows.iter().find(|s| s.0 != SHADOW_INSET).expect("the outer shadow");
+        let outer = shadows
+            .iter()
+            .find(|s| s.0 != SHADOW_INSET)
+            .expect("the outer shadow");
         assert_eq!(outer.0, SHADOW_UNDER_BOX);
     }
 }
@@ -15050,7 +15309,10 @@ mod vn_rounded_mask_tests {
         let a = mask(0., 0., 100., 100., 0.);
         let b = mask(50., 20., 100., 30., 0.);
         let both = a.intersect(&b);
-        assert_eq!(both.bounds, Bounds::new(point(px(50.), px(20.)), size(px(50.), px(30.))));
+        assert_eq!(
+            both.bounds,
+            Bounds::new(point(px(50.), px(20.)), size(px(50.), px(30.)))
+        );
         assert!(!both.is_rounded());
     }
 
@@ -15059,8 +15321,14 @@ mod vn_rounded_mask_tests {
         // A rounded card and the square scroller that fills it.
         let card = mask(10., 10., 200., 160., 24.);
         let scroller = mask(10., 10., 200., 160., 0.);
-        assert_eq!(scroller.intersect(&card).corner_radii, Corners::all(px(24.)));
-        assert_eq!(card.intersect(&scroller).corner_radii, Corners::all(px(24.)));
+        assert_eq!(
+            scroller.intersect(&card).corner_radii,
+            Corners::all(px(24.))
+        );
+        assert_eq!(
+            card.intersect(&scroller).corner_radii,
+            Corners::all(px(24.))
+        );
 
         // A rect that shares only the card's top edge: its top corners are
         // the card's, its bottom ones are its own.
@@ -15090,11 +15358,23 @@ mod vn_rounded_mask_tests {
     fn contains_follows_the_curve() {
         let avatar = mask(0., 0., 64., 64., 32.);
         assert!(avatar.contains(&point(px(32.), px(32.))));
-        assert!(avatar.contains(&point(px(32.), px(1.))), "the top edge's middle");
-        assert!(!avatar.contains(&point(px(2.), px(2.))), "outside the curve");
+        assert!(
+            avatar.contains(&point(px(32.), px(1.))),
+            "the top edge's middle"
+        );
+        assert!(
+            !avatar.contains(&point(px(2.), px(2.))),
+            "outside the curve"
+        );
         assert!(!avatar.contains(&point(px(62.), px(62.))));
-        assert!(avatar.contains(&point(px(10.), px(10.))), "inside the curve");
-        assert!(!avatar.contains(&point(px(70.), px(32.))), "outside the rect");
+        assert!(
+            avatar.contains(&point(px(10.), px(10.))),
+            "inside the curve"
+        );
+        assert!(
+            !avatar.contains(&point(px(70.), px(32.))),
+            "outside the rect"
+        );
         assert!(mask(0., 0., 64., 64., 0.).contains(&point(px(1.), px(1.))));
     }
 
@@ -15105,7 +15385,10 @@ mod vn_rounded_mask_tests {
             rotation_scale: [[1., 0.], [0., 1.]],
             translation: [5., 7.],
         };
-        assert_eq!(transform_mask(moved, card, 1.).corner_radii, Corners::all(px(10.)));
+        assert_eq!(
+            transform_mask(moved, card, 1.).corner_radii,
+            Corners::all(px(10.))
+        );
 
         let scaled = TransformationMatrix {
             rotation_scale: [[2., 0.], [0., 3.]],
@@ -15129,8 +15412,8 @@ mod vn_rounded_mask_tests {
 #[cfg(test)]
 mod vn_pointer_inside_tests {
     use crate::{
-        Context, Modifiers, MouseExitEvent, MouseMoveEvent, PlatformInput, Render,
-        TestAppContext, Window, div, point, prelude::*, px, size,
+        Context, Modifiers, MouseExitEvent, MouseMoveEvent, PlatformInput, Render, TestAppContext,
+        Window, div, point, prelude::*, px, size,
     };
     use std::{cell::Cell, rc::Rc};
 
@@ -15278,9 +15561,7 @@ mod vn_pointer_inside_tests {
     }
 
     #[gpui::test]
-    fn a_speed_change_continues_the_phase_instead_of_rescaling_the_clock(
-        cx: &mut TestAppContext,
-    ) {
+    fn a_speed_change_continues_the_phase_instead_of_rescaling_the_clock(cx: &mut TestAppContext) {
         let speed = Rc::new(Cell::new(1.));
         let shared = speed.clone();
         let window = cx.open_window(size(px(200.), px(100.)), move |_, _| Spinning {
@@ -15300,7 +15581,10 @@ mod vn_pointer_inside_tests {
         // A rescale is only visible once the clock is away from zero.
         std::thread::sleep(std::time::Duration::from_millis(200));
         let (before, then) = repaint(cx);
-        assert!((before - then).abs() < 1e-3, "an unchanged speed is `speed * time`");
+        assert!(
+            (before - then).abs() < 1e-3,
+            "an unchanged speed is `speed * time`"
+        );
 
         speed.set(8.);
         let (after, now) = repaint(cx);
@@ -15380,7 +15664,11 @@ mod vn_tagged_transform_tests {
     }
 
     fn moved(x: TransformLength, y: TransformLength, scale: f32) -> TransformSpec {
-        TransformSpec { translate: (x, y), scale: (scale, scale), ..TransformSpec::IDENTITY }
+        TransformSpec {
+            translate: (x, y),
+            scale: (scale, scale),
+            ..TransformSpec::IDENTITY
+        }
     }
 
     /// A popper wrapper laid out at (0, 0) and moved by `translate`, a button
@@ -15391,18 +15679,28 @@ mod vn_tagged_transform_tests {
 
     impl Render for Popper {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            let probe = |tag, inner: AnyElement| Probe { tag, inner, seen: self.seen.clone() };
+            let probe = |tag, inner: AnyElement| Probe {
+                tag,
+                inner,
+                seen: self.seen.clone(),
+            };
             let mut wrapper = div().w(px(100.)).h(px(80.));
-            wrapper.style().vn_transform =
-                Some(moved(TransformLength::Pixels(300.), TransformLength::Pixels(200.), 1.0));
+            wrapper.style().vn_transform = Some(moved(
+                TransformLength::Pixels(300.),
+                TransformLength::Pixels(200.),
+                1.0,
+            ));
             let mut scaled = div().w(px(20.)).h(px(10.));
             scaled.style().vn_transform =
                 Some(moved(TransformLength::ZERO, TransformLength::ZERO, 2.0));
             // Built inside the button under the button's tag, like a
             // `::before` box: its own transform is not the button's.
             let mut pseudo = div().w(px(4.)).h(px(4.));
-            pseudo.style().vn_transform =
-                Some(moved(TransformLength::Pixels(50.), TransformLength::ZERO, 1.0));
+            pseudo.style().vn_transform = Some(moved(
+                TransformLength::Pixels(50.),
+                TransformLength::ZERO,
+                1.0,
+            ));
             let button = div()
                 .ml(px(10.))
                 .w(px(30.))
@@ -15411,7 +15709,9 @@ mod vn_tagged_transform_tests {
                 .child(pseudo);
             div().size_full().child(probe(
                 1,
-                wrapper.child(probe(2, button.into_any_element())).into_any_element(),
+                wrapper
+                    .child(probe(2, button.into_any_element()))
+                    .into_any_element(),
             ))
         }
     }
@@ -15420,8 +15720,7 @@ mod vn_tagged_transform_tests {
     fn a_probe_sees_its_node_where_the_transforms_put_it(cx: &mut TestAppContext) {
         let seen: Seen = Rc::default();
         let state = seen.clone();
-        let window =
-            cx.open_window(size(px(800.), px(600.)), move |_, _| Popper { seen: state });
+        let window = cx.open_window(size(px(800.), px(600.)), move |_, _| Popper { seen: state });
         window.update(cx, |_, window, _| window.refresh()).unwrap();
         cx.run_until_parked();
         let seen = seen.borrow();

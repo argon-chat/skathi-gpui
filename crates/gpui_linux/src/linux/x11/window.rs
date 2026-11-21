@@ -2496,8 +2496,17 @@ impl PlatformWindow for X11Window {
             (size.width.as_f32() * state.scale_factor / 2.0).round(),
             (size.height.as_f32() * state.scale_factor / 2.0).round(),
         );
-        xcb.warp_pointer(x11rb::NONE, window, 0, 0, 0, 0, center.0 as i16, center.1 as i16)
-            .log_err();
+        xcb.warp_pointer(
+            x11rb::NONE,
+            window,
+            0,
+            0,
+            0,
+            0,
+            center.0 as i16,
+            center.1 as i16,
+        )
+        .log_err();
         xcb_flush(xcb);
         state.pointer_lock = Some(PointerLock {
             device,
@@ -2520,7 +2529,13 @@ impl PlatformWindow for X11Window {
     }
 
     fn take_pointer_motion(&self) -> Option<Point<Pixels>> {
-        self.0.state.borrow_mut().pointer_lock.as_mut()?.motion.take()
+        self.0
+            .state
+            .borrow_mut()
+            .pointer_lock
+            .as_mut()?
+            .motion
+            .take()
     }
 
     fn play_system_bell(&self) {

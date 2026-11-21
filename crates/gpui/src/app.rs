@@ -3246,7 +3246,9 @@ impl App {
         type ImageLoad = CachedLoad<Result<Arc<RenderImage>, crate::ImageCacheError>>;
         let (mut images, mut decoded, mut bytes) = (0, 0, 0u64);
         for entry in self.loading_assets.values() {
-            let Some(load) = entry.downcast_ref::<ImageLoad>() else { continue };
+            let Some(load) = entry.downcast_ref::<ImageLoad>() else {
+                continue;
+            };
             images += 1;
             if let Some(Ok(image)) = load.get() {
                 decoded += 1;

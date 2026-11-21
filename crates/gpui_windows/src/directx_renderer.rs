@@ -713,10 +713,19 @@ impl DirectXRenderer {
                     create_vn_snapshot_texture(&devices.device, format, width, height)?;
                 self.vn_snapshots.insert(
                     capture.info.id,
-                    VnSnapshot { texture, srv, width, height, idle: 0 },
+                    VnSnapshot {
+                        texture,
+                        srv,
+                        width,
+                        height,
+                        idle: 0,
+                    },
                 );
             }
-            let snapshot = self.vn_snapshots.get_mut(&capture.info.id).context("snapshot")?;
+            let snapshot = self
+                .vn_snapshots
+                .get_mut(&capture.info.id)
+                .context("snapshot")?;
             snapshot.idle = 0;
             unsafe {
                 unbind_shader_resources(&devices.device_context);
@@ -728,7 +737,14 @@ impl DirectXRenderer {
                     0,
                     &target.texture,
                     0,
-                    Some(&D3D11_BOX { left, top, front: 0, right, bottom, back: 1 }),
+                    Some(&D3D11_BOX {
+                        left,
+                        top,
+                        front: 0,
+                        right,
+                        bottom,
+                        back: 1,
+                    }),
                 );
             }
         }
@@ -743,14 +759,18 @@ impl DirectXRenderer {
             return;
         }
         for layer in &scene.vn_layers {
-            if let Some(snapshot) = layer.snapshot_id().and_then(|id| self.vn_snapshots.get_mut(&id)) {
+            if let Some(snapshot) = layer
+                .snapshot_id()
+                .and_then(|id| self.vn_snapshots.get_mut(&id))
+            {
                 snapshot.idle = 0;
             }
         }
         for snapshot in self.vn_snapshots.values_mut() {
             snapshot.idle += 1;
         }
-        self.vn_snapshots.retain(|_, snapshot| snapshot.idle <= IDLE_RENDERS);
+        self.vn_snapshots
+            .retain(|_, snapshot| snapshot.idle <= IDLE_RENDERS);
     }
 
     /// vue-native fork: draws one group's batches into the current target,
@@ -858,7 +878,12 @@ impl DirectXRenderer {
         } else {
             None
         };
-        self.vn_composite(index, layer.flags, &target.srv, mask.as_ref().map(|mask| &mask.srv))
+        self.vn_composite(
+            index,
+            layer.flags,
+            &target.srv,
+            mask.as_ref().map(|mask| &mask.srv),
+        )
     }
 
     /// vue-native fork: composites layer `index` from `source` over the
@@ -876,25 +901,27 @@ impl DirectXRenderer {
         let mask_texture = slice::from_ref(mask.unwrap_or(source));
         let segments = slice::from_ref(&self.pipelines.vn_clip_segments.view);
         let text_backgrounds = slice::from_ref(&self.pipelines.vn_text_backgrounds.view);
-        self.pipelines.vn_layer_pipeline.draw_range_with_texture_resources_blend(
-            &devices.device_context,
-            None,
-            &[
-                (0, layer_texture),
-                (2, mask_texture),
-                (9, segments),
-                (10, text_backgrounds),
-            ],
-            self.globals
-                .batch_params_buffer
-                .as_ref()
-                .context("batch params buffer missing")?,
-            &self.samplers(),
-            index as u32,
-            1,
-            (flags & vn_layer_flags::PLUS_LIGHTER != 0)
-                .then_some(&self.pipelines.vn_plus_lighter_blend),
-        )?;
+        self.pipelines
+            .vn_layer_pipeline
+            .draw_range_with_texture_resources_blend(
+                &devices.device_context,
+                None,
+                &[
+                    (0, layer_texture),
+                    (2, mask_texture),
+                    (9, segments),
+                    (10, text_backgrounds),
+                ],
+                self.globals
+                    .batch_params_buffer
+                    .as_ref()
+                    .context("batch params buffer missing")?,
+                &self.samplers(),
+                index as u32,
+                1,
+                (flags & vn_layer_flags::PLUS_LIGHTER != 0)
+                    .then_some(&self.pipelines.vn_plus_lighter_blend),
+            )?;
         unsafe {
             unbind_shader_resources(&devices.device_context);
         }
@@ -934,7 +961,10 @@ impl DirectXRenderer {
             unsafe {
                 unbind_shader_resources(&devices.device_context);
                 devices.device_context.ClearRenderTargetView(
-                    target.rtv.as_ref().context("missing layer render target view")?,
+                    target
+                        .rtv
+                        .as_ref()
+                        .context("missing layer render target view")?,
                     &[0.0; 4],
                 );
                 devices
@@ -1146,7 +1176,11 @@ impl DirectXRenderer {
         if let Some(target) = &self.vn_target {
             return Ok(&target.rtv);
         }
-        Ok(&self.resources.as_ref().context("resources missing")?.render_target_view)
+        Ok(&self
+            .resources
+            .as_ref()
+            .context("resources missing")?
+            .render_target_view)
     }
 
     /// vue-native fork: the texture behind [`Self::target_view`].
@@ -1418,7 +1452,9 @@ impl DirectXRenderer {
                 &scene.vn_clip_segments,
             )?;
             self.pipelines.vn_text_backgrounds.update(
-                &devices.device, &devices.device_context, &scene.vn_text_backgrounds,
+                &devices.device,
+                &devices.device_context,
+                &scene.vn_text_backgrounds,
             )?;
         }
 
@@ -2072,13 +2108,8 @@ impl DirectXResources {
             create_swap_chain(&devices.dxgi_factory, &devices.device, hwnd, width, height)
                 .context("Creating the window swap chain")?
         } else {
-            create_swap_chain_for_composition(
-                &devices.dxgi_factory,
-                &devices.device,
-                width,
-                height,
-            )
-            .context("Creating the composition swap chain")?
+            create_swap_chain_for_composition(&devices.dxgi_factory, &devices.device, width, height)
+                .context("Creating the composition swap chain")?
         };
 
         let (render_target, render_target_view, viewport, hdr) =
@@ -2208,8 +2239,10 @@ impl DirectXRenderPipelines {
             4,
             create_blend_state_premultiplied(device)?,
         )?;
-        let vn_clip_segments = VnStructuredBuffer::new(device, 64, std::mem::size_of::<[f32; 4]>())?;
-        let vn_text_backgrounds = VnStructuredBuffer::new(device, 16, std::mem::size_of::<VnTextBackground>())?;
+        let vn_clip_segments =
+            VnStructuredBuffer::new(device, 64, std::mem::size_of::<[f32; 4]>())?;
+        let vn_text_backgrounds =
+            VnStructuredBuffer::new(device, 16, std::mem::size_of::<VnTextBackground>())?;
 
         let mut pipelines = Self {
             shadow_pipeline,
@@ -3147,7 +3180,12 @@ impl VnStructuredBuffer {
     fn new(device: &ID3D11Device, len: usize, stride: usize) -> Result<Self> {
         let buffer = create_buffer(device, stride, len)?;
         let view = create_buffer_view(device, &buffer)?;
-        Ok(Self { buffer, view, len, stride })
+        Ok(Self {
+            buffer,
+            view,
+            len,
+            stride,
+        })
     }
 
     /// Uploads `data`, growing the buffer to the next power of two first
@@ -3158,7 +3196,10 @@ impl VnStructuredBuffer {
         device_context: &ID3D11DeviceContext,
         data: &[T],
     ) -> Result<()> {
-        anyhow::ensure!(self.stride == std::mem::size_of::<T>(), "structured buffer stride mismatch");
+        anyhow::ensure!(
+            self.stride == std::mem::size_of::<T>(),
+            "structured buffer stride mismatch"
+        );
         if data.is_empty() {
             return Ok(());
         }
@@ -3648,7 +3689,10 @@ pub(crate) mod shader_resources {
         }
     }
 
-    fn compile_error(result: windows::core::Result<()>, error_blob: Option<ID3DBlob>) -> anyhow::Error {
+    fn compile_error(
+        result: windows::core::Result<()>,
+        error_blob: Option<ID3DBlob>,
+    ) -> anyhow::Error {
         let Some(error_blob) = error_blob else {
             return anyhow::anyhow!("{result:?}");
         };

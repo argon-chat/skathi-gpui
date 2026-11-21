@@ -30,7 +30,11 @@ impl ComposedFace {
     /// Does the face draw `c`?
     pub fn covers(&self, c: char) -> bool {
         let c = c as u32;
-        self.ranges.is_empty() || self.ranges.iter().any(|&(start, end)| start <= c && c <= end)
+        self.ranges.is_empty()
+            || self
+                .ranges
+                .iter()
+                .any(|&(start, end)| start <= c && c <= end)
     }
 }
 

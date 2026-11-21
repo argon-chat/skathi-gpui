@@ -364,7 +364,8 @@ impl DirectWriteState {
         let fonts = &self.fonts;
         let composed = &self.composed;
         self.font_to_font_id.retain(|font, font_id| {
-            fonts[font_id.0].composite.is_none() && !composed.contains_key(&font.family.to_lowercase())
+            fonts[font_id.0].composite.is_none()
+                && !composed.contains_key(&font.family.to_lowercase())
         });
     }
 
@@ -412,7 +413,10 @@ impl DirectWriteState {
             };
             self.resolve_font(components, &next)
         });
-        let spacer = faces.iter().position(|face| face.covers(' ')).map(|i| ids[i]);
+        let spacer = faces
+            .iter()
+            .position(|face| face.covers(' '))
+            .map(|i| ids[i]);
         let stands_for = spacer.or(next).or_else(|| ids.first().copied())?;
         let rest = next.unwrap_or(stands_for);
         let mut info = self.fonts[stands_for.0].clone();
@@ -714,7 +718,8 @@ impl DirectWriteState {
             return;
         };
         if let Some(unknown) = face.cast::<IUnknown>().log_err() {
-            self.font_info_cache.insert(unknown.as_raw().addr(), font_id);
+            self.font_info_cache
+                .insert(unknown.as_raw().addr(), font_id);
         }
         self.optical_faces.insert(key, face);
     }
@@ -924,13 +929,15 @@ impl DirectWriteState {
                 // heading shows, and the reason the axis set has to be restated
                 // per range rather than only on the format.
                 if optical {
-                    text_layout.cast::<IDWriteTextLayout4>()?.SetFontAxisValues(
-                        // The line's own size, not the ligature-breaking
-                        // `next_up()` above: the rasteriser is keyed on the
-                        // former, and layout and raster must agree on `opsz`.
-                        &self.axes_for(run.font_id, line_font_size),
-                        text_range,
-                    )?;
+                    text_layout
+                        .cast::<IDWriteTextLayout4>()?
+                        .SetFontAxisValues(
+                            // The line's own size, not the ligature-breaking
+                            // `next_up()` above: the rasteriser is keyed on the
+                            // former, and layout and raster must agree on `opsz`.
+                            &self.axes_for(run.font_id, line_font_size),
+                            text_range,
+                        )?;
                 }
 
                 break_ligatures = !break_ligatures;
@@ -1997,7 +2004,10 @@ fn axes_at_optical_size(
     if !has_optical_size {
         return axes;
     }
-    match axes.iter_mut().find(|axis| axis.axisTag == DWRITE_FONT_AXIS_TAG_OPTICAL_SIZE) {
+    match axes
+        .iter_mut()
+        .find(|axis| axis.axisTag == DWRITE_FONT_AXIS_TAG_OPTICAL_SIZE)
+    {
         Some(axis) => axis.value = font_size,
         None => axes.push(DWRITE_FONT_AXIS_VALUE {
             axisTag: DWRITE_FONT_AXIS_TAG_OPTICAL_SIZE,
@@ -2581,9 +2591,8 @@ mod tests {
             };
             let raster_bounds = text_system.glyph_raster_bounds(&params)?;
             let reused = text_system.rasterize_glyph(&params, raster_bounds)?;
-            super::LAST_ANALYSIS.with(|last| {
-                assert!(last.borrow().is_none(), "rasterizing consumes the analysis")
-            });
+            super::LAST_ANALYSIS
+                .with(|last| assert!(last.borrow().is_none(), "rasterizing consumes the analysis"));
             let fresh = text_system.rasterize_glyph(&params, raster_bounds)?;
             assert_eq!(reused, fresh);
             assert!(fresh.1.iter().any(|value| *value != 0));
@@ -2673,7 +2682,10 @@ mod tests {
         let axes = axes_at_optical_size(&inter_bold, true, 31.5);
         assert_eq!(axes.len(), 2, "no axis is added or dropped");
         assert_eq!(axes[0].value, 31.5, "opsz becomes the used size");
-        assert_eq!(axes[1].value, 700.0, "…and the weight survives, or bold is not bold");
+        assert_eq!(
+            axes[1].value, 700.0,
+            "…and the weight survives, or bold is not bold"
+        );
 
         // A font with no optical size is left exactly as it was: a static
         // family reports synthesized axis values, and rewriting them would be
@@ -2831,7 +2843,11 @@ mod composed_tests {
             weight: FontWeight::BOLD,
             ..font("Segoe UI")
         });
-        assert!(drawn_with(&window, "aЖ", &bold).iter().all(|&(_, id)| id == segoe_bold));
+        assert!(
+            drawn_with(&window, "aЖ", &bold)
+                .iter()
+                .all(|&(_, id)| id == segoe_bold)
+        );
         Ok(())
     }
 
@@ -2873,7 +2889,11 @@ mod composed_tests {
         let pieces = split_by_face(text, &faces);
         assert_eq!(
             pieces,
-            vec![(7, Some(1)), ("Жук".len(), Some(0)), (" 1–0".len(), Some(1))]
+            vec![
+                (7, Some(1)),
+                ("Жук".len(), Some(0)),
+                (" 1–0".len(), Some(1))
+            ]
         );
         assert_eq!(pieces.iter().map(|p| p.0).sum::<usize>(), text.len());
         // A character no face covers is a piece of its own.

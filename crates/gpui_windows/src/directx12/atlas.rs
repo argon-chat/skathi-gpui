@@ -18,7 +18,10 @@ use windows::{
     core::{IUnknown, Interface},
 };
 
-use super::{atlas_upload::UploadBatch, device::{Device, KeepAlive}};
+use super::{
+    atlas_upload::UploadBatch,
+    device::{Device, KeepAlive},
+};
 
 pub(super) const ATLAS_STATE: D3D12_RESOURCE_STATES = D3D12_RESOURCE_STATES(
     D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE.0 | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE.0,
@@ -356,7 +359,8 @@ impl AtlasBackend for Textures {
         let _profile = gpui::native_profiling::current_span("native", "D3D12 insert atlas tile");
         validate_bytes(kind, size, bytes)?;
         let tile = {
-            let _profile = gpui::native_profiling::current_span("native", "D3D12 allocate atlas tile");
+            let _profile =
+                gpui::native_profiling::current_span("native", "D3D12 allocate atlas tile");
             self.allocate(size, kind)?
         };
         if let Err(error) = self.stage(tile, bytes) {
@@ -455,7 +459,14 @@ impl Textures {
         // A kind's first page is a quarter of the others: a page is allocated
         // whole on the GPU (1024² RGBA is 4 MiB), and most windows draw a few
         // dozen glyphs.
-        let smallest = if self.list_mut(kind).textures.iter().flatten().next().is_none() {
+        let smallest = if self
+            .list_mut(kind)
+            .textures
+            .iter()
+            .flatten()
+            .next()
+            .is_none()
+        {
             512
         } else {
             1024
@@ -505,9 +516,19 @@ impl Textures {
 
     fn stage(&mut self, tile: AtlasTile, bytes: &[u8]) -> Result<()> {
         let _profile = gpui::native_profiling::current_span("native", "D3D12 stage atlas tile");
-        let texture = self.texture(tile.texture_id).context("Atlas page missing")?.texture.clone();
+        let texture = self
+            .texture(tile.texture_id)
+            .context("Atlas page missing")?
+            .texture
+            .clone();
         let device = self.device.as_ref().context(NO_DEVICE)?;
-        self.uploads.queue(device, tile, &texture.resource, pixel_layout(tile.texture_id.kind).1, bytes)
+        self.uploads.queue(
+            device,
+            tile,
+            &texture.resource,
+            pixel_layout(tile.texture_id.kind).1,
+            bytes,
+        )
     }
 
     fn upload(&mut self, tile: AtlasTile, bytes: &[u8]) -> Result<()> {

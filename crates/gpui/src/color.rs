@@ -1143,9 +1143,9 @@ impl Background {
             }
             BackgroundTag::LinearGradient
             | BackgroundTag::RadialGradient
-            | BackgroundTag::ConicGradient => self.live_stops()
-                .iter()
-                .all(|c| c.color.is_transparent()),
+            | BackgroundTag::ConicGradient => {
+                self.live_stops().iter().all(|c| c.color.is_transparent())
+            }
         }
     }
 

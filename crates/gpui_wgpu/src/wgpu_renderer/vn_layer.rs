@@ -157,7 +157,15 @@ impl WgpuRendererCore {
             let Some(pipeline) = self.vn_layer_pipeline(layer.flags) else {
                 return Ok(());
             };
-            self.vn_composite(&layers.bind_group, &pipeline, &view, None, index, encoder, frame);
+            self.vn_composite(
+                &layers.bind_group,
+                &pipeline,
+                &view,
+                None,
+                index,
+                encoder,
+                frame,
+            );
             return Ok(());
         }
         let Some(layers) = draw.layers else {
@@ -175,14 +183,30 @@ impl WgpuRendererCore {
             return self.draw_group(draw, group, depth, encoder, frame, None, instance_offset);
         };
 
-        let target = self.draw_group_offscreen(draw, group, depth, encoder, frame, instance_offset)?;
+        let target =
+            self.draw_group_offscreen(draw, group, depth, encoder, frame, instance_offset)?;
         let mask = if masked {
-            Some(self.draw_group_offscreen(draw, group + 1, depth + 1, encoder, frame, instance_offset)?)
+            Some(self.draw_group_offscreen(
+                draw,
+                group + 1,
+                depth + 1,
+                encoder,
+                frame,
+                instance_offset,
+            )?)
         } else {
             None
         };
         let mask = mask.as_ref().map(|mask| &mask.view);
-        self.vn_composite(&layers.bind_group, &pipeline, &target.view, mask, index, encoder, frame);
+        self.vn_composite(
+            &layers.bind_group,
+            &pipeline,
+            &target.view,
+            mask,
+            index,
+            encoder,
+            frame,
+        );
         Ok(())
     }
 
@@ -241,8 +265,14 @@ impl WgpuRendererCore {
                 self.resources.vn_layers.snapshots.remove(&id);
                 continue;
             }
-            let target =
-                self.draw_group_offscreen(draw, capture.group as usize, 0, encoder, frame, instance_offset)?;
+            let target = self.draw_group_offscreen(
+                draw,
+                capture.group as usize,
+                0,
+                encoder,
+                frame,
+                instance_offset,
+            )?;
             let (copy_width, copy_height) = (right - left, bottom - top);
             let reuse = self
                 .resources
@@ -750,7 +780,11 @@ mod tests {
         assert_close(pixel(&image, 40, 16), [182, 0, 73, 255], "green luminance");
         assert_close(pixel(&image, 8, 48), [0, 0, 255, 255], "an empty mask");
         assert_close(pixel(&image, 40, 40), [255, 0, 0, 255], "inside a clip");
-        assert_close(pixel(&image, 56, 40), [0, 0, 255, 255], "masked inside a clip");
+        assert_close(
+            pixel(&image, 56, 40),
+            [0, 0, 255, 255],
+            "masked inside a clip",
+        );
         assert_eq!(
             renderer.core.resources.vn_layers.targets.len(),
             3,

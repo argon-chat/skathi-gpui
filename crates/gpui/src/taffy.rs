@@ -491,7 +491,9 @@ impl TaffyLayoutEngine {
                 if let Some(main) = self.main_axis(node.id) {
                     // `size` is the box's own size at the basis, not what the flex line makes of
                     // it: a container laid out again at last frame's size would shrink it.
-                    let sized = [&node.width, &node.height][main].iter().any(Option::is_some);
+                    let sized = [&node.width, &node.height][main]
+                        .iter()
+                        .any(Option::is_some);
                     if let Some(basis) = node.flex_basis {
                         probe.flex_basis = basis_dimension(basis.basis);
                     } else if sized {
@@ -503,7 +505,9 @@ impl TaffyLayoutEngine {
                     }
                 }
                 if probe != requested {
-                    self.taffy.set_style(node.id.0, probe).expect(EXPECT_MESSAGE);
+                    self.taffy
+                        .set_style(node.id.0, probe)
+                        .expect(EXPECT_MESSAGE);
                 }
                 requested
             })
@@ -585,7 +589,9 @@ impl TaffyLayoutEngine {
                 style.flex_basis = dimension(resolve(&c, axis));
             }
             if self.taffy.style(node.id.0).expect(EXPECT_MESSAGE) != &style {
-                self.taffy.set_style(node.id.0, style).expect(EXPECT_MESSAGE);
+                self.taffy
+                    .set_style(node.id.0, style)
+                    .expect(EXPECT_MESSAGE);
             }
         }
     }
@@ -990,12 +996,30 @@ impl ToTaffy<taffy::style::Style> for Style {
                 .unwrap_or_else(|| to_grid_repeat(&self.grid_rows)),
             grid_template_columns: to_grid_tracks(&self.vn_grid_cols, self.vn_grid_cols_auto)
                 .unwrap_or_else(|| to_grid_repeat(&self.grid_cols)),
-            grid_auto_columns: self.vn_grid_auto_cols.as_ref().map(|tracks| tracks.iter()
-                .map(|track| minmax(to_track_size_min(track.min), to_track_size_max(track.max)))
-                .collect()).unwrap_or_default(),
-            grid_auto_rows: self.vn_grid_auto_rows.as_ref().map(|tracks| tracks.iter()
-                .map(|track| minmax(to_track_size_min(track.min), to_track_size_max(track.max)))
-                .collect()).unwrap_or_default(),
+            grid_auto_columns: self
+                .vn_grid_auto_cols
+                .as_ref()
+                .map(|tracks| {
+                    tracks
+                        .iter()
+                        .map(|track| {
+                            minmax(to_track_size_min(track.min), to_track_size_max(track.max))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            grid_auto_rows: self
+                .vn_grid_auto_rows
+                .as_ref()
+                .map(|tracks| {
+                    tracks
+                        .iter()
+                        .map(|track| {
+                            minmax(to_track_size_min(track.min), to_track_size_max(track.max))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
             grid_auto_flow: match self.vn_grid_auto_flow.unwrap_or_default() {
                 crate::GridAutoFlow::Row => taffy::GridAutoFlow::Row,
                 crate::GridAutoFlow::Column => taffy::GridAutoFlow::Column,
@@ -1447,14 +1471,29 @@ mod tests {
     fn flex_and_grid_lay_their_children_out_in_order_modified_document_order() {
         let mut engine = TaffyLayoutEngine::new();
         let leaf = |engine: &mut TaffyLayoutEngine, order: i32| {
-            let style = Style { vn_order: order, ..Default::default() };
+            let style = Style {
+                vn_order: order,
+                ..Default::default()
+            };
             engine.request_layout(style, Pixels(16.0), 1.0, &[])
         };
-        let kids = [leaf(&mut engine, 2), leaf(&mut engine, -1), leaf(&mut engine, 0), leaf(&mut engine, 2)];
+        let kids = [
+            leaf(&mut engine, 2),
+            leaf(&mut engine, -1),
+            leaf(&mut engine, 0),
+            leaf(&mut engine, 2),
+        ];
         let laid_out = |engine: &mut TaffyLayoutEngine, display: Display| {
-            let style = Style { display, ..Default::default() };
+            let style = Style {
+                display,
+                ..Default::default()
+            };
             let root = engine.request_layout(style, Pixels(16.0), 1.0, &kids);
-            engine.taffy.child_ids(root.into()).map(LayoutId::from).collect::<Vec<_>>()
+            engine
+                .taffy
+                .child_ids(root.into())
+                .map(LayoutId::from)
+                .collect::<Vec<_>>()
         };
         let modified = vec![kids[1], kids[2], kids[0], kids[3]];
         assert_eq!(laid_out(&mut engine, Display::Flex), modified);
@@ -1462,14 +1501,30 @@ mod tests {
         assert_eq!(laid_out(&mut engine, Display::Block), kids.to_vec());
         engine.clear();
         let fresh = [leaf(&mut engine, 0), leaf(&mut engine, 0)];
-        let root = engine.request_layout(Style { display: Display::Flex, ..Default::default() }, Pixels(16.0), 1.0, &fresh);
-        assert!(engine.taffy.child_ids(root.into()).map(LayoutId::from).eq(fresh));
+        let root = engine.request_layout(
+            Style {
+                display: Display::Flex,
+                ..Default::default()
+            },
+            Pixels(16.0),
+            1.0,
+            &fresh,
+        );
+        assert!(
+            engine
+                .taffy
+                .child_ids(root.into())
+                .map(LayoutId::from)
+                .eq(fresh)
+        );
     }
 
     #[test]
     fn implicit_fractional_columns_share_the_container_width() {
         let mut tree = TaffyTree::<()>::new();
-        let children: Vec<_> = (0..3).map(|_| tree.new_leaf(Default::default()).unwrap()).collect();
+        let children: Vec<_> = (0..3)
+            .map(|_| tree.new_leaf(Default::default()).unwrap())
+            .collect();
         let style = Style {
             display: crate::Display::Grid,
             size: Size {
@@ -1480,10 +1535,17 @@ mod tests {
             vn_grid_auto_cols: Some(vec![crate::GridTrack::fr(1.0)]),
             ..Default::default()
         };
-        let root = tree.new_with_children(style.to_taffy(Pixels(16.0), 1.0), &children).unwrap();
-        tree.compute_layout(root, TaffySize {
-            width: TaffyAvailableSpace::Definite(300.0), height: TaffyAvailableSpace::Definite(40.0),
-        }).unwrap();
+        let root = tree
+            .new_with_children(style.to_taffy(Pixels(16.0), 1.0), &children)
+            .unwrap();
+        tree.compute_layout(
+            root,
+            TaffySize {
+                width: TaffyAvailableSpace::Definite(300.0),
+                height: TaffyAvailableSpace::Definite(40.0),
+            },
+        )
+        .unwrap();
         for (index, child) in children.into_iter().enumerate() {
             let layout = tree.layout(child).unwrap();
             assert_eq!(layout.size.width, 100.0);
@@ -1495,18 +1557,39 @@ mod tests {
     fn implicit_row_patterns_repeat_in_layout() {
         use crate::GridTrackSize as Track;
         let mut tree = TaffyTree::<()>::new();
-        let children: Vec<_> = (0..5).map(|_| tree.new_leaf(Default::default()).unwrap()).collect();
+        let children: Vec<_> = (0..5)
+            .map(|_| tree.new_leaf(Default::default()).unwrap())
+            .collect();
         let style = Style {
             display: crate::Display::Grid,
             vn_grid_cols: Some(vec![crate::GridTrack::fixed(Track::Px(100.0))]),
-            vn_grid_auto_rows: Some(vec![crate::GridTrack::fixed(Track::Px(20.0)), crate::GridTrack::fixed(Track::Px(35.0))]),
+            vn_grid_auto_rows: Some(vec![
+                crate::GridTrack::fixed(Track::Px(20.0)),
+                crate::GridTrack::fixed(Track::Px(35.0)),
+            ]),
             ..Default::default()
         };
-        let root = tree.new_with_children(style.to_taffy(Pixels(16.0), 1.0), &children).unwrap();
-        tree.compute_layout(root, TaffySize {
-            width: TaffyAvailableSpace::MaxContent, height: TaffyAvailableSpace::MaxContent,
-        }).unwrap();
-        for ((height, top), child) in [(20.0, 0.0), (35.0, 20.0), (20.0, 55.0), (35.0, 75.0), (20.0, 110.0)].into_iter().zip(children) {
+        let root = tree
+            .new_with_children(style.to_taffy(Pixels(16.0), 1.0), &children)
+            .unwrap();
+        tree.compute_layout(
+            root,
+            TaffySize {
+                width: TaffyAvailableSpace::MaxContent,
+                height: TaffyAvailableSpace::MaxContent,
+            },
+        )
+        .unwrap();
+        for ((height, top), child) in [
+            (20.0, 0.0),
+            (35.0, 20.0),
+            (20.0, 55.0),
+            (35.0, 75.0),
+            (20.0, 110.0),
+        ]
+        .into_iter()
+        .zip(children)
+        {
             let layout = tree.layout(child).unwrap();
             assert_eq!(layout.size.height, height);
             assert_eq!(layout.location.y, top);
@@ -1522,17 +1605,30 @@ mod tests {
             vn_grid_auto_rows: Some(vec![GridTrack::fixed(GridTrackSize::Px(50.0))]),
             ..Default::default()
         };
-        style.refine(&StyleRefinement { vn_grid_auto_rows: Some(Vec::new()), ..Default::default() });
+        style.refine(&StyleRefinement {
+            vn_grid_auto_rows: Some(Vec::new()),
+            ..Default::default()
+        });
         let mut tree = TaffyTree::<()>::new();
-        let children: Vec<_> = [17.0, 29.0].into_iter().map(|height| {
-            let mut leaf_style = taffy::style::Style::default();
-            leaf_style.size.height = taffy::style::Dimension::length(height);
-            tree.new_leaf(leaf_style).unwrap()
-        }).collect();
-        let root = tree.new_with_children(style.to_taffy(Pixels(16.0), 1.0), &children).unwrap();
-        tree.compute_layout(root, TaffySize {
-            width: TaffyAvailableSpace::MaxContent, height: TaffyAvailableSpace::MaxContent,
-        }).unwrap();
+        let children: Vec<_> = [17.0, 29.0]
+            .into_iter()
+            .map(|height| {
+                let mut leaf_style = taffy::style::Style::default();
+                leaf_style.size.height = taffy::style::Dimension::length(height);
+                tree.new_leaf(leaf_style).unwrap()
+            })
+            .collect();
+        let root = tree
+            .new_with_children(style.to_taffy(Pixels(16.0), 1.0), &children)
+            .unwrap();
+        tree.compute_layout(
+            root,
+            TaffySize {
+                width: TaffyAvailableSpace::MaxContent,
+                height: TaffyAvailableSpace::MaxContent,
+            },
+        )
+        .unwrap();
         assert_eq!(tree.layout(children[1]).unwrap().location.y, 17.0);
         assert_eq!(tree.layout(root).unwrap().size.height, 46.0);
     }

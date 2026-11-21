@@ -1006,7 +1006,11 @@ mod vn_adoption_tests {
         let update = b.finalize();
         assert_eq!(children_of(&update, dialog), vec![title, close]);
         assert_eq!(children_of(&update, close), vec![icon]);
-        assert_eq!(children_of(&update, ROOT_NODE_ID), vec![dialog], "not on the root");
+        assert_eq!(
+            children_of(&update, ROOT_NODE_ID),
+            vec![dialog],
+            "not on the root"
+        );
         let dialogs = update.nodes.iter().filter(|(id, _)| *id == dialog).count();
         assert_eq!(dialogs, 1, "the stand-in is not a node of its own");
     }

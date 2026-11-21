@@ -175,12 +175,21 @@ mod tests {
         assert!(!take_due(now));
         assert!(!take_due(now + Duration::from_millis(10)));
         wake_frames();
-        assert!(take_due(now + Duration::from_millis(11)), "demand is delivered");
-        assert!(take_due(now + Duration::from_millis(12)), "and ends the pacing");
+        assert!(
+            take_due(now + Duration::from_millis(11)),
+            "demand is delivered"
+        );
+        assert!(
+            take_due(now + Duration::from_millis(12)),
+            "and ends the pacing"
+        );
 
         pace_frames(Some(now + Duration::from_millis(30)));
         assert!(!take_due(now + Duration::from_millis(29)));
-        assert!(take_due(now + Duration::from_millis(30)), "the deadline is delivered");
+        assert!(
+            take_due(now + Duration::from_millis(30)),
+            "the deadline is delivered"
+        );
 
         pace_frames(Some(now + Duration::from_secs(1)));
         set_gesture_active(true);
@@ -223,7 +232,8 @@ mod tests {
         });
         assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
         wake_frames();
-        rx.recv_timeout(Duration::from_secs(5)).expect("demand wakes it");
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("demand wakes it");
         waiter.join().unwrap();
         assert!(take_due(now));
         pace_frames(None);
@@ -235,7 +245,13 @@ mod tests {
         for msg in [WM_PAINT, WM_TIMER, WM_GETOBJECT] {
             assert!(!message_wants_frame(msg));
         }
-        for msg in [WM_MOUSEMOVE, WM_KEYDOWN, WM_SIZE, WM_SETFOCUS, WM_MOUSEWHEEL] {
+        for msg in [
+            WM_MOUSEMOVE,
+            WM_KEYDOWN,
+            WM_SIZE,
+            WM_SETFOCUS,
+            WM_MOUSEWHEEL,
+        ] {
             assert!(message_wants_frame(msg));
         }
     }

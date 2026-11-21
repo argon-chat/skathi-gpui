@@ -6,8 +6,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, CornerShapes, Corners, Edges, Hsla, Path,
-    PathTiles, Pixels, Point, Radians, ScaledPixels, Size, TimedTransformation,
+    AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, CornerShapes, Corners, Edges, Hsla,
+    Path, PathTiles, Pixels, Point, Radians, ScaledPixels, Size, TimedTransformation,
     bounds_tree::BoundsTree, point, px,
 };
 use smallvec::SmallVec;
@@ -186,12 +186,17 @@ impl VnIsolation {
         if let Some(text) = &self.text_paint {
             return Some((1, text.fill.group_id, parent_context));
         }
-        self.color_matrix.and_then(|matrix| (matrix.group_id != 0).then_some((0, matrix.group_id, 0)))
+        self.color_matrix
+            .and_then(|matrix| (matrix.group_id != 0).then_some((0, matrix.group_id, 0)))
     }
 
     fn identity(&self) -> VnIsolationIdentity {
-        if let Some(capture) = &self.capture { return VnIsolationIdentity::Capture(capture.id); }
-        if let Some(text) = &self.text_paint { return VnIsolationIdentity::Text(text.fill.group_id); }
+        if let Some(capture) = &self.capture {
+            return VnIsolationIdentity::Capture(capture.id);
+        }
+        if let Some(text) = &self.text_paint {
+            return VnIsolationIdentity::Text(text.fill.group_id);
+        }
         if let Some(matrix) = self.color_matrix.filter(|matrix| matrix.group_id != 0) {
             return VnIsolationIdentity::Matrix(matrix.group_id);
         }
@@ -409,16 +414,29 @@ impl VnGroupLists {
         for shadow in &self.shadows {
             let spread = shadow.blur_radius * 2.;
             let bounds = Bounds::from_corners(
-                point(shadow.bounds.origin.x - spread, shadow.bounds.origin.y - spread),
+                point(
+                    shadow.bounds.origin.x - spread,
+                    shadow.bounds.origin.y - spread,
+                ),
                 point(
                     shadow.bounds.origin.x + shadow.bounds.size.width + spread,
                     shadow.bounds.origin.y + shadow.bounds.size.height + spread,
                 ),
             );
-            seen(&mut ink, bounds, Some(&shadow.transformation), &shadow.content_mask);
+            seen(
+                &mut ink,
+                bounds,
+                Some(&shadow.transformation),
+                &shadow.content_mask,
+            );
         }
         for quad in &self.quads {
-            seen(&mut ink, quad.bounds, Some(&quad.transformation), &quad.content_mask);
+            seen(
+                &mut ink,
+                quad.bounds,
+                Some(&quad.transformation),
+                &quad.content_mask,
+            );
         }
         for rect in &self.backdrop_blur_rects {
             seen(&mut ink, rect.bounds, None, &rect.content_mask);
@@ -430,16 +448,36 @@ impl VnGroupLists {
             seen(&mut ink, path.bounds, None, &path.paint.content_mask);
         }
         for underline in &self.underlines {
-            seen(&mut ink, underline.bounds, Some(&underline.transformation), &underline.content_mask);
+            seen(
+                &mut ink,
+                underline.bounds,
+                Some(&underline.transformation),
+                &underline.content_mask,
+            );
         }
         for sprite in &self.monochrome_sprites {
-            seen(&mut ink, sprite.bounds, Some(&sprite.transformation), &sprite.content_mask);
+            seen(
+                &mut ink,
+                sprite.bounds,
+                Some(&sprite.transformation),
+                &sprite.content_mask,
+            );
         }
         for sprite in &self.subpixel_sprites {
-            seen(&mut ink, sprite.bounds, Some(&sprite.transformation), &sprite.content_mask);
+            seen(
+                &mut ink,
+                sprite.bounds,
+                Some(&sprite.transformation),
+                &sprite.content_mask,
+            );
         }
         for sprite in &self.polychrome_sprites {
-            seen(&mut ink, sprite.bounds, Some(&sprite.transformation), &sprite.content_mask);
+            seen(
+                &mut ink,
+                sprite.bounds,
+                Some(&sprite.transformation),
+                &sprite.content_mask,
+            );
         }
         for surface in &self.surfaces {
             seen(&mut ink, surface.bounds, None, &surface.content_mask);
@@ -554,7 +592,10 @@ impl Scene {
         mem::swap(&mut self.layers, &mut lists.layers);
         mem::swap(&mut self.shadows, &mut lists.shadows);
         mem::swap(&mut self.quads, &mut lists.quads);
-        mem::swap(&mut self.backdrop_blur_rects, &mut lists.backdrop_blur_rects);
+        mem::swap(
+            &mut self.backdrop_blur_rects,
+            &mut lists.backdrop_blur_rects,
+        );
         mem::swap(&mut self.effect_quads, &mut lists.effect_quads);
         mem::swap(&mut self.paths, &mut lists.paths);
         mem::swap(&mut self.underlines, &mut lists.underlines);
@@ -584,7 +625,10 @@ impl Scene {
         let parent_context = self.vn_open.last().map_or(0, |group| group.context);
         let shared_key = isolation.shared_key(parent_context);
         let next_context = self.vn_contexts.len() + 1;
-        let context = *self.vn_contexts.entry((parent_context, isolation.identity())).or_insert(next_context);
+        let context = *self
+            .vn_contexts
+            .entry((parent_context, isolation.identity()))
+            .or_insert(next_context);
         let existing_group = shared_key.and_then(|key| self.vn_color_groups.get(&key).copied());
         if let Some(index) = existing_group {
             let mut source = mem::take(&mut self.vn_groups[index]);
@@ -640,7 +684,8 @@ impl Scene {
     /// its [`Scene::vn_pop_isolation`] is its mask: the group composites
     /// multiplied by the mask's alpha, or its luminance.
     pub fn vn_begin_mask(&mut self, luminance: bool) {
-        self.paint_operations.push(PaintOperation::VnBeginMask(luminance));
+        self.paint_operations
+            .push(PaintOperation::VnBeginMask(luminance));
         let Some(open) = self.vn_open.last() else {
             return;
         };
@@ -723,13 +768,23 @@ impl Scene {
         )
         .intersect(&mask.bounds);
         // An empty mask hides everything, as CSS's transparent black layer does.
-        let hidden = mask_group.as_ref().is_some_and(|(lists, _)| lists.is_empty());
-        if (group.is_empty() && color_group.is_none()) || hidden || geometry.segments.is_empty() || bounds.is_empty() {
+        let hidden = mask_group
+            .as_ref()
+            .is_some_and(|(lists, _)| lists.is_empty());
+        if (group.is_empty() && color_group.is_none())
+            || hidden
+            || geometry.segments.is_empty()
+            || bounds.is_empty()
+        {
             return;
         }
-        if color_group.is_none() { group.primitive_bounds = BoundsTree::default(); }
+        if color_group.is_none() {
+            group.primitive_bounds = BoundsTree::default();
+        }
         group.layer_stack = Vec::new();
-        if let Some(key) = color_group { self.vn_color_groups.insert(key, self.vn_groups.len()); }
+        if let Some(key) = color_group {
+            self.vn_color_groups.insert(key, self.vn_groups.len());
+        }
         self.vn_groups.push(group);
         let mask_mode = match mask_group {
             Some((mut lists, luminance)) => {
@@ -746,14 +801,28 @@ impl Scene {
         let text_start = self.vn_text_backgrounds.len() as u32;
         if let Some(text) = &open.isolation.text_paint {
             let m = text.inverse;
-            self.vn_text_backgrounds.extend(text.fill.backgrounds.iter().map(|background| VnTextBackground {
-                background: *background,
-                bounds: Bounds::new(
-                    point(ScaledPixels(text.bounds[0]), ScaledPixels(text.bounds[1])),
-                    crate::size(ScaledPixels(text.bounds[2]), ScaledPixels(text.bounds[3]))),
-                inverse: TransformationMatrix { rotation_scale: [[m[0], m[1]], [m[2], m[3]]], translation: [m[4], m[5]] },
-                scale_factor: text.scale_factor, pad: 0.,
-            }));
+            self.vn_text_backgrounds
+                .extend(
+                    text.fill
+                        .backgrounds
+                        .iter()
+                        .map(|background| VnTextBackground {
+                            background: *background,
+                            bounds: Bounds::new(
+                                point(ScaledPixels(text.bounds[0]), ScaledPixels(text.bounds[1])),
+                                crate::size(
+                                    ScaledPixels(text.bounds[2]),
+                                    ScaledPixels(text.bounds[3]),
+                                ),
+                            ),
+                            inverse: TransformationMatrix {
+                                rotation_scale: [[m[0], m[1]], [m[2], m[3]]],
+                                translation: [m[4], m[5]],
+                            },
+                            scale_factor: text.scale_factor,
+                            pad: 0.,
+                        }),
+                );
         }
         let text_count = self.vn_text_backgrounds.len() as u32 - text_start;
         self.vn_layers.push(VnLayer {
@@ -761,8 +830,17 @@ impl Scene {
             segment_start,
             segment_count: geometry.segments.len() as u32,
             fill_rule: (geometry.fill_rule == crate::VnFillRule::EvenOdd) as u32 | mask_mode << 1,
-            pad: [open.isolation.color_matrix.map_or(0, |m| if m.linear_rgb { 1 } else { 2 }), text_start, text_count],
-            color_matrix: open.isolation.color_matrix.map_or([0.; 20], |matrix| matrix.gpu_values()),
+            pad: [
+                open.isolation
+                    .color_matrix
+                    .map_or(0, |m| if m.linear_rgb { 1 } else { 2 }),
+                text_start,
+                text_count,
+            ],
+            color_matrix: open
+                .isolation
+                .color_matrix
+                .map_or([0.; 20], |matrix| matrix.gpu_values()),
             bounds,
             content_mask: mask,
             opacity: 1.,
@@ -843,15 +921,24 @@ impl Scene {
         if bounds.is_empty() || paint.opacity <= 0. {
             return;
         }
-        self.paint_operations.push(PaintOperation::VnSnapshot(paint));
+        self.paint_operations
+            .push(PaintOperation::VnSnapshot(paint));
         let [a, b, tx, c, d, ty] = paint.to_unit;
         self.vn_layers.push(VnLayer {
             bounds,
             content_mask: paint.content_mask,
             snapshot: [paint.id as u32, (paint.id >> 32) as u32],
             flags: vn_layer_flags::SNAPSHOT
-                | if paint.plus_lighter { vn_layer_flags::PLUS_LIGHTER } else { 0 }
-                | if paint.in_place { vn_layer_flags::IN_PLACE } else { 0 },
+                | if paint.plus_lighter {
+                    vn_layer_flags::PLUS_LIGHTER
+                } else {
+                    0
+                }
+                | if paint.in_place {
+                    vn_layer_flags::IN_PLACE
+                } else {
+                    0
+                },
             opacity: paint.opacity,
             source_transform: [a, b, tx, 0., c, d, ty, 0.],
             ..VnLayer::default()
@@ -864,11 +951,19 @@ impl Scene {
     /// capture's border box and names the snapshot's rectangle. `known` finds
     /// a capture of an earlier frame; one of this scene wins. A composite
     /// whose capture is unknown draws nothing.
-    pub fn vn_resolve_snapshots(&mut self, known: impl Fn(u64) -> Option<(VnCaptureInfo, Bounds<ScaledPixels>)>) {
-        let current: HashMap<u64, (VnCaptureInfo, Bounds<ScaledPixels>)> =
-            self.vn_captures.iter().map(|c| (c.info.id, (c.info, c.ink))).collect();
+    pub fn vn_resolve_snapshots(
+        &mut self,
+        known: impl Fn(u64) -> Option<(VnCaptureInfo, Bounds<ScaledPixels>)>,
+    ) {
+        let current: HashMap<u64, (VnCaptureInfo, Bounds<ScaledPixels>)> = self
+            .vn_captures
+            .iter()
+            .map(|c| (c.info.id, (c.info, c.ink)))
+            .collect();
         for layer in &mut self.vn_layers {
-            let Some(id) = layer.snapshot_id() else { continue };
+            let Some(id) = layer.snapshot_id() else {
+                continue;
+            };
             let Some((info, ink)) = current.get(&id).copied().or_else(|| known(id)) else {
                 layer.opacity = 0.;
                 continue;
@@ -888,7 +983,10 @@ impl Scene {
                 layer.source_transform = [a, b, tx, 0., c, d, ty, 0.];
                 let drawn = transformed_bounds(ink, info.transform);
                 let drawn = Bounds::from_corners(
-                    point(ScaledPixels(drawn.origin.x.0.floor()), ScaledPixels(drawn.origin.y.0.floor())),
+                    point(
+                        ScaledPixels(drawn.origin.x.0.floor()),
+                        ScaledPixels(drawn.origin.y.0.floor()),
+                    ),
                     point(
                         ScaledPixels((drawn.origin.x.0 + drawn.size.width.0).ceil()),
                         ScaledPixels((drawn.origin.y.0 + drawn.size.height.0).ceil()),
@@ -900,11 +998,22 @@ impl Scene {
                 let t = layer.source_transform;
                 let (w, h) = (bb.size.width.0, bb.size.height.0);
                 layer.source_transform = [
-                    t[0] * w, t[1] * w, t[2] * w + bb.origin.x.0, 0.,
-                    t[4] * h, t[5] * h, t[6] * h + bb.origin.y.0, 0.,
+                    t[0] * w,
+                    t[1] * w,
+                    t[2] * w + bb.origin.x.0,
+                    0.,
+                    t[4] * h,
+                    t[5] * h,
+                    t[6] * h + bb.origin.y.0,
+                    0.,
                 ];
             }
-            layer.source_rect = [ink.origin.x.0, ink.origin.y.0, ink.size.width.0, ink.size.height.0];
+            layer.source_rect = [
+                ink.origin.x.0,
+                ink.origin.y.0,
+                ink.size.width.0,
+                ink.size.height.0,
+            ];
         }
     }
 
@@ -959,11 +1068,13 @@ impl Scene {
     /// isolated layers' composites as [`VnBatch::Layers`]; a renderer that
     /// isolates draws each composite's [`VnLayer::group`] through these too.
     pub fn vn_batches(&self, group: usize) -> impl Iterator<Item = VnBatch> + '_ {
-        let ranges = self
-            .vn_group_ranges
-            .get(group)
-            .cloned()
-            .unwrap_or_else(|| if group == 0 { self.vn_whole_ranges() } else { VnGroupRanges::default() });
+        let ranges = self.vn_group_ranges.get(group).cloned().unwrap_or_else(|| {
+            if group == 0 {
+                self.vn_whole_ranges()
+            } else {
+                VnGroupRanges::default()
+            }
+        });
         BatchIterator::new(self, ranges)
     }
 
@@ -1281,10 +1392,17 @@ impl Scene {
         } else {
             let mut ranges = vec![self.vn_whole_ranges()];
             for (index, mut group) in mem::take(&mut self.vn_groups).into_iter().enumerate() {
-                if let Some(capture) = self.vn_captures.iter_mut().find(|c| c.group as usize == index + 1) {
+                if let Some(capture) = self
+                    .vn_captures
+                    .iter_mut()
+                    .find(|c| c.group as usize == index + 1)
+                {
                     capture.ink = group.ink().map_or_else(Bounds::default, |ink| {
                         Bounds::from_corners(
-                            point(ScaledPixels(ink.origin.x.0.floor()), ScaledPixels(ink.origin.y.0.floor())),
+                            point(
+                                ScaledPixels(ink.origin.x.0.floor()),
+                                ScaledPixels(ink.origin.y.0.floor()),
+                            ),
                             point(
                                 ScaledPixels((ink.origin.x.0 + ink.size.width.0).ceil()),
                                 ScaledPixels((ink.origin.y.0 + ink.size.height.0).ceil()),
@@ -2316,8 +2434,10 @@ impl TransformSpec {
     };
 
     /// CSS's initial `transform-origin: 50% 50%`.
-    pub const CENTRE_ORIGIN: (TransformLength, TransformLength) =
-        (TransformLength::Fraction(0.5), TransformLength::Fraction(0.5));
+    pub const CENTRE_ORIGIN: (TransformLength, TransformLength) = (
+        TransformLength::Fraction(0.5),
+        TransformLength::Fraction(0.5),
+    );
 
     /// Is this `transform: none` — nothing to apply, nothing to pay for?
     ///
@@ -2359,11 +2479,17 @@ impl TransformSpec {
             ),
             rotate: lerp(self.rotate, other.rotate),
             shear: lerp(self.shear, other.shear),
-            translation_basis: if self.translation_basis.is_some() || other.translation_basis.is_some() {
+            translation_basis: if self.translation_basis.is_some()
+                || other.translation_basis.is_some()
+            {
                 let a = self.translation_coefficients();
                 let b = other.translation_coefficients();
-                Some(std::array::from_fn(|row| std::array::from_fn(|column| lerp(a[row][column], b[row][column]))))
-            } else { None },
+                Some(std::array::from_fn(|row| {
+                    std::array::from_fn(|column| lerp(a[row][column], b[row][column]))
+                }))
+            } else {
+                None
+            },
             scale: (
                 lerp(self.scale.0, other.scale.0),
                 lerp(self.scale.1, other.scale.1),
@@ -2391,7 +2517,9 @@ impl TransformSpec {
                 px(self.origin.1.resolve(bounds.size.height.0)),
             );
         let coefficients = self.translation_coefficients();
-        let resolve = |row: [f32; 3]| px(row[0] + row[1] * bounds.size.width.0 + row[2] * bounds.size.height.0);
+        let resolve = |row: [f32; 3]| {
+            px(row[0] + row[1] * bounds.size.width.0 + row[2] * bounds.size.height.0)
+        };
         let translate = Point::new(resolve(coefficients[0]), resolve(coefficients[1]));
         TransformationMatrix::unit()
             .translate((anchor + translate).scale(scale_factor))
@@ -3015,10 +3143,16 @@ mod vn_axis_aligned_tests {
     /// A very small scale still has an inverse; only a flat one has none.
     #[test]
     fn a_tiny_scale_is_still_invertible() {
-        let tiny = TransformationMatrix { rotation_scale: [[0.0003, 0.0], [0.0, 0.0003]], translation: [5.0, 7.0] };
+        let tiny = TransformationMatrix {
+            rotation_scale: [[0.0003, 0.0], [0.0, 0.0003]],
+            translation: [5.0, 7.0],
+        };
         let back = tiny.inverse().expect("an inverse");
         assert!((back.rotation_scale[0][0] - 1.0 / 0.0003).abs() < 1.0);
-        let flat = TransformationMatrix { rotation_scale: [[1.0, 0.0], [0.0, 0.0]], translation: [0.0, 0.0] };
+        let flat = TransformationMatrix {
+            rotation_scale: [[1.0, 0.0], [0.0, 0.0]],
+            translation: [0.0, 0.0],
+        };
         assert!(flat.inverse().is_none());
     }
 
@@ -3029,7 +3163,10 @@ mod vn_axis_aligned_tests {
         let mut builder = crate::PathBuilder::fill();
         builder.move_to(point(Pixels(0.), Pixels(0.)));
         builder.line_to(point(Pixels(10.), Pixels(0.)));
-        builder.curve_to(point(Pixels(10.), Pixels(20.)), point(Pixels(20.), Pixels(10.)));
+        builder.curve_to(
+            point(Pixels(10.), Pixels(20.)),
+            point(Pixels(20.), Pixels(10.)),
+        );
         builder.close();
         let path = builder.build().unwrap();
         let moved =
@@ -3037,7 +3174,10 @@ mod vn_axis_aligned_tests {
         let still = path.bin(2.0).bounds();
         assert_eq!(
             path.transformed(moved, 2.0).bin(2.0).bounds(),
-            Bounds::new(still.origin + point(ScaledPixels(300.), ScaledPixels(-120.)), still.size)
+            Bounds::new(
+                still.origin + point(ScaledPixels(300.), ScaledPixels(-120.)),
+                still.size
+            )
         );
         // A quarter turn swaps the box's sides, with the curve split where it
         // turns back on the new axes.
@@ -3424,15 +3564,17 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod vn_color_group_tests {
     use super::*;
-    use crate::{VnColorMatrix, VnClipGeometry, VnFillRule, size};
+    use crate::{VnClipGeometry, VnColorMatrix, VnFillRule, size};
     use std::sync::Arc;
 
     fn rectangle() -> Bounds<ScaledPixels> {
-        Bounds { origin: point(ScaledPixels(0.), ScaledPixels(0.)), size: size(ScaledPixels(100.), ScaledPixels(100.)) }
+        Bounds {
+            origin: point(ScaledPixels(0.), ScaledPixels(0.)),
+            size: size(ScaledPixels(100.), ScaledPixels(100.)),
+        }
     }
 
     fn filter(id: u64) -> VnIsolation {
@@ -3440,27 +3582,51 @@ mod vn_color_group_tests {
             text_paint: None,
             geometry: Arc::new(VnClipGeometry {
                 fill_rule: VnFillRule::NonZero,
-                segments: vec![[0., 0., 100., 0.], [100., 0., 100., 100.], [100., 100., 0., 100.], [0., 100., 0., 0.]],
+                segments: vec![
+                    [0., 0., 100., 0.],
+                    [100., 0., 100., 100.],
+                    [100., 100., 0., 100.],
+                    [0., 100., 0., 0.],
+                ],
                 bounds: rectangle(),
             }),
-            color_matrix: Some(VnColorMatrix { group_id: id, values: VnColorMatrix::IDENTITY, linear_rgb: true }),
-            content_mask: ContentMask { bounds: rectangle(), ..Default::default() },
+            color_matrix: Some(VnColorMatrix {
+                group_id: id,
+                values: VnColorMatrix::IDENTITY,
+                linear_rgb: true,
+            }),
+            content_mask: ContentMask {
+                bounds: rectangle(),
+                ..Default::default()
+            },
             capture: None,
         }
     }
 
     fn paint(scene: &mut Scene) {
-        scene.insert_primitive(Quad { bounds: rectangle(), content_mask: ContentMask { bounds: rectangle(), ..Default::default() }, ..Default::default() });
+        scene.insert_primitive(Quad {
+            bounds: rectangle(),
+            content_mask: ContentMask {
+                bounds: rectangle(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
     }
 
     fn text_mask(id: u64) -> VnIsolation {
         let mut isolation = filter(id);
         isolation.color_matrix = None;
         isolation.text_paint = Some(Arc::new(crate::VnTextPaint {
-            fill: crate::VnTextFill { group_id: id, backgrounds: vec![crate::red().into(), crate::blue().into()] },
+            fill: crate::VnTextFill {
+                group_id: id,
+                backgrounds: vec![crate::red().into(), crate::blue().into()],
+            },
             bounds: [10., 20., 40., 30.],
-            inverse: [0., 1., -1., 0., 50., 60.], scale_factor: 1.5,
-            geometry: isolation.geometry.clone(), content_mask: isolation.content_mask,
+            inverse: [0., 1., -1., 0., 50., 60.],
+            scale_factor: 1.5,
+            geometry: isolation.geometry.clone(),
+            content_mask: isolation.content_mask,
         }));
         isolation
     }
@@ -3473,20 +3639,35 @@ mod vn_color_group_tests {
             paint(&mut scene);
             scene.vn_pop_isolation();
         }
-        assert_eq!(scene.vn_layers.len(), 1, "a text scope composites once, not per glyph");
+        assert_eq!(
+            scene.vn_layers.len(),
+            1,
+            "a text scope composites once, not per glyph"
+        );
         assert_eq!(scene.vn_groups[0].quads.len(), 3);
-        assert_eq!(scene.vn_text_backgrounds.len(), 2, "metadata belongs to a text scope, not each glyph");
+        assert_eq!(
+            scene.vn_text_backgrounds.len(),
+            2,
+            "metadata belongs to a text scope, not each glyph"
+        );
         assert_eq!(scene.vn_layers[0].pad, [0, 0, 2]);
         let brush = scene.vn_text_backgrounds[0];
         assert_eq!(brush.bounds.origin.x.0, 10.);
-        assert_eq!(brush.inverse.apply(point(px(2.), px(3.))), point(px(53.), px(58.)));
+        assert_eq!(
+            brush.inverse.apply(point(px(2.), px(3.))),
+            point(px(53.), px(58.))
+        );
         assert_eq!(brush.scale_factor, 1.5);
         let operations = 0..scene.len();
         scene.finish();
         let mut replay = Scene::default();
         replay.replay(operations, &scene);
         assert_eq!(replay.vn_layers.len(), 1);
-        assert_eq!(replay.vn_text_backgrounds.len(), 2, "cached operations rebuild valid metadata indices");
+        assert_eq!(
+            replay.vn_text_backgrounds.len(),
+            2,
+            "cached operations rebuild valid metadata indices"
+        );
         assert_eq!(replay.vn_groups[0].quads.len(), 3);
         replay.clear();
         assert!(replay.vn_text_backgrounds.is_empty());
@@ -3494,7 +3675,11 @@ mod vn_color_group_tests {
         paint(&mut replay);
         replay.vn_pop_isolation();
         assert_eq!(replay.vn_text_backgrounds.len(), 2);
-        assert_eq!(replay.vn_groups[0].quads.len(), 1, "new frames cannot retain old mask coverage");
+        assert_eq!(
+            replay.vn_groups[0].quads.len(),
+            1,
+            "new frames cannot retain old mask coverage"
+        );
     }
 
     #[test]
@@ -3509,8 +3694,16 @@ mod vn_color_group_tests {
         assert_eq!(scene.vn_groups[1].vn_layers.len(), 1);
         assert_eq!(scene.vn_layers[0].pad[0], 1);
         assert_eq!(scene.vn_groups[1].vn_layers[0].pad[2], 2);
-        assert_eq!(std::mem::size_of::<VnLayer>(), 240, "keep the HLSL layer ABI");
-        assert_eq!(std::mem::size_of::<VnTextBackground>(), 276, "match the HLSL structured buffer stride");
+        assert_eq!(
+            std::mem::size_of::<VnLayer>(),
+            240,
+            "keep the HLSL layer ABI"
+        );
+        assert_eq!(
+            std::mem::size_of::<VnTextBackground>(),
+            276,
+            "match the HLSL structured buffer stride"
+        );
         assert_eq!(std::mem::offset_of!(VnTextBackground, bounds), 228);
         assert_eq!(std::mem::offset_of!(VnTextBackground, inverse), 244);
         assert_eq!(std::mem::offset_of!(VnTextBackground, scale_factor), 268);
@@ -3521,7 +3714,10 @@ mod vn_color_group_tests {
         for matrix in [false, true] {
             let mut first = filter(11);
             let mut second = filter(12);
-            if !matrix { first.color_matrix = None; second.color_matrix = None; }
+            if !matrix {
+                first.color_matrix = None;
+                second.color_matrix = None;
+            }
             let mut scene = Scene::default();
             for parent in [first.clone(), second, first] {
                 scene.vn_push_isolation(parent);
@@ -3532,17 +3728,41 @@ mod vn_color_group_tests {
             }
             // Clip-path groups themselves may close separately; their text
             // sources must still partition by stable parent geometry identity.
-            let masks: Vec<_> = scene.vn_groups.iter().filter(|group| !group.quads.is_empty()).collect();
-            assert_eq!(masks.len(), 2, "text cannot be captured by the first child's clip or filter");
-            assert_eq!(masks[0].quads.len(), 2, "deferred text in the same parent reuses its source");
+            let masks: Vec<_> = scene
+                .vn_groups
+                .iter()
+                .filter(|group| !group.quads.is_empty())
+                .collect();
+            assert_eq!(
+                masks.len(),
+                2,
+                "text cannot be captured by the first child's clip or filter"
+            );
+            assert_eq!(
+                masks[0].quads.len(),
+                2,
+                "deferred text in the same parent reuses its source"
+            );
             assert_eq!(masks[1].quads.len(), 1);
-            assert_eq!(scene.vn_text_backgrounds.len(), 4, "two brushes per distinct isolation context");
+            assert_eq!(
+                scene.vn_text_backgrounds.len(),
+                4,
+                "two brushes per distinct isolation context"
+            );
             let operations = 0..scene.len();
             scene.finish();
             let mut replay = Scene::default();
             replay.replay(operations, &scene);
-            assert_eq!(replay.vn_text_backgrounds.len(), 4, "paint-cache replay interns equivalent parent contexts");
-            let masks: Vec<_> = replay.vn_groups.iter().filter(|group| !group.quads.is_empty()).collect();
+            assert_eq!(
+                replay.vn_text_backgrounds.len(),
+                4,
+                "paint-cache replay interns equivalent parent contexts"
+            );
+            let masks: Vec<_> = replay
+                .vn_groups
+                .iter()
+                .filter(|group| !group.quads.is_empty())
+                .collect();
             assert_eq!(masks.len(), 2);
             assert_eq!(masks[0].quads.len(), 2);
         }
@@ -3557,22 +3777,37 @@ mod vn_color_group_tests {
         scene.vn_push_isolation(filter(1));
         paint(&mut scene);
         scene.vn_pop_isolation();
-        assert_eq!(scene.vn_layers.len(), 1, "one composite, not separately filtered translucent pieces");
+        assert_eq!(
+            scene.vn_layers.len(),
+            1,
+            "one composite, not separately filtered translucent pieces"
+        );
         assert_eq!(scene.vn_groups.len(), 1);
         assert_eq!(scene.vn_groups[0].quads.len(), 2);
-        assert!(scene.vn_groups[0].quads[1].order > scene.vn_groups[0].quads[0].order, "deferred source blends over its earlier background");
+        assert!(
+            scene.vn_groups[0].quads[1].order > scene.vn_groups[0].quads[0].order,
+            "deferred source blends over its earlier background"
+        );
         let operations = 0..scene.len();
         scene.finish();
         assert_eq!(scene.vn_group_count(), 2);
         let mut replay = Scene::default();
         replay.replay(operations, &scene);
-        assert_eq!(replay.vn_layers.len(), 1, "cached operations rebuild the same keyed source");
+        assert_eq!(
+            replay.vn_layers.len(),
+            1,
+            "cached operations rebuild the same keyed source"
+        );
         assert_eq!(replay.vn_groups[0].quads.len(), 2);
         replay.clear();
         replay.vn_push_isolation(filter(1));
         paint(&mut replay);
         replay.vn_pop_isolation();
-        assert_eq!(replay.vn_groups[0].quads.len(), 1, "a new frame has no old source pixels");
+        assert_eq!(
+            replay.vn_groups[0].quads.len(),
+            1,
+            "a new frame has no old source pixels"
+        );
     }
 
     #[test]
@@ -3602,10 +3837,22 @@ mod vn_color_group_tests {
         paint(&mut scene);
         scene.vn_pop_isolation();
         scene.vn_pop_isolation();
-        assert_eq!(scene.vn_layers.len(), 1, "only the outer composite belongs to the page");
+        assert_eq!(
+            scene.vn_layers.len(),
+            1,
+            "only the outer composite belongs to the page"
+        );
         assert_eq!(scene.vn_groups.len(), 2);
-        assert_eq!(scene.vn_groups[0].quads.len(), 2, "both inner source pieces share one filter");
-        assert_eq!(scene.vn_groups[1].vn_layers.len(), 1, "the inner filter composites once into the outer source");
+        assert_eq!(
+            scene.vn_groups[0].quads.len(),
+            2,
+            "both inner source pieces share one filter"
+        );
+        assert_eq!(
+            scene.vn_groups[1].vn_layers.len(),
+            1,
+            "the inner filter composites once into the outer source"
+        );
         scene.finish();
         assert_eq!(scene.vn_group_count(), 3);
         assert_eq!(scene.vn_layers.len(), 2);
@@ -3618,28 +3865,51 @@ mod vn_color_group_tests {
         capture.capture = Some(VnCaptureInfo {
             id: 3,
             border_box: rectangle(),
-            transform: crate::TransformationMatrix { rotation_scale: [[2., 0.], [0., 2.]], translation: [100., 5.] },
+            transform: crate::TransformationMatrix {
+                rotation_scale: [[2., 0.], [0., 2.]],
+                translation: [100., 5.],
+            },
         });
         let mut scene = Scene::default();
         scene.vn_push_isolation(capture);
         paint(&mut scene);
         scene.vn_pop_isolation();
-        let viewport = Bounds { origin: point(ScaledPixels(0.), ScaledPixels(0.)), size: size(ScaledPixels(400.), ScaledPixels(400.)) };
+        let viewport = Bounds {
+            origin: point(ScaledPixels(0.), ScaledPixels(0.)),
+            size: size(ScaledPixels(400.), ScaledPixels(400.)),
+        };
         scene.vn_insert_snapshot(VnSnapshotPaint {
             id: 3,
             to_unit: [0.; 6],
             bounds: viewport,
-            content_mask: ContentMask { bounds: viewport, ..Default::default() },
+            content_mask: ContentMask {
+                bounds: viewport,
+                ..Default::default()
+            },
             opacity: 1.,
             plus_lighter: false,
             in_place: true,
         });
         scene.finish();
         scene.vn_resolve_snapshots(|_| None);
-        let layer = scene.vn_layers.iter().find(|l| l.snapshot_id() == Some(3)).copied().unwrap();
+        let layer = scene
+            .vn_layers
+            .iter()
+            .find(|l| l.snapshot_id() == Some(3))
+            .copied()
+            .unwrap();
         assert_eq!(layer.flags, vn_layer_flags::SNAPSHOT);
-        assert_eq!(layer.source_transform, [0.5, 0., -50., 0., 0., 0.5, -2.5, 0.]);
-        assert_eq!(layer.bounds.origin, point(ScaledPixels(100.), ScaledPixels(5.)));
-        assert_eq!(layer.bounds.size, size(ScaledPixels(200.), ScaledPixels(200.)));
+        assert_eq!(
+            layer.source_transform,
+            [0.5, 0., -50., 0., 0., 0.5, -2.5, 0.]
+        );
+        assert_eq!(
+            layer.bounds.origin,
+            point(ScaledPixels(100.), ScaledPixels(5.))
+        );
+        assert_eq!(
+            layer.bounds.size,
+            size(ScaledPixels(200.), ScaledPixels(200.))
+        );
     }
 }

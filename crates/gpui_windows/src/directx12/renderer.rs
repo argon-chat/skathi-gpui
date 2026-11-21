@@ -529,7 +529,10 @@ impl FrameLatency {
         unsafe {
             swap_chain.SetMaximumFrameLatency(FRAME_LATENCY)?;
             let handle = swap_chain.GetFrameLatencyWaitableObject();
-            ensure!(!handle.is_invalid(), "D3D12 swap chain has no latency waitable");
+            ensure!(
+                !handle.is_invalid(),
+                "D3D12 swap chain has no latency waitable"
+            );
             Ok(Self(handle))
         }
     }
@@ -1083,7 +1086,11 @@ impl Renderer {
         let effects = self.prepare_vn_effects(scene)?;
         // The snapshot counts as one more level below the pyramid.
         let mut held = usize::from(self.snapshot.is_some()) + self.blur.len();
-        let needed = if needs_backdrop { backdrop_levels + 1 } else { 0 };
+        let needed = if needs_backdrop {
+            backdrop_levels + 1
+        } else {
+            0
+        };
         trim_scratch_count(&mut held, needed, &mut self.idle_frames.backdrop);
         if held == 0 {
             self.snapshot = None;
@@ -1709,13 +1716,7 @@ impl SceneBuffers {
             dummy,
             shadows: upload_or_dummy(gpu, retained, dummy, uploads, &scene.shadows)?,
             quads: upload_or_dummy(gpu, retained, dummy, uploads, &scene.quads)?,
-            blur_rects: upload_or_dummy(
-                gpu,
-                retained,
-                dummy,
-                uploads,
-                &scene.backdrop_blur_rects,
-            )?,
+            blur_rects: upload_or_dummy(gpu, retained, dummy, uploads, &scene.backdrop_blur_rects)?,
             effects: upload_or_dummy(gpu, retained, dummy, uploads, effect_quads)?,
             underlines: upload_or_dummy(gpu, retained, dummy, uploads, &scene.underlines)?,
             mono: upload_or_dummy(gpu, retained, dummy, uploads, &scene.monochrome_sprites)?,
@@ -1994,14 +1995,10 @@ impl Encoding<'_> {
         unsafe {
             self.list
                 .SetGraphicsRootSignature(&self.pipelines.root_signature);
-            self.list.SetGraphicsRootConstantBufferView(
-                ROOT_GLOBALS,
-                self.globals,
-            );
-            self.list.SetGraphicsRootShaderResourceView(
-                ROOT_CLIP_SEGMENTS,
-                self.data.clips,
-            );
+            self.list
+                .SetGraphicsRootConstantBufferView(ROOT_GLOBALS, self.globals);
+            self.list
+                .SetGraphicsRootShaderResourceView(ROOT_CLIP_SEGMENTS, self.data.clips);
             self.list.SetGraphicsRootShaderResourceView(
                 ROOT_TEXT_BACKGROUNDS,
                 self.data.text_backgrounds,
@@ -2054,9 +2051,9 @@ impl Encoding<'_> {
         if count == 0 {
             return Ok(());
         }
-        let (table, heap_changed) = self
-            .descriptors
-            .textures(self.list, textures, self.uploads, self.work)?;
+        let (table, heap_changed) =
+            self.descriptors
+                .textures(self.list, textures, self.uploads, self.work)?;
         if heap_changed {
             self.bound.table = 0;
             self.bound.effect_table = 0;
@@ -2201,7 +2198,10 @@ impl Encoding<'_> {
                 rect
             };
             let target = self.draw_group_offscreen(capture.group as usize, 0, clip)?;
-            let (width, height) = ((rect.right - rect.left) as u32, (rect.bottom - rect.top) as u32);
+            let (width, height) = (
+                (rect.right - rect.left) as u32,
+                (rect.bottom - rect.top) as u32,
+            );
             let reuse = self
                 .vn_snapshots
                 .get(&id)
@@ -2236,8 +2236,14 @@ impl Encoding<'_> {
                 back: 1,
             };
             unsafe {
-                self.list
-                    .CopyTextureRegion(destination.raw(), 0, 0, 0, source.raw(), Some(&region));
+                self.list.CopyTextureRegion(
+                    destination.raw(),
+                    0,
+                    0,
+                    0,
+                    source.raw(),
+                    Some(&region),
+                );
             }
             snapshot.to(self.list, SHADER_READ, self.changes);
         }
@@ -3431,7 +3437,11 @@ mod tests {
         scene.vn_push_isolation(rectangle(0., 0.));
         scene.insert_primitive(red(0., 0.));
         scene.vn_begin_mask(false);
-        scene.insert_primitive(quad(bounds(0., 0., 16., 32.), rgba(0xffffff80), content_mask));
+        scene.insert_primitive(quad(
+            bounds(0., 0., 16., 32.),
+            rgba(0xffffff80),
+            content_mask,
+        ));
         scene.vn_pop_isolation();
 
         scene.vn_push_isolation(rectangle(32., 0.));
@@ -3449,7 +3459,11 @@ mod tests {
         scene.vn_push_isolation(rectangle(32., 32.));
         scene.insert_primitive(red(32., 32.));
         scene.vn_begin_mask(false);
-        scene.insert_primitive(quad(bounds(32., 32., 16., 32.), rgb(0xffffff), content_mask));
+        scene.insert_primitive(quad(
+            bounds(32., 32., 16., 32.),
+            rgb(0xffffff),
+            content_mask,
+        ));
         scene.vn_pop_isolation();
         scene.vn_pop_isolation();
         scene.finish();
@@ -3467,7 +3481,11 @@ mod tests {
                 close_channel(actual, expected);
             }
         }
-        assert_eq!(renderer.layers.len(), 3, "a nested mask draws two levels down");
+        assert_eq!(
+            renderer.layers.len(),
+            3,
+            "a nested mask draws two levels down"
+        );
         Ok(())
     }
 
@@ -3491,12 +3509,20 @@ mod tests {
         };
         let mut captured = Scene::default();
         captured.vn_push_isolation(isolation(Some(info)));
-        captured.insert_primitive(quad(bounds(20., 20., 40., 40.), rgb(0xff0000), content_mask));
+        captured.insert_primitive(quad(
+            bounds(20., 20., 40., 40.),
+            rgb(0xff0000),
+            content_mask,
+        ));
         captured.vn_pop_isolation();
         captured.finish();
         let ink = captured.vn_captures[0].ink;
         let image = renderer.render_to_image(&captured, WindowBackgroundAppearance::Transparent)?;
-        assert_eq!(image.get_pixel(40, 40).0, [0; 4], "a capture paints nowhere");
+        assert_eq!(
+            image.get_pixel(40, 40).0,
+            [0; 4],
+            "a capture paints nowhere"
+        );
 
         let snapshot = |scene: &mut Scene, x: f32, y: f32, side: f32, opacity: f32, plus: bool| {
             scene.vn_insert_snapshot(VnSnapshotPaint {
@@ -3912,7 +3938,11 @@ mod tests {
         let content_mask = mask(256., 256.);
         let scene = |rect: Bounds<ScaledPixels>| {
             let mut scene = Scene::default();
-            scene.insert_primitive(quad(bounds(0., 0., 256., 256.), rgb(0x000000), content_mask));
+            scene.insert_primitive(quad(
+                bounds(0., 0., 256., 256.),
+                rgb(0x000000),
+                content_mask,
+            ));
             for index in 0..8 {
                 let x = 16. + index as f32 * 28.;
                 scene.insert_primitive(quad(bounds(x, 0., 12., 256.), rgb(0xffffff), content_mask));
@@ -4124,7 +4154,10 @@ mod tests {
             .map(|(native, wgpu)| native.abs_diff(*wgpu))
             .max()
             .unwrap_or_default();
-        assert!(largest <= 1, "wgpu must match D3D12 within 1/255, largest {largest}");
+        assert!(
+            largest <= 1,
+            "wgpu must match D3D12 within 1/255, largest {largest}"
+        );
         Ok(())
     }
 }

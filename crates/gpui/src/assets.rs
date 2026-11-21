@@ -151,7 +151,11 @@ impl RenderImage {
 
     /// Get the size of this image, in pixels.
     pub fn size(&self, frame_index: usize) -> Size<DevicePixels> {
-        if frame_index == 0 { if let Some(size) = self.gpu_size { return size; } }
+        if frame_index == 0 {
+            if let Some(size) = self.gpu_size {
+                return size;
+            }
+        }
         self.data
             .get(frame_index)
             .map(|frame| {
@@ -177,7 +181,9 @@ impl RenderImage {
 
     /// Get the number of frames for this image.
     pub fn frame_count(&self) -> usize {
-        if self.gpu_size.is_some() { return 1; }
+        if self.gpu_size.is_some() {
+            return 1;
+        }
         self.data.len()
     }
 }
@@ -198,13 +204,13 @@ mod tests {
 
     #[test]
     fn gpu_image_keeps_intrinsics_without_a_cpu_placeholder() {
-        let dimensions=size(DevicePixels(16384),DevicePixels(16384));
-        let gpu=RenderImage::from_gpu(dimensions);
-        assert_eq!(gpu.size(0),dimensions);
-        assert_eq!(gpu.natural_size(0),dimensions);
-        assert_eq!(gpu.frame_count(),1);
-        assert_eq!(gpu.as_bytes(0),None);
-        assert_eq!(gpu.size(1),Size::default());
+        let dimensions = size(DevicePixels(16384), DevicePixels(16384));
+        let gpu = RenderImage::from_gpu(dimensions);
+        assert_eq!(gpu.size(0), dimensions);
+        assert_eq!(gpu.natural_size(0), dimensions);
+        assert_eq!(gpu.frame_count(), 1);
+        assert_eq!(gpu.as_bytes(0), None);
+        assert_eq!(gpu.size(1), Size::default());
         assert!(gpu.is_dynamic());
     }
 
@@ -235,9 +241,17 @@ mod tests {
             .with_natural_size(size(DevicePixels(400), DevicePixels(200)));
         assert!(copy.is_reduced());
         assert_eq!(copy.size(0), size(DevicePixels(4), DevicePixels(2)));
-        assert_eq!(copy.natural_size(0), size(DevicePixels(400), DevicePixels(200)));
-        assert_eq!(copy.render_size(0), size(Pixels::from(400.), Pixels::from(200.)));
-        let full = RenderImage::new(SmallVec::from_const([Frame::new(image::RgbaImage::new(3, 3))]));
+        assert_eq!(
+            copy.natural_size(0),
+            size(DevicePixels(400), DevicePixels(200))
+        );
+        assert_eq!(
+            copy.render_size(0),
+            size(Pixels::from(400.), Pixels::from(200.))
+        );
+        let full = RenderImage::new(SmallVec::from_const([Frame::new(image::RgbaImage::new(
+            3, 3,
+        ))]));
         assert!(!full.is_reduced());
         assert_eq!(full.natural_size(0), full.size(0));
     }

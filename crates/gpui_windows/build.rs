@@ -51,11 +51,18 @@ fn effects_generated_dir() -> std::path::PathBuf {
     }
 }
 
-#[cfg(all(target_os = "windows", any(not(debug_assertions), feature = "native-dx12")))]
+#[cfg(all(
+    target_os = "windows",
+    any(not(debug_assertions), feature = "native-dx12")
+))]
 mod shader_compilation {
     use std::path::{Path, PathBuf};
     #[cfg(not(debug_assertions))]
-    use std::{fs, io::Write, process::{self, Command}};
+    use std::{
+        fs,
+        io::Write,
+        process::{self, Command},
+    };
 
     #[cfg(not(debug_assertions))]
     pub fn compile_shaders() {

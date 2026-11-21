@@ -131,7 +131,11 @@ impl DirectXDevices {
     pub(crate) fn new() -> Result<Self> {
         if let Some(factory) = DEVICE_FACTORY.get() {
             return create_with_fallback(
-                || Self::from_external(factory().context("Creating embedder-owned DirectX devices")?),
+                || {
+                    Self::from_external(
+                        factory().context("Creating embedder-owned DirectX devices")?,
+                    )
+                },
                 Self::new_native,
             );
         }
@@ -139,10 +143,15 @@ impl DirectXDevices {
     }
 
     fn from_external(external: ExternalDirectXDevice) -> Result<Self> {
-        let multithread = external.device.cast::<ID3D11Multithread>()
+        let multithread = external
+            .device
+            .cast::<ID3D11Multithread>()
             .context("Shared renderer requires D3D11 multithread protection")?;
         let previously_protected = unsafe { multithread.SetMultithreadProtected(true) };
-        log::debug!("Shared D3D11 multithread protection was {}", previously_protected.as_bool());
+        log::debug!(
+            "Shared D3D11 multithread protection was {}",
+            previously_protected.as_bool()
+        );
         publish_device(&external.device);
         Ok(Self {
             adapter: external.adapter,
@@ -200,7 +209,10 @@ impl DirectXDevices {
 }
 
 // Shared D3D12 support must not become a prerequisite for opening a D3D11 UI.
-fn create_with_fallback<T>(factory: impl FnOnce() -> Result<T>, fallback: impl FnOnce() -> Result<T>) -> Result<T> {
+fn create_with_fallback<T>(
+    factory: impl FnOnce() -> Result<T>,
+    fallback: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     match factory() {
         Ok(device) => Ok(device),
         Err(error) => {
@@ -212,17 +224,21 @@ fn create_with_fallback<T>(factory: impl FnOnce() -> Result<T>, fallback: impl F
 
 #[cfg(test)]
 mod software_adapter_tests {
-    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory2, DXGI_CREATE_FACTORY_FLAGS, IDXGIAdapter1, IDXGIFactory6};
+    use windows::Win32::Graphics::Dxgi::{
+        CreateDXGIFactory2, DXGI_CREATE_FACTORY_FLAGS, IDXGIAdapter1, IDXGIFactory6,
+    };
 
     /// WARP is the only adapter in a VM without a GPU (Windows Sandbox, a
     /// basic-display RDP host); it has no video engine.
     #[test]
     fn the_warp_adapter_gets_a_device() {
-        let factory: IDXGIFactory6 = unsafe { CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS::default()) }.unwrap();
+        let factory: IDXGIFactory6 =
+            unsafe { CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS::default()) }.unwrap();
         let warp: IDXGIAdapter1 = unsafe { factory.EnumWarpAdapter() }.unwrap();
         let mut context = None;
         let mut level = Default::default();
-        super::get_device(&warp, Some(&mut context), Some(&mut level), false).expect("a WARP device");
+        super::get_device(&warp, Some(&mut context), Some(&mut level), false)
+            .expect("a WARP device");
         assert!(context.is_some());
     }
 }
@@ -234,14 +250,21 @@ mod factory_fallback_tests {
     #[test]
     fn a_shared_device_success_does_not_create_a_second_device() {
         let used = Cell::new(false);
-        let result = super::create_with_fallback(|| Ok(7), || { used.set(true); Ok(9) });
+        let result = super::create_with_fallback(
+            || Ok(7),
+            || {
+                used.set(true);
+                Ok(9)
+            },
+        );
         assert_eq!(result.expect("shared device"), 7);
         assert!(!used.get());
     }
 
     #[test]
     fn unavailable_shared_device_uses_native_renderer() {
-        let result = super::create_with_fallback(|| Err(anyhow::anyhow!("D3D12 unavailable")), || Ok(9));
+        let result =
+            super::create_with_fallback(|| Err(anyhow::anyhow!("D3D12 unavailable")), || Ok(9));
         assert_eq!(result.expect("native renderer"), 9);
     }
 
@@ -251,7 +274,12 @@ mod factory_fallback_tests {
             || Err(anyhow::anyhow!("D3D12 unavailable")),
             || Err(anyhow::anyhow!("D3D11 unavailable")),
         );
-        assert!(result.expect_err("neither device exists").to_string().contains("D3D11 unavailable"));
+        assert!(
+            result
+                .expect_err("neither device exists")
+                .to_string()
+                .contains("D3D11 unavailable")
+        );
     }
 }
 
@@ -359,7 +387,9 @@ fn get_adapter(
             if c.software { ", software" } else { "" }
         );
     }
-    let wanted = std::env::var("SK_ADAPTER").unwrap_or_default().to_lowercase();
+    let wanted = std::env::var("SK_ADAPTER")
+        .unwrap_or_default()
+        .to_lowercase();
     if !wanted.trim().is_empty() {
         let wanted = wanted.trim();
         if candidates

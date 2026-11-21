@@ -398,12 +398,21 @@ impl CosmicTextSystemState {
         let system_family;
         let name = if name == self.system_font_fallback && !self.has_family(name) {
             let db = self.font_system.db();
-            let sans = db.family_name(&cosmic_text::fontdb::Family::SansSerif).to_owned();
-            system_family = [sans.as_str(), "Noto Sans", "Cantarell", "Ubuntu", "DejaVu Sans", "Liberation Sans"]
-                .into_iter()
-                .find(|family| self.has_family(family))
-                .unwrap_or(name)
+            let sans = db
+                .family_name(&cosmic_text::fontdb::Family::SansSerif)
                 .to_owned();
+            system_family = [
+                sans.as_str(),
+                "Noto Sans",
+                "Cantarell",
+                "Ubuntu",
+                "DejaVu Sans",
+                "Liberation Sans",
+            ]
+            .into_iter()
+            .find(|family| self.has_family(family))
+            .unwrap_or(name)
+            .to_owned();
             system_family.as_str()
         } else {
             name

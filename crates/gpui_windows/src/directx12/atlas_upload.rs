@@ -188,7 +188,12 @@ impl UploadBatch {
             }
         }
         gpu.submit(owners, |commands| {
-            transitions(commands, &pages, ATLAS_STATE, D3D12_RESOURCE_STATE_COPY_DEST);
+            transitions(
+                commands,
+                &pages,
+                ATLAS_STATE,
+                D3D12_RESOURCE_STATE_COPY_DEST,
+            );
             for copy in &self.copies {
                 let target = TextureLocation::subresource(&copy.destination, 0);
                 let source = TextureLocation::placed(&upload, copy.footprint);
@@ -203,7 +208,12 @@ impl UploadBatch {
                     );
                 }
             }
-            transitions(commands, &pages, D3D12_RESOURCE_STATE_COPY_DEST, ATLAS_STATE);
+            transitions(
+                commands,
+                &pages,
+                D3D12_RESOURCE_STATE_COPY_DEST,
+                ATLAS_STATE,
+            );
             Ok(())
         })?;
         // Neither CPU staging nor a new GPU upload pool remains on idle atlases.

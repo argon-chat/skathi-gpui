@@ -433,7 +433,8 @@ pub(crate) struct Callbacks {
     pub(crate) display_changed: Cell<Option<Box<dyn FnMut()>>>,
     pub(crate) should_close: Cell<Option<Box<dyn FnMut() -> bool>>>,
     pub(crate) close: Cell<Option<Box<dyn FnOnce()>>>,
-    pub(crate) hit_test_window_control: Cell<Option<Box<dyn FnMut(Option<Point<Pixels>>) -> Option<WindowControlArea>>>>,
+    pub(crate) hit_test_window_control:
+        Cell<Option<Box<dyn FnMut(Option<Point<Pixels>>) -> Option<WindowControlArea>>>>,
     pub(crate) appearance_changed: Cell<Option<Box<dyn FnMut()>>>,
 }
 
@@ -927,46 +928,55 @@ impl PlatformWindow for WindowsWindow {
         // App update so GPUI can accept those callbacks, just like activate.
         // A queued reveal must not keep a closed window alive or revive its HWND.
         let window = Rc::downgrade(&self.0);
-        self.0.executor.spawn(async move {
-            let Some(window) = window.upgrade() else {
-                completed(false);
-                return;
-            };
-            if !unsafe { IsWindow(Some(window.hwnd)) }.as_bool() || !should_show() {
-                completed(false);
-                return;
-            }
-            if let Some(mut status) = window.state.initial_placement.take() {
-                let Some(command) = initial_show_command(status.state, status.placement.showCmd, activate) else {
-                    // Win32 has no nonactivating maximize command. Keep the
-                    // requested placement intact instead of silently showing
-                    // a maximized/fullscreen window as an ordinary one.
-                    window.state.initial_placement.set(Some(status));
+        self.0
+            .executor
+            .spawn(async move {
+                let Some(window) = window.upgrade() else {
                     completed(false);
                     return;
                 };
-                status.placement.showCmd = command.0 as u32;
-                if let Err(error) = unsafe { SetWindowPlacement(window.hwnd, &status.placement) } {
-                    window.state.initial_placement.set(Some(status));
-                    log::error!("failed to show prepared window: {error}");
+                if !unsafe { IsWindow(Some(window.hwnd)) }.as_bool() || !should_show() {
                     completed(false);
                     return;
                 }
-                if matches!(status.state, WindowOpenState::Fullscreen) {
-                    window.toggle_fullscreen();
+                if let Some(mut status) = window.state.initial_placement.take() {
+                    let Some(command) =
+                        initial_show_command(status.state, status.placement.showCmd, activate)
+                    else {
+                        // Win32 has no nonactivating maximize command. Keep the
+                        // requested placement intact instead of silently showing
+                        // a maximized/fullscreen window as an ordinary one.
+                        window.state.initial_placement.set(Some(status));
+                        completed(false);
+                        return;
+                    };
+                    status.placement.showCmd = command.0 as u32;
+                    if let Err(error) =
+                        unsafe { SetWindowPlacement(window.hwnd, &status.placement) }
+                    {
+                        window.state.initial_placement.set(Some(status));
+                        log::error!("failed to show prepared window: {error}");
+                        completed(false);
+                        return;
+                    }
+                    if matches!(status.state, WindowOpenState::Fullscreen) {
+                        window.toggle_fullscreen();
+                    }
+                } else {
+                    // This task already runs on the HWND's foreground thread. Use
+                    // the synchronous call so completion really follows visibility.
+                    unsafe {
+                        let _ = ShowWindow(window.hwnd, if activate { SW_SHOW } else { SW_SHOWNA });
+                    }
                 }
-            } else {
-                // This task already runs on the HWND's foreground thread. Use
-                // the synchronous call so completion really follows visibility.
-                unsafe { let _ = ShowWindow(window.hwnd, if activate { SW_SHOW } else { SW_SHOWNA }); }
-            }
-            completed(unsafe { IsWindowVisible(window.hwnd) }.as_bool());
-            if activate && !unsafe { IsIconic(window.hwnd) }.as_bool() {
-                // Unlike activate(), this path never injects a synthetic key.
-                // Windows may decline the foreground request; showing is still valid.
-                win32_call(|| unsafe { SetForegroundWindow(window.hwnd) }.ok()).log_err();
-            }
-        }).detach();
+                completed(unsafe { IsWindowVisible(window.hwnd) }.as_bool());
+                if activate && !unsafe { IsIconic(window.hwnd) }.as_bool() {
+                    // Unlike activate(), this path never injects a synthetic key.
+                    // Windows may decline the foreground request; showing is still valid.
+                    win32_call(|| unsafe { SetForegroundWindow(window.hwnd) }.ok()).log_err();
+                }
+            })
+            .detach();
         true
     }
 
@@ -1105,11 +1115,7 @@ impl PlatformWindow for WindowsWindow {
             }
             WindowBackgroundAppearance::Transparent => {
                 dwm_set_window_composition_attribute(hwnd, DWMSBT_NONE);
-                set_window_composition_attribute(
-                    hwnd,
-                    None,
-                    ACCENT_ENABLE_TRANSPARENTGRADIENT,
-                );
+                set_window_composition_attribute(hwnd, None, ACCENT_ENABLE_TRANSPARENTGRADIENT);
             }
             WindowBackgroundAppearance::Blurred => {
                 dwm_set_window_composition_attribute(hwnd, DWMSBT_NONE);
@@ -1346,15 +1352,24 @@ impl PlatformWindow for WindowsWindow {
         self.state.callbacks.close.set(Some(callback));
     }
 
-    fn on_hit_test_window_control(&self, mut callback: Box<dyn FnMut() -> Option<WindowControlArea>>) {
-        self.state.callbacks.hit_test_window_control.set(Some(Box::new(move |_| callback())));
+    fn on_hit_test_window_control(
+        &self,
+        mut callback: Box<dyn FnMut() -> Option<WindowControlArea>>,
+    ) {
+        self.state
+            .callbacks
+            .hit_test_window_control
+            .set(Some(Box::new(move |_| callback())));
     }
 
     fn on_hit_test_window_control_at(
         &self,
         callback: Box<dyn FnMut(Option<Point<Pixels>>) -> Option<WindowControlArea>>,
     ) {
-        self.state.callbacks.hit_test_window_control.set(Some(callback));
+        self.state
+            .callbacks
+            .hit_test_window_control
+            .set(Some(callback));
     }
 
     fn on_appearance_changed(&self, callback: Box<dyn FnMut()>) {
@@ -1897,12 +1912,26 @@ fn hidden_initial_placement(mut placement: WINDOWPLACEMENT) -> WINDOWPLACEMENT {
     placement
 }
 
-fn initial_show_command(state: WindowOpenState, original: u32, activate: bool) -> Option<SHOW_WINDOW_CMD> {
+fn initial_show_command(
+    state: WindowOpenState,
+    original: u32,
+    activate: bool,
+) -> Option<SHOW_WINDOW_CMD> {
     if matches!(state, WindowOpenState::Windowed)
-        && [SW_SHOWMINIMIZED, SW_MINIMIZE, SW_SHOWMINNOACTIVE, SW_FORCEMINIMIZE]
-            .iter().any(|command| command.0 as u32 == original)
+        && [
+            SW_SHOWMINIMIZED,
+            SW_MINIMIZE,
+            SW_SHOWMINNOACTIVE,
+            SW_FORCEMINIMIZE,
+        ]
+        .iter()
+        .any(|command| command.0 as u32 == original)
     {
-        return Some(if activate { SW_SHOWMINIMIZED } else { SW_SHOWMINNOACTIVE });
+        return Some(if activate {
+            SW_SHOWMINIMIZED
+        } else {
+            SW_SHOWMINNOACTIVE
+        });
     }
     if !activate {
         matches!(state, WindowOpenState::Windowed).then_some(SW_SHOWNOACTIVATE)
@@ -2185,15 +2214,36 @@ fn set_non_rude_hwnd(hwnd: HWND, non_rude: bool) {
 #[cfg(test)]
 mod tests {
     use super::{ClickState, WindowOpenState, hidden_initial_placement, initial_show_command};
-    use windows::Win32::{Foundation::RECT, UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SW_SHOWMAXIMIZED, SW_SHOWMINIMIZED, SW_SHOWMINNOACTIVE, WINDOWPLACEMENT, WPF_RESTORETOMAXIMIZED}};
+    use windows::Win32::{
+        Foundation::RECT,
+        UI::WindowsAndMessaging::{
+            SW_HIDE, SW_SHOWMAXIMIZED, SW_SHOWMINIMIZED, SW_SHOWMINNOACTIVE, SW_SHOWNOACTIVATE,
+            SW_SHOWNORMAL, WINDOWPLACEMENT, WPF_RESTORETOMAXIMIZED,
+        },
+    };
 
     #[::core::prelude::v1::test]
     fn initial_show_respects_noactivate_and_normal_or_maximized_placement() {
-        assert_eq!(initial_show_command(WindowOpenState::Windowed, SW_SHOWNORMAL.0 as u32, false), Some(SW_SHOWNOACTIVATE));
-        assert_eq!(initial_show_command(WindowOpenState::Fullscreen, SW_SHOWNORMAL.0 as u32, false), None);
-        assert_eq!(initial_show_command(WindowOpenState::Maximized, SW_SHOWNORMAL.0 as u32, false), None);
-        assert_eq!(initial_show_command(WindowOpenState::Windowed, SW_SHOWNORMAL.0 as u32, true), Some(SW_SHOWNORMAL));
-        assert_eq!(initial_show_command(WindowOpenState::Maximized, SW_SHOWNORMAL.0 as u32, true), Some(SW_SHOWMAXIMIZED));
+        assert_eq!(
+            initial_show_command(WindowOpenState::Windowed, SW_SHOWNORMAL.0 as u32, false),
+            Some(SW_SHOWNOACTIVATE)
+        );
+        assert_eq!(
+            initial_show_command(WindowOpenState::Fullscreen, SW_SHOWNORMAL.0 as u32, false),
+            None
+        );
+        assert_eq!(
+            initial_show_command(WindowOpenState::Maximized, SW_SHOWNORMAL.0 as u32, false),
+            None
+        );
+        assert_eq!(
+            initial_show_command(WindowOpenState::Windowed, SW_SHOWNORMAL.0 as u32, true),
+            Some(SW_SHOWNORMAL)
+        );
+        assert_eq!(
+            initial_show_command(WindowOpenState::Maximized, SW_SHOWNORMAL.0 as u32, true),
+            Some(SW_SHOWMAXIMIZED)
+        );
     }
     use gpui::{DevicePixels, MouseButton, point};
     use std::time::Duration;
@@ -2204,7 +2254,12 @@ mod tests {
             length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
             flags: WPF_RESTORETOMAXIMIZED,
             showCmd: SW_SHOWMINIMIZED.0 as u32,
-            rcNormalPosition: RECT { left: 110, top: 120, right: 910, bottom: 720 },
+            rcNormalPosition: RECT {
+                left: 110,
+                top: 120,
+                right: 910,
+                bottom: 720,
+            },
             ..Default::default()
         };
         let hidden = hidden_initial_placement(placement);
@@ -2212,16 +2267,27 @@ mod tests {
         assert_eq!(placement.showCmd, SW_SHOWMINIMIZED.0 as u32);
         assert_eq!(hidden.flags, placement.flags);
         assert_eq!(hidden.length, placement.length);
-        assert_eq!((hidden.rcNormalPosition.left, hidden.rcNormalPosition.top,
-            hidden.rcNormalPosition.right, hidden.rcNormalPosition.bottom), (110, 120, 910, 720));
+        assert_eq!(
+            (
+                hidden.rcNormalPosition.left,
+                hidden.rcNormalPosition.top,
+                hidden.rcNormalPosition.right,
+                hidden.rcNormalPosition.bottom
+            ),
+            (110, 120, 910, 720)
+        );
     }
 
     #[::core::prelude::v1::test]
     fn revealing_an_initially_minimized_window_preserves_its_mode() {
-        assert_eq!(initial_show_command(WindowOpenState::Windowed, SW_SHOWMINIMIZED.0 as u32, true),
-            Some(SW_SHOWMINIMIZED));
-        assert_eq!(initial_show_command(WindowOpenState::Windowed, SW_SHOWMINIMIZED.0 as u32, false),
-            Some(SW_SHOWMINNOACTIVE));
+        assert_eq!(
+            initial_show_command(WindowOpenState::Windowed, SW_SHOWMINIMIZED.0 as u32, true),
+            Some(SW_SHOWMINIMIZED)
+        );
+        assert_eq!(
+            initial_show_command(WindowOpenState::Windowed, SW_SHOWMINIMIZED.0 as u32, false),
+            Some(SW_SHOWMINNOACTIVE)
+        );
     }
 
     #[test]

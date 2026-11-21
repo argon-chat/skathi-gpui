@@ -377,7 +377,8 @@ mod vn_stack_key_tests {
         canvas(
             |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
             move |_, hitbox, window, _| {
-                log.borrow_mut().push((name, hitbox.id, window.element_opacity))
+                log.borrow_mut()
+                    .push((name, hitbox.id, window.element_opacity))
             },
         )
         .absolute()
@@ -418,7 +419,11 @@ mod vn_stack_key_tests {
     /// The last frame's paints, in order.
     fn last_frame(log: &Log, n: usize) -> Vec<(&'static str, HitboxId, f32)> {
         let log = log.borrow();
-        assert!(log.len() >= n, "painted: {:?}", log.iter().map(|e| e.0).collect::<Vec<_>>());
+        assert!(
+            log.len() >= n,
+            "painted: {:?}",
+            log.iter().map(|e| e.0).collect::<Vec<_>>()
+        );
         log[log.len() - n..].to_vec()
     }
 
@@ -437,7 +442,9 @@ mod vn_stack_key_tests {
         let id = |name| frame.iter().find(|e| e.0 == name).unwrap().1;
         window
             .update(cx, |_, window, _| {
-                let hit = window.rendered_frame.hit_test(point(px(50.), px(50.)), window.scale_factor());
+                let hit = window
+                    .rendered_frame
+                    .hit_test(point(px(50.), px(50.)), window.scale_factor());
                 assert_eq!(
                     hit.ids.to_vec(),
                     vec![id("menu"), id("layer"), id("popover")],
@@ -464,7 +471,9 @@ mod vn_stack_key_tests {
     fn a_deferred_draw_keeps_its_ancestors_opacity(cx: &mut TestAppContext) {
         let log: Log = Default::default();
         let view_log = log.clone();
-        let _window = cx.open_window(size(px(200.), px(200.)), move |_, _| Faded { log: view_log });
+        let _window = cx.open_window(size(px(200.), px(200.)), move |_, _| Faded {
+            log: view_log,
+        });
         cx.run_until_parked();
         assert_eq!(last_frame(&log, 1)[0].2, 0.5);
     }
@@ -503,10 +512,15 @@ mod vn_deferred_text_style_tests {
     fn a_deferred_paint_reads_the_inherited_text_style(cx: &mut TestAppContext) {
         let seen = Rc::new(RefCell::new(Vec::new()));
         let view_seen = seen.clone();
-        let _window = cx.open_window(size(px(200.), px(200.)), move |_, _| Tinted { seen: view_seen });
+        let _window = cx.open_window(size(px(200.), px(200.)), move |_, _| Tinted {
+            seen: view_seen,
+        });
         cx.run_until_parked();
         let seen = seen.borrow();
         assert!(!seen.is_empty(), "the deferred canvas painted");
-        assert!(seen.iter().all(|c| *c == red()), "painted under the ancestor's colour: {seen:?}");
+        assert!(
+            seen.iter().all(|c| *c == red()),
+            "painted under the ancestor's colour: {seen:?}"
+        );
     }
 }

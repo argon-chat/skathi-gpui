@@ -228,7 +228,11 @@ pub fn check(
     near(at(60), 0.5 * SDR_WHITE, "0.5")?;
     near(at(64), 0.5 * SDR_WHITE, "cubic crop edge")?;
     near(at(68), 0.5 * SDR_WHITE, "cubic dark plateau")?;
-    near(at(71), (0.5 + 1.5 * 0.345703125) * SDR_WHITE, "cubic HDR edge")?;
+    near(
+        at(71),
+        (0.5 + 1.5 * 0.345703125) * SDR_WHITE,
+        "cubic HDR edge",
+    )?;
     near(at(79), 2.0 * SDR_WHITE, "cubic bright plateau")?;
     near(at(87), 0.5 * SDR_WHITE, "nearest before HDR edge")?;
     near(at(88), 2.0 * SDR_WHITE, "nearest after HDR edge")?;

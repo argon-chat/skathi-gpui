@@ -7,13 +7,11 @@ use std::{
 
 use crate::{
     AbsoluteLength, App, Background, BackgroundTag, BorderStyle, Bounds, ContentMask, CornerShape,
-    CornerShapes, Corners,
-    CornersRefinement, CursorStyle, DefiniteLength, DevicePixels, Edges, EdgesRefinement,
-    EffectCrossFade, EffectSpec, Font,
-    FontFallbacks, FontFeatures, FontStyle, FontWeight, GridLocation, Hsla, Length, Pixels, Point,
-    PointRefinement, Rgba, SharedString, Size, SizeRefinement, Styled, TextRun, Window, black, phi,
-    TransformSpec, TransformationMatrix, VnClipOutline, VnFillRule, VnPathVerb, point, px, quad,
-    rems, size,
+    CornerShapes, Corners, CornersRefinement, CursorStyle, DefiniteLength, DevicePixels, Edges,
+    EdgesRefinement, EffectCrossFade, EffectSpec, Font, FontFallbacks, FontFeatures, FontStyle,
+    FontWeight, GridLocation, Hsla, Length, Pixels, Point, PointRefinement, Rgba, SharedString,
+    Size, SizeRefinement, Styled, TextRun, TransformSpec, TransformationMatrix, VnClipOutline,
+    VnFillRule, VnPathVerb, Window, black, phi, point, px, quad, rems, size,
 };
 use collections::HashSet;
 use refineable::Refineable;
@@ -328,7 +326,10 @@ pub fn vn_resolve_corner_radii(
     size: Size<Pixels>,
     rem_size: Pixels,
 ) -> Corners<Pixels> {
-    let (width, height) = (f32::from(size.width).max(0.), f32::from(size.height).max(0.));
+    let (width, height) = (
+        f32::from(size.width).max(0.),
+        f32::from(size.height).max(0.),
+    );
     let pair = |length: &AbsoluteLength, relative: &Option<VnCornerRadius>| -> (f32, f32) {
         match relative {
             Some(radius) => (
@@ -473,7 +474,9 @@ fn vn_clip_ellipse(
     rem_size: Pixels,
 ) -> (Point<Pixels>, Pixels, Pixels) {
     let (w, h) = (rect.size.width, rect.size.height);
-    let resolve = |length: &DefiniteLength, base: Pixels| length.to_pixels(AbsoluteLength::Pixels(base), rem_size);
+    let resolve = |length: &DefiniteLength, base: Pixels| {
+        length.to_pixels(AbsoluteLength::Pixels(base), rem_size)
+    };
     let cx = rect.left() + resolve(&center[0], w);
     let cy = rect.top() + resolve(&center[1], h);
     let (near_x, far_x) = ((cx - rect.left()).abs(), (rect.right() - cx).abs());
@@ -483,7 +486,10 @@ fn vn_clip_ellipse(
     let diagonal = px((f32::from(w).powi(2) + f32::from(h).powi(2)).sqrt() / 2f32.sqrt());
     let one = |r: &VnShapeRadius, horizontal: bool| -> Pixels {
         let (a, b) = if circle {
-            (near_x.min(far_x).min(near_y.min(far_y)), near_x.max(far_x).max(near_y.max(far_y)))
+            (
+                near_x.min(far_x).min(near_y.min(far_y)),
+                near_x.max(far_x).max(near_y.max(far_y)),
+            )
         } else if horizontal {
             (near_x.min(far_x), near_x.max(far_x))
         } else {
@@ -492,7 +498,17 @@ fn vn_clip_ellipse(
         match r {
             VnShapeRadius::ClosestSide => a,
             VnShapeRadius::FarthestSide => b,
-            VnShapeRadius::Length(l) => resolve(l, if circle { diagonal } else if horizontal { w } else { h }).max(px(0.)),
+            VnShapeRadius::Length(l) => resolve(
+                l,
+                if circle {
+                    diagonal
+                } else if horizontal {
+                    w
+                } else {
+                    h
+                },
+            )
+            .max(px(0.)),
         }
     };
     (point(cx, cy), one(&radius[0], true), one(&radius[1], false))
@@ -1397,7 +1413,11 @@ impl Style {
 
     /// Text refinements with the background positioning box resolved for paint.
     /// Layout uses `text_style` because this scope must not change glyph shaping.
-    pub fn text_style_for_bounds(&self, bounds: Bounds<Pixels>, window: &Window) -> Option<TextStyleRefinement> {
+    pub fn text_style_for_bounds(
+        &self,
+        bounds: Bounds<Pixels>,
+        window: &Window,
+    ) -> Option<TextStyleRefinement> {
         let mut text = self.text.clone();
         if let Some(fill) = &self.vn_text_fill {
             text.vn_text_paint = Some(window.vn_text_paint(fill.clone(), bounds));
@@ -1508,20 +1528,39 @@ impl Style {
     ) -> ContentMask<Pixels> {
         let shapes = &self.vn_corner_shapes;
         if *shapes == Corners::default() {
-            return ContentMask { bounds: rect, corner_radii: round_radii, corner_shapes: CornerShapes::default() };
+            return ContentMask {
+                bounds: rect,
+                corner_radii: round_radii,
+                corner_shapes: CornerShapes::default(),
+            };
         }
         let outer = self.corner_radii_for(border_box.size, rem_size);
-        let pick = |round: Pixels, outer: Pixels, shape: CornerShape| if shape.is_round() { round } else { outer };
+        let pick = |round: Pixels, outer: Pixels, shape: CornerShape| {
+            if shape.is_round() { round } else { outer }
+        };
         let corner_radii = Corners {
             top_left: pick(round_radii.top_left, outer.top_left, shapes.top_left),
             top_right: pick(round_radii.top_right, outer.top_right, shapes.top_right),
-            bottom_right: pick(round_radii.bottom_right, outer.bottom_right, shapes.bottom_right),
-            bottom_left: pick(round_radii.bottom_left, outer.bottom_left, shapes.bottom_left),
+            bottom_right: pick(
+                round_radii.bottom_right,
+                outer.bottom_right,
+                shapes.bottom_right,
+            ),
+            bottom_left: pick(
+                round_radii.bottom_left,
+                outer.bottom_left,
+                shapes.bottom_left,
+            ),
         };
         let inset = |a: Pixels, b: Pixels| f32::from(a - b).max(0.);
-        let (left, top) = (inset(rect.left(), border_box.left()), inset(rect.top(), border_box.top()));
-        let (right, bottom) =
-            (inset(border_box.right(), rect.right()), inset(border_box.bottom(), rect.bottom()));
+        let (left, top) = (
+            inset(rect.left(), border_box.left()),
+            inset(rect.top(), border_box.top()),
+        );
+        let (right, bottom) = (
+            inset(border_box.right(), rect.right()),
+            inset(border_box.bottom(), rect.bottom()),
+        );
         let insets = Corners {
             top_left: (left, top),
             top_right: (right, top),
@@ -1542,13 +1581,20 @@ impl Style {
     /// A shape that is no rounded rectangle ([`Style::vn_clip_outline`])
     /// gives the rectangle around its outline here, which culls and cuts the
     /// isolated layer the outline is then composited through.
-    pub fn vn_clip_mask(&self, bounds: Bounds<Pixels>, rem_size: Pixels) -> Option<ContentMask<Pixels>> {
+    pub fn vn_clip_mask(
+        &self,
+        bounds: Bounds<Pixels>,
+        rem_size: Pixels,
+    ) -> Option<ContentMask<Pixels>> {
         let clip = &self.vn_clip_path;
         let reference = match clip {
             VnClipPath::None => return None,
             VnClipPath::Polygon { .. } | VnClipPath::Path { .. } => {
                 let outline = self.vn_clip_outline(bounds, rem_size)?;
-                let rect = outline.control_bounds().unwrap_or(Bounds { origin: bounds.origin, size: Size::default() });
+                let rect = outline.control_bounds().unwrap_or(Bounds {
+                    origin: bounds.origin,
+                    size: Size::default(),
+                });
                 return Some(ContentMask::rect(rect));
             }
             VnClipPath::Box(reference)
@@ -1557,10 +1603,16 @@ impl Style {
         };
         let (rect, rounded) = self.vn_clip_box(reference, bounds, rem_size);
         let (w, h) = (rect.size.width, rect.size.height);
-        let resolve = |length: &DefiniteLength, base: Pixels| length.to_pixels(AbsoluteLength::Pixels(base), rem_size);
+        let resolve = |length: &DefiniteLength, base: Pixels| {
+            length.to_pixels(AbsoluteLength::Pixels(base), rem_size)
+        };
         Some(match clip {
             VnClipPath::None | VnClipPath::Polygon { .. } | VnClipPath::Path { .. } => return None,
-            VnClipPath::Box(VnClipBox::Margin) => ContentMask { bounds: rect, corner_radii: rounded, ..Default::default() },
+            VnClipPath::Box(VnClipBox::Margin) => ContentMask {
+                bounds: rect,
+                corner_radii: rounded,
+                ..Default::default()
+            },
             VnClipPath::Box(_) => self.vn_shaped_mask(bounds, rect, rounded, rem_size),
             VnClipPath::Inset { insets, radii, .. } => {
                 // Chromium's `BasicShapeInset::GetPath`: the insets come off
@@ -1572,7 +1624,10 @@ impl Style {
                 let (bottom, left) = (resolve(bottom, h), resolve(left, w));
                 let shape = Bounds {
                     origin: point(rect.left() + left, rect.top() + top),
-                    size: size((w - left - right).max(px(0.)), (h - top - bottom).max(px(0.))),
+                    size: size(
+                        (w - left - right).max(px(0.)),
+                        (h - top - bottom).max(px(0.)),
+                    ),
                 };
                 let pairs = radii.map(|r| {
                     let x = f32::from(resolve(&r.x, w)).max(0.);
@@ -1581,7 +1636,8 @@ impl Style {
                 });
                 let [tl, tr, br, bl] = pairs;
                 let (sw, sh) = (f32::from(shape.size.width), f32::from(shape.size.height));
-                let ratio = |side: f32, a: f32, b: f32| if a + b > side { side / (a + b) } else { 1. };
+                let ratio =
+                    |side: f32, a: f32, b: f32| if a + b > side { side / (a + b) } else { 1. };
                 let factor = ratio(sw, tl.0, tr.0)
                     .min(ratio(sw, bl.0, br.0))
                     .min(ratio(sh, tl.1, bl.1))
@@ -1594,15 +1650,35 @@ impl Style {
                     bottom_left: circle(bl),
                 }
                 .clamp_radii_for_quad_size(shape.size);
-                ContentMask { bounds: shape, corner_radii, ..Default::default() }
+                ContentMask {
+                    bounds: shape,
+                    corner_radii,
+                    ..Default::default()
+                }
             }
-            VnClipPath::Ellipse { center, radius, circle, .. } => {
+            VnClipPath::Ellipse {
+                center,
+                radius,
+                circle,
+                ..
+            } => {
                 let (c, rx, ry) = vn_clip_ellipse(rect, center, radius, *circle, rem_size);
-                let shape = Bounds { origin: point(c.x - rx, c.y - ry), size: size(rx * 2., ry * 2.) };
+                let shape = Bounds {
+                    origin: point(c.x - rx, c.y - ry),
+                    size: size(rx * 2., ry * 2.),
+                };
                 // A circle is the rounded mask; an ellipse is its box here,
                 // and its outline in an isolated layer.
-                let corner_radii = if rx == ry { Corners::all(rx) } else { Corners::default() };
-                ContentMask { bounds: shape, corner_radii, ..Default::default() }
+                let corner_radii = if rx == ry {
+                    Corners::all(rx)
+                } else {
+                    Corners::default()
+                };
+                ContentMask {
+                    bounds: shape,
+                    corner_radii,
+                    ..Default::default()
+                }
             }
         })
     }
@@ -1613,26 +1689,45 @@ impl Style {
     /// element's own frame. `None` for no clip and for a shape
     /// [`Style::vn_clip_mask`] carries alone. The element paints into an
     /// isolated layer composited through it ([`Window::vn_with_clip_shape`]).
-    pub fn vn_clip_outline(&self, bounds: Bounds<Pixels>, rem_size: Pixels) -> Option<VnClipOutline> {
+    pub fn vn_clip_outline(
+        &self,
+        bounds: Bounds<Pixels>,
+        rem_size: Pixels,
+    ) -> Option<VnClipOutline> {
         let resolve = |length: &DefiniteLength, base: Pixels| {
             f32::from(length.to_pixels(AbsoluteLength::Pixels(base), rem_size))
         };
         match &self.vn_clip_path {
-            VnClipPath::Polygon { reference, fill_rule, points } => {
+            VnClipPath::Polygon {
+                reference,
+                fill_rule,
+                points,
+            } => {
                 let (rect, _) = self.vn_clip_box(*reference, bounds, rem_size);
                 let (x0, y0) = (f32::from(rect.left()), f32::from(rect.top()));
                 let (w, h) = (rect.size.width, rect.size.height);
                 let mut verbs = Vec::with_capacity(points.len() + 1);
                 for (i, [x, y]) in points.iter().enumerate() {
                     let p = [x0 + resolve(x, w), y0 + resolve(y, h)];
-                    verbs.push(if i == 0 { VnPathVerb::MoveTo(p) } else { VnPathVerb::LineTo(p) });
+                    verbs.push(if i == 0 {
+                        VnPathVerb::MoveTo(p)
+                    } else {
+                        VnPathVerb::LineTo(p)
+                    });
                 }
                 if !verbs.is_empty() {
                     verbs.push(VnPathVerb::Close);
                 }
-                Some(VnClipOutline { fill_rule: *fill_rule, verbs })
+                Some(VnClipOutline {
+                    fill_rule: *fill_rule,
+                    verbs,
+                })
             }
-            VnClipPath::Path { reference, fill_rule, verbs } => {
+            VnClipPath::Path {
+                reference,
+                fill_rule,
+                verbs,
+            } => {
                 let (rect, _) = self.vn_clip_box(*reference, bounds, rem_size);
                 let (x0, y0) = (f32::from(rect.left()), f32::from(rect.top()));
                 let at = |p: [f32; 2]| [p[0] + x0, p[1] + y0];
@@ -1642,20 +1737,31 @@ impl Style {
                         VnPathVerb::MoveTo(p) => VnPathVerb::MoveTo(at(p)),
                         VnPathVerb::LineTo(p) => VnPathVerb::LineTo(at(p)),
                         VnPathVerb::QuadTo(c, p) => VnPathVerb::QuadTo(at(c), at(p)),
-                        VnPathVerb::CubicTo(c1, c2, p) => VnPathVerb::CubicTo(at(c1), at(c2), at(p)),
+                        VnPathVerb::CubicTo(c1, c2, p) => {
+                            VnPathVerb::CubicTo(at(c1), at(c2), at(p))
+                        }
                         VnPathVerb::Close => VnPathVerb::Close,
                     })
                     .collect();
-                Some(VnClipOutline { fill_rule: *fill_rule, verbs })
+                Some(VnClipOutline {
+                    fill_rule: *fill_rule,
+                    verbs,
+                })
             }
-            VnClipPath::Ellipse { reference, center, radius, circle } => {
+            VnClipPath::Ellipse {
+                reference,
+                center,
+                radius,
+                circle,
+            } => {
                 let (rect, _) = self.vn_clip_box(*reference, bounds, rem_size);
                 let (c, rx, ry) = vn_clip_ellipse(rect, center, radius, *circle, rem_size);
                 if rx == ry {
                     return None;
                 }
                 // Four cubics, one per quadrant, k = 4/3 (sqrt(2) - 1).
-                let (cx, cy, rx, ry) = (f32::from(c.x), f32::from(c.y), f32::from(rx), f32::from(ry));
+                let (cx, cy, rx, ry) =
+                    (f32::from(c.x), f32::from(c.y), f32::from(rx), f32::from(ry));
                 let (kx, ky) = (0.552_284_8 * rx, 0.552_284_8 * ry);
                 use VnPathVerb::*;
                 Some(VnClipOutline {
@@ -1680,7 +1786,12 @@ impl Style {
     /// the margin box's grows by the larger margin, where it is rounded at
     /// all. A percentage padding or margin resolves against the element's own
     /// width, not its containing block's.
-    fn vn_clip_box(&self, reference: VnClipBox, bounds: Bounds<Pixels>, rem_size: Pixels) -> (Bounds<Pixels>, Corners<Pixels>) {
+    fn vn_clip_box(
+        &self,
+        reference: VnClipBox,
+        bounds: Bounds<Pixels>,
+        rem_size: Pixels,
+    ) -> (Bounds<Pixels>, Corners<Pixels>) {
         let outer = self.corner_radii_for(bounds.size, rem_size);
         let width = AbsoluteLength::Pixels(bounds.size.width);
         let edges = match reference {
@@ -1722,7 +1833,11 @@ impl Style {
         // A negative inset is an outset (the margin box).
         let corner = |radius: Pixels, a: Pixels, b: Pixels| {
             if a < px(0.) || b < px(0.) {
-                if radius > px(0.) { radius - a.min(b) } else { px(0.) }
+                if radius > px(0.) {
+                    radius - a.min(b)
+                } else {
+                    px(0.)
+                }
             } else {
                 (radius - a.max(b)).max(px(0.))
             }
@@ -1795,7 +1910,8 @@ impl Style {
             window.with_content_mask(clip, |window| {
                 window.vn_with_clip_shape(outline.as_ref(), |window| {
                     if let Some(tint) = self.vn_mask_tint()
-                        && let Some(paint) = self.vn_mask.as_ref().and_then(|mask| mask.paint.clone())
+                        && let Some(paint) =
+                            self.vn_mask.as_ref().and_then(|mask| mask.paint.clone())
                     {
                         if !tint.is_transparent() {
                             window.with_element_opacity(Some(tint.a), |window| {
@@ -1834,7 +1950,9 @@ impl Style {
             || self.vn_effect.is_some()
             || self.vn_effect_fade.is_some()
             || self.vn_mask_ring
-            || self.vn_outline.is_some_and(|o| o.width > px(0.) && !o.color.is_transparent())
+            || self
+                .vn_outline
+                .is_some_and(|o| o.width > px(0.) && !o.color.is_transparent())
         {
             return None;
         }
@@ -1912,9 +2030,17 @@ impl Style {
             })
             .collect();
         let shapes = self.vn_corner_shapes;
-        window.vn_with_effect_content(bounds, corner_radii, shapes, &shaded, element, cx, |window, cx| {
-            self.paint_untransformed(bounds, window, cx, continuation, &effects, element, true)
-        })
+        window.vn_with_effect_content(
+            bounds,
+            corner_radii,
+            shapes,
+            &shaded,
+            element,
+            cx,
+            |window, cx| {
+                self.paint_untransformed(bounds, window, cx, continuation, &effects, element, true)
+            },
+        )
     }
 
     /// Whether an effect of this style reads the element's content, whose
@@ -2058,14 +2184,17 @@ impl Style {
             let mut border_color = representative_color(&color);
             border_color.a = 0.;
             let (color, widths) = fill(color);
-            window.paint_quad(quad(
-                bounds,
-                corner_radii,
-                color,
-                widths,
-                border_color,
-                self.border_style,
-            ).corner_shapes(self.vn_corner_shapes));
+            window.paint_quad(
+                quad(
+                    bounds,
+                    corner_radii,
+                    color,
+                    widths,
+                    border_color,
+                    self.border_style,
+                )
+                .corner_shapes(self.vn_corner_shapes),
+            );
         }
 
         // The `background-image` stack, bottom layer first, each one its own
@@ -2080,18 +2209,26 @@ impl Style {
             let mut border_color = representative_color(layer);
             border_color.a = 0.;
             let (layer, widths) = fill(*layer);
-            window.paint_quad(quad(
-                bounds,
-                corner_radii,
-                layer,
-                widths,
-                border_color,
-                self.border_style,
-            ).corner_shapes(self.vn_corner_shapes));
+            window.paint_quad(
+                quad(
+                    bounds,
+                    corner_radii,
+                    layer,
+                    widths,
+                    border_color,
+                    self.border_style,
+                )
+                .corner_shapes(self.vn_corner_shapes),
+            );
         }
 
         if !ring {
-            window.vn_paint_inset_shadows(bounds, corner_radii, self.vn_corner_shapes, &self.box_shadow);
+            window.vn_paint_inset_shadows(
+                bounds,
+                corner_radii,
+                self.vn_corner_shapes,
+                &self.box_shadow,
+            );
         }
 
         self.paint_effects(bounds, corner_radii, window, cx, effects, element, false);
@@ -2101,29 +2238,63 @@ impl Style {
         if self.is_border_visible() {
             let border_widths = self.border_widths.to_pixels(rem_size);
             let colors = self.vn_resolved_border_colors();
-            if colors.top == colors.right && colors.top == colors.bottom && colors.top == colors.left {
-                window.paint_quad(quad(
-                    bounds, corner_radii, Hsla::transparent_black(), border_widths,
-                    colors.top, self.border_style,
-                ).corner_shapes(self.vn_corner_shapes));
+            if colors.top == colors.right
+                && colors.top == colors.bottom
+                && colors.top == colors.left
+            {
+                window.paint_quad(
+                    quad(
+                        bounds,
+                        corner_radii,
+                        Hsla::transparent_black(),
+                        border_widths,
+                        colors.top,
+                        self.border_style,
+                    )
+                    .corner_shapes(self.vn_corner_shapes),
+                );
             } else {
                 // Reuse the rounded/dashed border shader, partitioned along
                 // the joins between outer and inner corners. Rectangular
                 // strips would give rounded corners the wrong side colour.
                 let clips = Self::vn_border_side_clips(bounds, border_widths);
                 for (points, (color, width)) in clips.into_iter().zip([
-                    (colors.top, border_widths.top), (colors.right, border_widths.right),
-                    (colors.bottom, border_widths.bottom), (colors.left, border_widths.left),
+                    (colors.top, border_widths.top),
+                    (colors.right, border_widths.right),
+                    (colors.bottom, border_widths.bottom),
+                    (colors.left, border_widths.left),
                 ]) {
-                    if width <= px(0.) || color.is_transparent() || points.len() < 3 { continue; }
-                    let mut verbs: Vec<_> = points.into_iter().enumerate().map(|(index, point)| {
-                        if index == 0 { VnPathVerb::MoveTo(point) } else { VnPathVerb::LineTo(point) }
-                    }).collect();
+                    if width <= px(0.) || color.is_transparent() || points.len() < 3 {
+                        continue;
+                    }
+                    let mut verbs: Vec<_> = points
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, point)| {
+                            if index == 0 {
+                                VnPathVerb::MoveTo(point)
+                            } else {
+                                VnPathVerb::LineTo(point)
+                            }
+                        })
+                        .collect();
                     verbs.push(VnPathVerb::Close);
-                    let outline = VnClipOutline { fill_rule: VnFillRule::NonZero, verbs };
+                    let outline = VnClipOutline {
+                        fill_rule: VnFillRule::NonZero,
+                        verbs,
+                    };
                     window.vn_with_clip_shape(Some(&outline), |window| {
-                        window.paint_quad(quad(bounds, corner_radii, Hsla::transparent_black(),
-                            border_widths, color, self.border_style).corner_shapes(self.vn_corner_shapes));
+                        window.paint_quad(
+                            quad(
+                                bounds,
+                                corner_radii,
+                                Hsla::transparent_black(),
+                                border_widths,
+                                color,
+                                self.border_style,
+                            )
+                            .corner_shapes(self.vn_corner_shapes),
+                        );
                     });
                 }
             }
@@ -2153,14 +2324,17 @@ impl Style {
                     px((r.0 + grow.0).max(0.0))
                 }
             });
-            window.paint_quad(quad(
-                ring,
-                radii,
-                Hsla::transparent_black(),
-                Edges::all(outline.width),
-                outline.color,
-                outline.style,
-            ).corner_shapes(self.vn_corner_shapes));
+            window.paint_quad(
+                quad(
+                    ring,
+                    radii,
+                    Hsla::transparent_black(),
+                    Edges::all(outline.width),
+                    outline.color,
+                    outline.style,
+                )
+                .corner_shapes(self.vn_corner_shapes),
+            );
         }
 
         #[cfg(debug_assertions)]
@@ -2175,33 +2349,55 @@ impl Style {
     }
 
     fn vn_border_side_clips(bounds: Bounds<Pixels>, widths: Edges<Pixels>) -> [Vec<[f32; 2]>; 4] {
-        let (left, top, right, bottom) = (f32::from(bounds.left()), f32::from(bounds.top()),
-            f32::from(bounds.right()), f32::from(bounds.bottom()));
-        let widths = [widths.top, widths.right, widths.bottom, widths.left].map(|width| f32::from(width).max(0.));
-        let distances = [[0., 1., -top], [-1., 0., right], [0., -1., bottom], [1., 0., -left]];
+        let (left, top, right, bottom) = (
+            f32::from(bounds.left()),
+            f32::from(bounds.top()),
+            f32::from(bounds.right()),
+            f32::from(bounds.bottom()),
+        );
+        let widths = [widths.top, widths.right, widths.bottom, widths.left]
+            .map(|width| f32::from(width).max(0.));
+        let distances = [
+            [0., 1., -top],
+            [-1., 0., right],
+            [0., -1., bottom],
+            [1., 0., -left],
+        ];
         std::array::from_fn(|side| {
-            if widths[side] <= 0. { return Vec::new(); }
+            if widths[side] <= 0. {
+                return Vec::new();
+            }
             let mut polygon = vec![[left, top], [right, top], [right, bottom], [left, bottom]];
             // Partition the FULL quad by distance / border width. Stopping
             // at inner rectangular corners cuts holes out of rounded arcs.
             // These bisectors keep the CSS joins through the inner corners
             // while extending far enough to cover circles and large radii.
             for other in 0..4 {
-                if other == side || widths[other] <= 0. { continue; }
-                let plane: [f32; 3] = std::array::from_fn(|index|
-                    distances[side][index] * widths[other] - distances[other][index] * widths[side]);
-                let distance = |point: [f32; 2]| plane[0] * point[0] + plane[1] * point[1] + plane[2];
-                let Some(mut previous) = polygon.last().copied() else { break };
+                if other == side || widths[other] <= 0. {
+                    continue;
+                }
+                let plane: [f32; 3] = std::array::from_fn(|index| {
+                    distances[side][index] * widths[other] - distances[other][index] * widths[side]
+                });
+                let distance =
+                    |point: [f32; 2]| plane[0] * point[0] + plane[1] * point[1] + plane[2];
+                let Some(mut previous) = polygon.last().copied() else {
+                    break;
+                };
                 let mut previous_distance = distance(previous);
                 let mut clipped = Vec::with_capacity(polygon.len() + 1);
                 for current in polygon {
                     let current_distance = distance(current);
                     if (previous_distance <= 0.) != (current_distance <= 0.) {
                         let fraction = previous_distance / (previous_distance - current_distance);
-                        clipped.push([previous[0] + fraction * (current[0] - previous[0]),
-                            previous[1] + fraction * (current[1] - previous[1])]);
+                        clipped.push([
+                            previous[0] + fraction * (current[0] - previous[0]),
+                            previous[1] + fraction * (current[1] - previous[1]),
+                        ]);
                     }
-                    if current_distance <= 0. { clipped.push(current); }
+                    if current_distance <= 0. {
+                        clipped.push(current);
+                    }
                     previous = current;
                     previous_distance = current_distance;
                 }
@@ -2212,7 +2408,8 @@ impl Style {
     }
 
     fn is_border_visible(&self) -> bool {
-        self.vn_resolved_border_colors().any(|color| !color.is_transparent())
+        self.vn_resolved_border_colors()
+            .any(|color| !color.is_transparent())
             && self.border_widths.any(|length| !length.is_zero())
     }
 }
@@ -3049,13 +3246,33 @@ mod vn_object_position_tests {
                 y_offset: px(y.1),
             };
             let b = fit.get_bounds_at(bounds, square, position);
-            (f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height))
+            (
+                f32::from(b.origin.x),
+                f32::from(b.origin.y),
+                f32::from(b.size.width),
+                f32::from(b.size.height),
+            )
         };
-        assert_eq!(at(ObjectFit::Contain, (0., 0.), (0., 0.)), (10., 20., 50., 50.));
-        assert_eq!(at(ObjectFit::Contain, (1., -5.), (0.5, 0.)), (55., 20., 50., 50.));
-        assert_eq!(at(ObjectFit::Cover, (0., 0.), (1., 0.)), (10., -30., 100., 100.));
-        assert_eq!(at(ObjectFit::None, (0.25, 0.), (0., 3.)), (25., 23., 40., 40.));
-        assert_eq!(at(ObjectFit::Fill, (0.5, 7.), (0.5, 0.)), (17., 20., 100., 50.));
+        assert_eq!(
+            at(ObjectFit::Contain, (0., 0.), (0., 0.)),
+            (10., 20., 50., 50.)
+        );
+        assert_eq!(
+            at(ObjectFit::Contain, (1., -5.), (0.5, 0.)),
+            (55., 20., 50., 50.)
+        );
+        assert_eq!(
+            at(ObjectFit::Cover, (0., 0.), (1., 0.)),
+            (10., -30., 100., 100.)
+        );
+        assert_eq!(
+            at(ObjectFit::None, (0.25, 0.), (0., 3.)),
+            (25., 23., 40., 40.)
+        );
+        assert_eq!(
+            at(ObjectFit::Fill, (0.5, 7.), (0.5, 0.)),
+            (17., 20., 100., 50.)
+        );
         let legacy = ObjectFit::None.get_bounds(bounds, square);
         assert_eq!(legacy.origin, bounds.origin);
     }
@@ -3072,9 +3289,16 @@ mod vn_safe_center_tests {
             let block = |name: &'static str, child_h: f32| {
                 let mut d = div().w(px(100.)).h(px(100.));
                 d.style().align_content = Some(AlignContent::SafeCenter);
-                d.child(div().debug_selector(move || name.into()).w(px(10.)).h(px(child_h)))
+                d.child(
+                    div()
+                        .debug_selector(move || name.into())
+                        .w(px(10.))
+                        .h(px(child_h)),
+                )
             };
-            div().child(block("FITS", 20.)).child(block("OVERFLOWS", 200.))
+            div()
+                .child(block("FITS", 20.))
+                .child(block("OVERFLOWS", 200.))
         }
     }
 
@@ -3084,9 +3308,20 @@ mod vn_safe_center_tests {
         cx.run_until_parked();
         window
             .update(cx, |_, window, _| {
-                let at = |name: &str| window.rendered_frame.debug_bounds.get(name).copied().unwrap();
+                let at = |name: &str| {
+                    window
+                        .rendered_frame
+                        .debug_bounds
+                        .get(name)
+                        .copied()
+                        .unwrap()
+                };
                 assert_eq!(at("FITS").origin.y, px(40.), "(100 - 20) / 2");
-                assert_eq!(at("OVERFLOWS").origin.y, px(100.), "at the start of the second box");
+                assert_eq!(
+                    at("OVERFLOWS").origin.y,
+                    px(100.),
+                    "at the start of the second box"
+                );
             })
             .unwrap();
     }
@@ -3096,8 +3331,8 @@ mod vn_safe_center_tests {
 #[cfg(test)]
 mod vn_mask_ring_tests {
     use crate::{
-        BoxShadow, Context, Hsla, TestAppContext, Window, color::BG_RING, div, point,
-        prelude::*, px, size,
+        BoxShadow, Context, Hsla, TestAppContext, Window, color::BG_RING, div, point, prelude::*,
+        px, size,
     };
 
     struct Card {
@@ -3138,14 +3373,17 @@ mod vn_mask_ring_tests {
     }
 
     #[gpui::test]
-    fn a_ring_mask_paints_the_background_in_the_padding_and_border_only(
-        cx: &mut TestAppContext,
-    ) {
+    fn a_ring_mask_paints_the_background_in_the_padding_and_border_only(cx: &mut TestAppContext) {
         let (quads, shadows, scale) = paint(false, cx);
-        let background = quads.iter().find(|q| q.background.as_solid() == Some(Hsla::red()));
+        let background = quads
+            .iter()
+            .find(|q| q.background.as_solid() == Some(Hsla::red()));
         let background = background.expect("the background quad");
         assert_eq!(background.background.flags & BG_RING, 0);
-        assert_eq!(background.border_widths.top.0, 0.0, "a plain background fills the box");
+        assert_eq!(
+            background.border_widths.top.0, 0.0,
+            "a plain background fills the box"
+        );
         assert_eq!(shadows, 1);
 
         let (quads, shadows, _) = paint(true, cx);
@@ -3196,27 +3434,58 @@ mod vn_rounded_clip_tests {
         let rem = px(16.);
         let bounds = Bounds::new(point(px(10.), px(20.)), size(px(200.), px(160.)));
 
-        let mask = clipping(24., 4., Some(Hsla::black())).overflow_mask(bounds, rem).unwrap();
-        assert_eq!(mask.bounds, Bounds::new(point(px(14.), px(24.)), size(px(192.), px(152.))));
-        assert_eq!(mask.corner_radii, Corners::all(px(20.)), "the radius less the border");
+        let mask = clipping(24., 4., Some(Hsla::black()))
+            .overflow_mask(bounds, rem)
+            .unwrap();
+        assert_eq!(
+            mask.bounds,
+            Bounds::new(point(px(14.), px(24.)), size(px(192.), px(152.)))
+        );
+        assert_eq!(
+            mask.corner_radii,
+            Corners::all(px(20.)),
+            "the radius less the border"
+        );
 
         let mask = clipping(24., 4., None).overflow_mask(bounds, rem).unwrap();
         assert_eq!(mask.bounds, bounds, "a transparent border is not inset");
-        assert_eq!(mask.corner_radii, Corners::all(px(24.)), "so it takes nothing off");
+        assert_eq!(
+            mask.corner_radii,
+            Corners::all(px(24.)),
+            "so it takes nothing off"
+        );
 
-        let mask = clipping(3., 4., Some(Hsla::black())).overflow_mask(bounds, rem).unwrap();
-        assert_eq!(mask.corner_radii, Corners::all(px(0.)), "a border wider than the radius");
+        let mask = clipping(3., 4., Some(Hsla::black()))
+            .overflow_mask(bounds, rem)
+            .unwrap();
+        assert_eq!(
+            mask.corner_radii,
+            Corners::all(px(0.)),
+            "a border wider than the radius"
+        );
 
         let avatar = Bounds::new(point(px(0.), px(0.)), size(px(64.), px(64.)));
-        let mask = clipping(9999., 0., None).overflow_mask(avatar, rem).unwrap();
-        assert_eq!(mask.corner_radii, Corners::all(px(32.)), "a pill is a circle");
+        let mask = clipping(9999., 0., None)
+            .overflow_mask(avatar, rem)
+            .unwrap();
+        assert_eq!(
+            mask.corner_radii,
+            Corners::all(px(32.)),
+            "a pill is a circle"
+        );
 
         let mask = clipping(0., 0., None).overflow_mask(bounds, rem).unwrap();
         assert!(!mask.is_rounded(), "no radius, the plain rect");
     }
 
-    fn resolve(lengths: [f32; 4], relative: [Option<(DefiniteLength, DefiniteLength)>; 4], w: f32, h: f32) -> [f32; 4] {
-        let corner = |r: Option<(DefiniteLength, DefiniteLength)>| r.map(|(x, y)| VnCornerRadius { x, y });
+    fn resolve(
+        lengths: [f32; 4],
+        relative: [Option<(DefiniteLength, DefiniteLength)>; 4],
+        w: f32,
+        h: f32,
+    ) -> [f32; 4] {
+        let corner =
+            |r: Option<(DefiniteLength, DefiniteLength)>| r.map(|(x, y)| VnCornerRadius { x, y });
         let radii = vn_resolve_corner_radii(
             &Corners {
                 top_left: px(lengths[0]).into(),
@@ -3233,7 +3502,13 @@ mod vn_rounded_clip_tests {
             size(px(w), px(h)),
             px(16.),
         );
-        [radii.top_left, radii.top_right, radii.bottom_right, radii.bottom_left].map(f32::from)
+        [
+            radii.top_left,
+            radii.top_right,
+            radii.bottom_right,
+            radii.bottom_left,
+        ]
+        .map(f32::from)
     }
 
     #[test]
@@ -3241,7 +3516,11 @@ mod vn_rounded_clip_tests {
         let half = Some((DefiniteLength::Fraction(0.5), DefiniteLength::Fraction(0.5)));
         let _ = vn_take_ellipse_drawn_as_circle();
 
-        assert_eq!(resolve([0.; 4], [half; 4], 64., 64.), [32.; 4], "50% of a square: a circle");
+        assert_eq!(
+            resolve([0.; 4], [half; 4], 64., 64.),
+            [32.; 4],
+            "50% of a square: a circle"
+        );
         assert!(!vn_take_ellipse_drawn_as_circle());
 
         // 50% of 120x48 is a 60x24 ellipse at each corner; gpui draws the
@@ -3253,16 +3532,34 @@ mod vn_rounded_clip_tests {
         assert_eq!(resolve([9999.; 4], [None; 4], 100., 40.), [20.; 4]);
         // `rounded-l-full`: only the left side overruns; both its corners
         // scale, and the right stays square.
-        assert_eq!(resolve([9999., 0., 0., 9999.], [None; 4], 100., 40.), [20., 0., 0., 20.]);
+        assert_eq!(
+            resolve([9999., 0., 0., 9999.], [None; 4], 100., 40.),
+            [20., 0., 0., 20.]
+        );
         // Radii that fit stay as written.
-        assert_eq!(resolve([8., 4., 0., 12.], [None; 4], 100., 40.), [8., 4., 0., 12.]);
+        assert_eq!(
+            resolve([8., 4., 0., 12.], [None; 4], 100., 40.),
+            [8., 4., 0., 12.]
+        );
         // 40 + 40 across a 60px top: both scale by 60/80, to 30.
-        assert_eq!(resolve([40., 40., 0., 0.], [None; 4], 60., 200.), [30., 30., 0., 0.]);
+        assert_eq!(
+            resolve([40., 40., 0., 0.], [None; 4], 60., 200.),
+            [30., 30., 0., 0.]
+        );
 
         // `calc(50% - 4px)` and an elliptical `10px / 20px`.
-        let calc = DefiniteLength::Calc { fraction: 0.5, pixels: px(-4.) };
-        assert_eq!(resolve([0.; 4], [Some((calc, calc)); 4], 64., 64.), [28.; 4]);
-        let ellipse = Some((DefiniteLength::Absolute(px(10.).into()), DefiniteLength::Absolute(px(20.).into())));
+        let calc = DefiniteLength::Calc {
+            fraction: 0.5,
+            pixels: px(-4.),
+        };
+        assert_eq!(
+            resolve([0.; 4], [Some((calc, calc)); 4], 64., 64.),
+            [28.; 4]
+        );
+        let ellipse = Some((
+            DefiniteLength::Absolute(px(10.).into()),
+            DefiniteLength::Absolute(px(20.).into()),
+        ));
         assert_eq!(resolve([0.; 4], [ellipse; 4], 100., 100.), [10.; 4]);
         assert!(vn_take_ellipse_drawn_as_circle());
     }
@@ -3321,7 +3618,9 @@ mod vn_rounded_clip_tests {
         let window = cx.open_window(size(px(400.), px(400.)), |_, _| Clips);
         cx.run_until_parked();
         let (quads, scale) = window
-            .update(cx, |_, window, _| (window.painted_quads(), window.scale_factor()))
+            .update(cx, |_, window, _| {
+                (window.painted_quads(), window.scale_factor())
+            })
             .unwrap();
         let quad = |color: Hsla| {
             quads
@@ -3332,14 +3631,27 @@ mod vn_rounded_clip_tests {
         };
 
         let avatar = quad(Hsla::red());
-        assert_eq!(avatar.content_mask.corner_radii, Corners::all(px(32.)).scale(scale));
-        assert_eq!(avatar.corner_radii, Corners::default(), "the image itself is square");
+        assert_eq!(
+            avatar.content_mask.corner_radii,
+            Corners::all(px(32.)).scale(scale)
+        );
+        assert_eq!(
+            avatar.corner_radii,
+            Corners::default(),
+            "the image itself is square"
+        );
 
         // The scroller's own mask is square and fills the card, so its
         // corners are the card's: the rows clip at the card's curve.
         let rows = quad(Hsla::green());
-        assert_eq!(rows.content_mask.corner_radii, Corners::all(px(24.)).scale(scale));
-        assert_eq!(rows.content_mask.bounds.size, size(px(200.), px(160.)).scale(scale));
+        assert_eq!(
+            rows.content_mask.corner_radii,
+            Corners::all(px(24.)).scale(scale)
+        );
+        assert_eq!(
+            rows.content_mask.bounds.size,
+            size(px(200.), px(160.)).scale(scale)
+        );
     }
 }
 
@@ -3365,8 +3677,16 @@ mod vn_clip_path_tests {
 
     /// The mask's bounds, as `[x, y, w, h]`, and its four radii, to 0.01px.
     fn mask(clip: VnClipPath, style: Style, bounds: [f32; 4]) -> ([f32; 4], [f32; 4]) {
-        let bounds = Bounds::new(point(px(bounds[0]), px(bounds[1])), size(px(bounds[2]), px(bounds[3])));
-        let m = Style { vn_clip_path: clip, ..style }.vn_clip_mask(bounds, px(16.)).expect("a mask");
+        let bounds = Bounds::new(
+            point(px(bounds[0]), px(bounds[1])),
+            size(px(bounds[2]), px(bounds[3])),
+        );
+        let m = Style {
+            vn_clip_path: clip,
+            ..style
+        }
+        .vn_clip_mask(bounds, px(16.))
+        .expect("a mask");
         let (b, r) = (m.bounds, m.corner_radii);
         let at = |v: Pixels| (f32::from(v) * 100.).round() / 100.;
         (
@@ -3376,36 +3696,79 @@ mod vn_clip_path_tests {
     }
 
     fn inset(insets: [DefiniteLength; 4], radii: [VnCornerRadius; 4]) -> VnClipPath {
-        VnClipPath::Inset { reference: BOX, insets, radii }
+        VnClipPath::Inset {
+            reference: BOX,
+            insets,
+            radii,
+        }
     }
 
-    fn ellipse(center: [DefiniteLength; 2], radius: [VnShapeRadius; 2], circle: bool) -> VnClipPath {
-        VnClipPath::Ellipse { reference: BOX, center, radius, circle }
+    fn ellipse(
+        center: [DefiniteLength; 2],
+        radius: [VnShapeRadius; 2],
+        circle: bool,
+    ) -> VnClipPath {
+        VnClipPath::Ellipse {
+            reference: BOX,
+            center,
+            radius,
+            circle,
+        }
     }
 
     #[test]
     fn inset_takes_its_insets_off_the_box_and_fits_its_radii() {
         let none = Style::default;
         let square = round(len(0.), len(0.));
-        assert_eq!(Style::default().vn_clip_mask(Bounds::default(), px(16.)), None, "none is no mask");
+        assert_eq!(
+            Style::default().vn_clip_mask(Bounds::default(), px(16.)),
+            None,
+            "none is no mask"
+        );
         // `inset(10px 20% round 8px)` on a 200x100 box at (10, 20).
         let insets = [len(10.), relative(0.2), len(10.), relative(0.2)];
         assert_eq!(
-            mask(inset(insets, round(len(8.), len(8.))), none(), [10., 20., 200., 100.]),
+            mask(
+                inset(insets, round(len(8.), len(8.))),
+                none(),
+                [10., 20., 200., 100.]
+            ),
             ([50., 30., 120., 80.], [8.; 4])
         );
         // The screen-reader-only `inset(50%)` encloses nothing.
         let half = relative(0.5);
-        assert_eq!(mask(inset([half; 4], square), none(), [0., 0., 30., 10.]).0, [15., 5., 0., 0.]);
+        assert_eq!(
+            mask(inset([half; 4], square), none(), [0., 0., 30., 10.]).0,
+            [15., 5., 0., 0.]
+        );
         // Insets past the box leave it empty, not inside out.
-        assert_eq!(mask(inset([len(80.); 4], square), none(), [0., 0., 100., 100.]).0, [80., 80., 0., 0.]);
+        assert_eq!(
+            mask(inset([len(80.); 4], square), none(), [0., 0., 100., 100.]).0,
+            [80., 80., 0., 0.]
+        );
         // `round 30px` on a 200x20 strip scales by 20 / (30 + 30). A
         // percentage radius is of the REFERENCE box: 10% of 200x100 is 20 by
         // 10, drawn as the 10px circle.
         let strip = [len(40.), len(0.), len(40.), len(0.)];
-        assert_eq!(mask(inset(strip, round(len(30.), len(30.))), none(), [0., 0., 200., 100.]).1, [10.; 4]);
+        assert_eq!(
+            mask(
+                inset(strip, round(len(30.), len(30.))),
+                none(),
+                [0., 0., 200., 100.]
+            )
+            .1,
+            [10.; 4]
+        );
         let ten = relative(0.1);
-        assert_eq!(mask(inset([len(0.); 4], round(ten, ten)), none(), [0., 0., 200., 100.]).1, [10.; 4]);
+        assert_eq!(
+            mask(
+                inset([len(0.); 4], round(ten, ten)),
+                none(),
+                [0., 0., 200., 100.]
+            )
+            .1,
+            [10.; 4]
+        );
     }
 
     #[test]
@@ -3414,13 +3777,20 @@ mod vn_clip_path_tests {
         let mid = [relative(0.5), relative(0.5)];
         // `circle(50%)` on a square is its disc.
         let circle = ellipse(mid, [VnShapeRadius::Length(relative(0.5)); 2], true);
-        assert_eq!(mask(circle.clone(), none(), [0., 0., 60., 60.]), ([0., 0., 60., 60.], [30.; 4]));
+        assert_eq!(
+            mask(circle.clone(), none(), [0., 0., 60., 60.]),
+            ([0., 0., 60., 60.], [30.; 4])
+        );
         // On 200x100 the percentage is of sqrt(200^2 + 100^2) / sqrt(2), 158.11.
         assert_eq!(mask(circle, none(), [0., 0., 200., 100.]).1, [79.06; 4]);
         // `circle(closest-side at 25% 50%)`: 50 to the left, top and bottom.
         let at = [relative(0.25), relative(0.5)];
         assert_eq!(
-            mask(ellipse(at, [VnShapeRadius::ClosestSide; 2], true), none(), [0., 0., 200., 100.]),
+            mask(
+                ellipse(at, [VnShapeRadius::ClosestSide; 2], true),
+                none(),
+                [0., 0., 200., 100.]
+            ),
             ([0., 0., 100., 100.], [50.; 4])
         );
         let far = ellipse(at, [VnShapeRadius::FarthestSide; 2], true);
@@ -3428,19 +3798,50 @@ mod vn_clip_path_tests {
         // `ellipse(closest-side farthest-side)`: each radius in its own axis.
         // The mask is its box; the ellipse is the outline (an isolated
         // layer), so it is exact.
-        let e = ellipse(mid, [VnShapeRadius::ClosestSide, VnShapeRadius::FarthestSide], false);
-        assert_eq!(mask(e.clone(), none(), [0., 0., 200., 100.]), ([0., 0., 200., 100.], [0.; 4]));
+        let e = ellipse(
+            mid,
+            [VnShapeRadius::ClosestSide, VnShapeRadius::FarthestSide],
+            false,
+        );
+        assert_eq!(
+            mask(e.clone(), none(), [0., 0., 200., 100.]),
+            ([0., 0., 200., 100.], [0.; 4])
+        );
         let bounds = Bounds::new(point(px(0.), px(0.)), size(px(200.), px(100.)));
-        let outline = Style { vn_clip_path: e, ..none() }.vn_clip_outline(bounds, px(16.)).expect("an outline");
+        let outline = Style {
+            vn_clip_path: e,
+            ..none()
+        }
+        .vn_clip_outline(bounds, px(16.))
+        .expect("an outline");
         let g = crate::VnClipGeometry::new(&outline, 1., crate::TransformationMatrix::unit());
         assert!(g.contains([100., 50.]) && g.contains([2., 50.]) && g.contains([100., 2.]));
         assert!(!g.contains([20., 10.]), "the corner a capsule would keep");
         // `ellipse(10px 20% at right 10px center)`: `right 10px` is 100% - 10px.
-        let right = [DefiniteLength::Calc { fraction: 1., pixels: px(-10.) }, relative(0.5)];
-        let e = ellipse(right, [VnShapeRadius::Length(len(10.)), VnShapeRadius::Length(relative(0.2))], false);
-        assert_eq!(mask(e, none(), [0., 0., 200., 100.]), ([180., 30., 20., 40.], [0.; 4]));
+        let right = [
+            DefiniteLength::Calc {
+                fraction: 1.,
+                pixels: px(-10.),
+            },
+            relative(0.5),
+        ];
+        let e = ellipse(
+            right,
+            [
+                VnShapeRadius::Length(len(10.)),
+                VnShapeRadius::Length(relative(0.2)),
+            ],
+            false,
+        );
+        assert_eq!(
+            mask(e, none(), [0., 0., 200., 100.]),
+            ([180., 30., 20., 40.], [0.; 4])
+        );
         // A circle has no outline: the rounded mask is all of it.
-        let c = Style { vn_clip_path: ellipse(mid, [VnShapeRadius::ClosestSide; 2], true), ..none() };
+        let c = Style {
+            vn_clip_path: ellipse(mid, [VnShapeRadius::ClosestSide; 2], true),
+            ..none()
+        };
         assert_eq!(c.vn_clip_outline(bounds, px(16.)), None);
     }
 
@@ -3450,17 +3851,36 @@ mod vn_clip_path_tests {
             corner_radii: Corners::all(px(24.)).map(|r| (*r).into()),
             border_widths: Edges::all(px(4.).into()),
             padding: Edges::all(px(6.).into()),
-            margin: Edges { top: Length::Auto, ..Edges::all(len(8.).into()) },
+            margin: Edges {
+                top: Length::Auto,
+                ..Edges::all(len(8.).into())
+            },
             ..Style::default()
         };
         let at = [0., 0., 100., 80.];
-        assert_eq!(mask(VnClipPath::Box(VnClipBox::Border), style(), at), ([0., 0., 100., 80.], [24.; 4]));
-        assert_eq!(mask(VnClipPath::Box(VnClipBox::Padding), style(), at), ([4., 4., 92., 72.], [20.; 4]));
-        assert_eq!(mask(VnClipPath::Box(VnClipBox::Content), style(), at), ([10., 10., 80., 60.], [14.; 4]));
+        assert_eq!(
+            mask(VnClipPath::Box(VnClipBox::Border), style(), at),
+            ([0., 0., 100., 80.], [24.; 4])
+        );
+        assert_eq!(
+            mask(VnClipPath::Box(VnClipBox::Padding), style(), at),
+            ([4., 4., 92., 72.], [20.; 4])
+        );
+        assert_eq!(
+            mask(VnClipPath::Box(VnClipBox::Content), style(), at),
+            ([10., 10., 80., 60.], [14.; 4])
+        );
         // An `auto` margin is none; a rounded corner grows by the margin.
-        assert_eq!(mask(VnClipPath::Box(VnClipBox::Margin), style(), at), ([-8., 0., 116., 88.], [32.; 4]));
+        assert_eq!(
+            mask(VnClipPath::Box(VnClipBox::Margin), style(), at),
+            ([-8., 0., 116., 88.], [32.; 4])
+        );
         // An inset's reference box: the content box less 5px.
-        let clip = VnClipPath::Inset { reference: VnClipBox::Content, insets: [len(5.); 4], radii: round(len(0.), len(0.)) };
+        let clip = VnClipPath::Inset {
+            reference: VnClipBox::Content,
+            insets: [len(5.); 4],
+            radii: round(len(0.), len(0.)),
+        };
         assert_eq!(mask(clip, style(), at), ([15., 15., 70., 50.], [0.; 4]));
     }
 
@@ -3499,40 +3919,93 @@ mod vn_clip_path_tests {
         cx.run_until_parked();
         let (quads, shadows, scale) = window
             .update(cx, |_, window, _| {
-                (window.painted_quads(), window.rendered_frame.scene.shadows.clone(), window.scale_factor())
+                (
+                    window.painted_quads(),
+                    window.rendered_frame.scene.shadows.clone(),
+                    window.scale_factor(),
+                )
             })
             .unwrap();
         let disc = Bounds::new(point(px(0.), px(0.)), size(px(60.), px(60.))).scale(scale);
         let radius = Corners::all(px(30.)).scale(scale);
         for color in [Hsla::red(), Hsla::green()] {
-            let q = quads.iter().find(|q| q.background.as_solid() == Some(color)).expect("the quad");
-            assert_eq!((q.content_mask.bounds, q.content_mask.corner_radii), (disc, radius), "{color:?}");
+            let q = quads
+                .iter()
+                .find(|q| q.background.as_solid() == Some(color))
+                .expect("the quad");
+            assert_eq!(
+                (q.content_mask.bounds, q.content_mask.corner_radii),
+                (disc, radius),
+                "{color:?}"
+            );
         }
-        let border = quads.iter().find(|q| q.border_color == Hsla::white()).expect("the border");
+        let border = quads
+            .iter()
+            .find(|q| q.border_color == Hsla::white())
+            .expect("the border");
         assert_eq!(border.content_mask.bounds, disc);
         assert_eq!(shadows.len(), 1);
-        assert_eq!((shadows[0].content_mask.bounds, shadows[0].content_mask.corner_radii), (disc, radius));
+        assert_eq!(
+            (
+                shadows[0].content_mask.bounds,
+                shadows[0].content_mask.corner_radii
+            ),
+            (disc, radius)
+        );
     }
 
-    fn polygon(reference: VnClipBox, fill_rule: crate::VnFillRule, points: &[[DefiniteLength; 2]]) -> VnClipPath {
-        VnClipPath::Polygon { reference, fill_rule, points: points.to_vec().into() }
+    fn polygon(
+        reference: VnClipBox,
+        fill_rule: crate::VnFillRule,
+        points: &[[DefiniteLength; 2]],
+    ) -> VnClipPath {
+        VnClipPath::Polygon {
+            reference,
+            fill_rule,
+            points: points.to_vec().into(),
+        }
     }
 
     fn outline(clip: VnClipPath, style: Style, at: [f32; 4]) -> crate::VnClipOutline {
         let bounds = Bounds::new(point(px(at[0]), px(at[1])), size(px(at[2]), px(at[3])));
-        Style { vn_clip_path: clip, ..style }.vn_clip_outline(bounds, px(16.)).expect("an outline")
+        Style {
+            vn_clip_path: clip,
+            ..style
+        }
+        .vn_clip_outline(bounds, px(16.))
+        .expect("an outline")
     }
 
     #[test]
     fn a_polygon_resolves_its_percentages_against_the_reference_box() {
         use crate::{VnFillRule, VnPathVerb::*};
         // `polygon(50% 0, 100% 100%, 0 100%)` on a 200x100 box at (10, 20).
-        let triangle = [[relative(0.5), len(0.)], [relative(1.), relative(1.)], [len(0.), relative(1.)]];
-        let o = outline(polygon(BOX, VnFillRule::NonZero, &triangle), Style::default(), [10., 20., 200., 100.]);
-        assert_eq!(o.verbs, vec![MoveTo([110., 20.]), LineTo([210., 120.]), LineTo([10., 120.]), Close]);
+        let triangle = [
+            [relative(0.5), len(0.)],
+            [relative(1.), relative(1.)],
+            [len(0.), relative(1.)],
+        ];
+        let o = outline(
+            polygon(BOX, VnFillRule::NonZero, &triangle),
+            Style::default(),
+            [10., 20., 200., 100.],
+        );
+        assert_eq!(
+            o.verbs,
+            vec![
+                MoveTo([110., 20.]),
+                LineTo([210., 120.]),
+                LineTo([10., 120.]),
+                Close
+            ]
+        );
         // The mask is the box around it, which culls.
         assert_eq!(
-            mask(polygon(BOX, VnFillRule::NonZero, &triangle), Style::default(), [10., 20., 200., 100.]),
+            mask(
+                polygon(BOX, VnFillRule::NonZero, &triangle),
+                Style::default(),
+                [10., 20., 200., 100.]
+            ),
             ([10., 20., 200., 100.], [0.; 4])
         );
         // Against the content box: 4px border and 6px padding in.
@@ -3541,14 +4014,29 @@ mod vn_clip_path_tests {
             padding: Edges::all(px(6.).into()),
             ..Style::default()
         };
-        let o = outline(polygon(VnClipBox::Content, VnFillRule::EvenOdd, &triangle), style(), [0., 0., 100., 100.]);
+        let o = outline(
+            polygon(VnClipBox::Content, VnFillRule::EvenOdd, &triangle),
+            style(),
+            [0., 0., 100., 100.],
+        );
         assert_eq!(o.fill_rule, VnFillRule::EvenOdd);
         assert_eq!(o.verbs[0], MoveTo([50., 10.]));
         assert_eq!(o.verbs[1], LineTo([90., 90.]));
         // `calc()` and a value past the box.
-        let past = [[DefiniteLength::Calc { fraction: 1., pixels: px(-10.) }, relative(1.5)]];
+        let past = [[
+            DefiniteLength::Calc {
+                fraction: 1.,
+                pixels: px(-10.),
+            },
+            relative(1.5),
+        ]];
         assert_eq!(
-            outline(polygon(BOX, VnFillRule::NonZero, &past), Style::default(), [0., 0., 100., 40.]).verbs[0],
+            outline(
+                polygon(BOX, VnFillRule::NonZero, &past),
+                Style::default(),
+                [0., 0., 100., 40.]
+            )
+            .verbs[0],
             MoveTo([90., 60.])
         );
     }
@@ -3557,14 +4045,27 @@ mod vn_clip_path_tests {
     fn a_path_is_laid_from_the_reference_box_corner() {
         use crate::{VnFillRule, VnPathVerb::*};
         let verbs = vec![MoveTo([0., 0.]), QuadTo([10., 20.], [20., 0.]), Close];
-        let path = |reference| VnClipPath::Path { reference, fill_rule: VnFillRule::NonZero, verbs: verbs.clone().into() };
+        let path = |reference| VnClipPath::Path {
+            reference,
+            fill_rule: VnFillRule::NonZero,
+            verbs: verbs.clone().into(),
+        };
         let o = outline(path(BOX), Style::default(), [5., 7., 50., 50.]);
-        assert_eq!(o.verbs, vec![MoveTo([5., 7.]), QuadTo([15., 27.], [25., 7.]), Close]);
-        let style = Style { padding: Edges::all(px(3.).into()), ..Style::default() };
+        assert_eq!(
+            o.verbs,
+            vec![MoveTo([5., 7.]), QuadTo([15., 27.], [25., 7.]), Close]
+        );
+        let style = Style {
+            padding: Edges::all(px(3.).into()),
+            ..Style::default()
+        };
         let o = outline(path(VnClipBox::Content), style, [0., 0., 50., 50.]);
         assert_eq!(o.verbs[0], MoveTo([3., 3.]));
         // The mask is the control points' box, the curve inside it.
-        assert_eq!(mask(path(BOX), Style::default(), [5., 7., 50., 50.]).0, [5., 7., 20., 20.]);
+        assert_eq!(
+            mask(path(BOX), Style::default(), [5., 7., 50., 50.]).0,
+            [5., 7., 20., 20.]
+        );
     }
 
     /// A box clipped to a triangle, with a child in flow and a deferred one.
@@ -3577,11 +4078,25 @@ mod vn_clip_path_tests {
                 .bg(Hsla::red())
                 .cursor_pointer()
                 .child(div().size(px(100.)).bg(Hsla::green()))
-                .child(crate::deferred(div().absolute().top_0().left_0().size(px(50.)).bg(Hsla::blue())).clip_to_ancestors(true));
+                .child(
+                    crate::deferred(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size(px(50.))
+                            .bg(Hsla::blue()),
+                    )
+                    .clip_to_ancestors(true),
+                );
             d.style().vn_clip_path = Some(polygon(
                 BOX,
                 crate::VnFillRule::NonZero,
-                &[[len(0.), len(0.)], [len(100.), len(0.)], [len(0.), len(100.)]],
+                &[
+                    [len(0.), len(0.)],
+                    [len(100.), len(0.)],
+                    [len(0.), len(100.)],
+                ],
             ));
             div().child(d)
         }
@@ -3600,7 +4115,10 @@ mod vn_clip_path_tests {
                 assert_eq!(scene.vn_layers.len(), 2, "{:?}", scene.vn_layers);
                 assert_eq!(scene.vn_group_count(), 3);
                 let root: Vec<_> = scene.vn_batches(0).collect();
-                assert!(root.iter().all(|b| matches!(b, crate::VnBatch::Layers(_))), "{root:?}");
+                assert!(
+                    root.iter().all(|b| matches!(b, crate::VnBatch::Layers(_))),
+                    "{root:?}"
+                );
                 let colors = |group: usize| -> Vec<Hsla> {
                     scene
                         .vn_batches(group)
@@ -3608,12 +4126,24 @@ mod vn_clip_path_tests {
                             crate::VnBatch::Primitives(crate::PrimitiveBatch::Quads(r)) => Some(r),
                             _ => None,
                         })
-                        .flat_map(|r| scene.quads[r].iter().filter_map(|q| q.background.as_solid()).collect::<Vec<_>>())
+                        .flat_map(|r| {
+                            scene.quads[r]
+                                .iter()
+                                .filter_map(|q| q.background.as_solid())
+                                .collect::<Vec<_>>()
+                        })
                         .collect()
                 };
-                let mut groups: Vec<Vec<Hsla>> = scene.vn_layers.iter().map(|l| colors(l.group as usize)).collect();
+                let mut groups: Vec<Vec<Hsla>> = scene
+                    .vn_layers
+                    .iter()
+                    .map(|l| colors(l.group as usize))
+                    .collect();
                 groups.sort_by_key(|g| g.len());
-                assert_eq!(groups, vec![vec![Hsla::blue()], vec![Hsla::red(), Hsla::green()]]);
+                assert_eq!(
+                    groups,
+                    vec![vec![Hsla::blue()], vec![Hsla::red(), Hsla::green()]]
+                );
                 // Each composite is the triangle's box out to whole pixels
                 // and a pixel more for the edge, with the triangle's edges.
                 for layer in &scene.vn_layers {
@@ -3628,10 +4158,15 @@ mod vn_clip_path_tests {
 
                 // The hitbox: in the triangle, and not past its hypotenuse.
                 let frame = &window.rendered_frame;
-                let clipped: Vec<_> = frame.hitboxes.iter().filter(|h| h.vn_clip.is_some()).collect();
+                let clipped: Vec<_> = frame
+                    .hitboxes
+                    .iter()
+                    .filter(|h| h.vn_clip.is_some())
+                    .collect();
                 assert_eq!(clipped.len(), 1);
                 let id = clipped[0].id;
-                let hits = |x: f32, y: f32| frame.hit_test(point(px(x), px(y)), scale).ids.contains(&id);
+                let hits =
+                    |x: f32, y: f32| frame.hit_test(point(px(x), px(y)), scale).ids.contains(&id);
                 assert!(hits(10., 10.));
                 assert!(hits(40., 40.));
                 assert!(!hits(60., 60.), "inside the box, outside the triangle");
@@ -3645,10 +4180,15 @@ mod vn_clip_path_tests {
             luminance: false,
             tint_leaf,
             key: 1,
-            paint: Some(std::rc::Rc::new(|bounds, tint, window: &mut Window, _: &mut crate::App| {
-                let half = Bounds::new(bounds.origin, size(bounds.size.width / 2., bounds.size.height));
-                window.paint_quad(crate::fill(half, tint.unwrap_or_else(Hsla::white)));
-            })),
+            paint: Some(std::rc::Rc::new(
+                |bounds, tint, window: &mut Window, _: &mut crate::App| {
+                    let half = Bounds::new(
+                        bounds.origin,
+                        size(bounds.size.width / 2., bounds.size.height),
+                    );
+                    window.paint_quad(crate::fill(half, tint.unwrap_or_else(Hsla::white)));
+                },
+            )),
         }
     }
 
@@ -3657,7 +4197,14 @@ mod vn_clip_path_tests {
 
     impl Render for Masked {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            let deferred = crate::deferred(div().absolute().top_0().left_0().size(px(20.)).bg(Hsla::black()));
+            let deferred = crate::deferred(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size(px(20.))
+                    .bg(Hsla::black()),
+            );
             let mut boxed = div()
                 .size(px(40.))
                 .bg(Hsla::red())
@@ -3672,13 +4219,19 @@ mod vn_clip_path_tests {
     }
 
     #[gpui::test]
-    fn a_mask_composites_its_group_through_the_mask_group_and_a_leaf_is_tinted(cx: &mut TestAppContext) {
+    fn a_mask_composites_its_group_through_the_mask_group_and_a_leaf_is_tinted(
+        cx: &mut TestAppContext,
+    ) {
         let window = cx.open_window(size(px(200.), px(200.)), |_, _| Masked);
         cx.run_until_parked();
         window
             .update(cx, |_, window, _| {
                 let scene = &window.rendered_frame.scene;
-                assert_eq!(scene.vn_layers.len(), 2, "the box, the deferred child, and no layer for the leaf");
+                assert_eq!(
+                    scene.vn_layers.len(),
+                    2,
+                    "the box, the deferred child, and no layer for the leaf"
+                );
                 let colors = |group: usize| -> Vec<Hsla> {
                     scene
                         .vn_batches(group)
@@ -3686,22 +4239,46 @@ mod vn_clip_path_tests {
                             crate::VnBatch::Primitives(crate::PrimitiveBatch::Quads(r)) => Some(r),
                             _ => None,
                         })
-                        .flat_map(|r| scene.quads[r].iter().filter_map(|q| q.background.as_solid()).collect::<Vec<_>>())
+                        .flat_map(|r| {
+                            scene.quads[r]
+                                .iter()
+                                .filter_map(|q| q.background.as_solid())
+                                .collect::<Vec<_>>()
+                        })
                         .collect()
                 };
                 let mut groups = Vec::new();
                 for layer in &scene.vn_layers {
                     assert_eq!(layer.fill_rule, 1 << 1, "an alpha mask over a nonzero box");
                     let content = colors(layer.group as usize);
-                    assert!(content.iter().all(|c| (c.a - 0.5).abs() < 1e-3), "{content:?}");
-                    assert_eq!(colors(layer.group as usize + 1), vec![Hsla::white()], "the mask is not faded");
+                    assert!(
+                        content.iter().all(|c| (c.a - 0.5).abs() < 1e-3),
+                        "{content:?}"
+                    );
+                    assert_eq!(
+                        colors(layer.group as usize + 1),
+                        vec![Hsla::white()],
+                        "the mask is not faded"
+                    );
                     groups.push(content.len());
                 }
                 groups.sort();
-                assert_eq!(groups, vec![1, 2], "the deferred child paints through the mask again");
+                assert_eq!(
+                    groups,
+                    vec![1, 2],
+                    "the deferred child paints through the mask again"
+                );
                 let root = colors(0);
-                assert_eq!(root, vec![Hsla::blue()], "the leaf paints the mask in its colour");
-                let leaf = scene.quads.iter().find(|q| q.background.as_solid() == Some(Hsla::blue())).unwrap();
+                assert_eq!(
+                    root,
+                    vec![Hsla::blue()],
+                    "the leaf paints the mask in its colour"
+                );
+                let leaf = scene
+                    .quads
+                    .iter()
+                    .find(|q| q.background.as_solid() == Some(Hsla::blue()))
+                    .unwrap();
                 assert_eq!(leaf.bounds.size.width.0, 10. * window.scale_factor());
             })
             .unwrap();
@@ -3714,7 +4291,10 @@ mod vn_border_color_tests {
 
     #[test]
     fn independent_border_colors_keep_shared_fallback_and_transparent_sides() {
-        let mut style = Style { border_color: Some(Hsla::red()), ..Default::default() };
+        let mut style = Style {
+            border_color: Some(Hsla::red()),
+            ..Default::default()
+        };
         style.vn_border_colors.left = Some(Hsla::transparent_black());
         style.vn_border_colors.top = Some(Hsla::blue());
         let colors = style.vn_resolved_border_colors();
@@ -3728,43 +4308,72 @@ mod vn_border_color_tests {
     #[test]
     fn overflow_is_clipped_inside_borders_coloured_per_side() {
         let mut style = Style::default();
-        style.overflow = Point { x: Overflow::Hidden, y: Overflow::Hidden };
+        style.overflow = Point {
+            x: Overflow::Hidden,
+            y: Overflow::Hidden,
+        };
         style.border_widths = Edges::all(px(4.).into());
         style.vn_border_colors.top = Some(Hsla::blue());
         style.vn_border_colors.left = Some(Hsla::red());
         let bounds = Bounds::new(point(px(0.), px(0.)), size(px(100.), px(100.)));
         let mask = style.overflow_mask(bounds, px(16.)).unwrap();
-        assert_eq!(mask.bounds, Bounds::from_corners(point(px(4.), px(4.)), point(px(100.), px(100.))));
+        assert_eq!(
+            mask.bounds,
+            Bounds::from_corners(point(px(4.), px(4.)), point(px(100.), px(100.)))
+        );
     }
 
     #[test]
     fn colored_border_partitions_cover_rounded_arcs_with_width_weighted_joins() {
         let clips = Style::vn_border_side_clips(
-            Bounds::new(point(px(0.), px(0.)), size(px(80.), px(80.))), Edges::all(px(8.)),
+            Bounds::new(point(px(0.), px(0.)), size(px(80.), px(80.))),
+            Edges::all(px(8.)),
         );
         let contains = |polygon: &Vec<[f32; 2]>, point: [f32; 2]| {
             let mut sign = 0.;
             for (a, b) in polygon.iter().zip(polygon.iter().cycle().skip(1)) {
                 let cross = (b[0] - a[0]) * (point[1] - a[1]) - (b[1] - a[1]) * (point[0] - a[0]);
-                if cross.abs() < 0.0001 { continue; }
-                if sign != 0. && cross.signum() != sign { return false; }
+                if cross.abs() < 0.0001 {
+                    continue;
+                }
+                if sign != 0. && cross.signum() != sign {
+                    return false;
+                }
                 sign = cross.signum();
             }
             polygon.len() >= 3
         };
-        assert!(contains(&clips[0], [15., 13.]), "top rounded arc extends below the rectangular inner top");
-        assert!(contains(&clips[3], [13., 15.]), "left rounded arc extends beyond the rectangular inner left");
+        assert!(
+            contains(&clips[0], [15., 13.]),
+            "top rounded arc extends below the rectangular inner top"
+        );
+        assert!(
+            contains(&clips[3], [13., 15.]),
+            "left rounded arc extends beyond the rectangular inner left"
+        );
         for y in 0..80 {
             for x in 0..80 {
-                assert!(clips.iter().any(|polygon| contains(polygon, [x as f32 + 0.25, y as f32 + 0.25])),
-                    "coloured side clips must cover the entire quad, including rounded corners");
+                assert!(
+                    clips
+                        .iter()
+                        .any(|polygon| contains(polygon, [x as f32 + 0.25, y as f32 + 0.25])),
+                    "coloured side clips must cover the entire quad, including rounded corners"
+                );
             }
         }
         let clips = Style::vn_border_side_clips(
             Bounds::new(point(px(0.), px(0.)), size(px(100.), px(60.))),
-            Edges { top: px(4.), right: px(8.), bottom: px(6.), left: px(2.) },
+            Edges {
+                top: px(4.),
+                right: px(8.),
+                bottom: px(6.),
+                left: px(2.),
+            },
         );
         assert!(contains(&clips[0], [2., 3.]));
-        assert!(contains(&clips[3], [2., 5.]), "top/left join uses their2:4width ratio");
+        assert!(
+            contains(&clips[3], [2., 5.]),
+            "top/left join uses their2:4width ratio"
+        );
     }
 }

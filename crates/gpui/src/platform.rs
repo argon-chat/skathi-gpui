@@ -44,11 +44,10 @@ use crate::{
     Action, AnyWindowHandle, App, AsyncWindowContext, BackgroundExecutor, Bounds, Corners,
     DEFAULT_WINDOW_SIZE, DevicePixels, DispatchEventResult, Edges, ExternalDragPayload, Font,
     FontId, FontMetrics, FontRun, ForegroundExecutor, GlyphId, GlyphShadowParams, GpuSpecs, Hsla,
-    ImageSource, Keymap,
-    LineLayout, MissingGlyphSink, Pixels, PlatformGestures, PlatformInput, Point, Priority,
-    RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Scene, ShapedGlyph,
-    ShapedRun, SharedString, Size, SvgRenderer, SystemWindowTab, Task, Window, WindowControlArea,
-    hash, point, px, size,
+    ImageSource, Keymap, LineLayout, MissingGlyphSink, Pixels, PlatformGestures, PlatformInput,
+    Point, Priority, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Scene,
+    ShapedGlyph, ShapedRun, SharedString, Size, SvgRenderer, SystemWindowTab, Task, Window,
+    WindowControlArea, hash, point, px, size,
 };
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use anyhow::bail;
@@ -2525,8 +2524,8 @@ impl<Backend> AtlasState<Backend> {
     pub fn count_keys(&self, stats: &mut AtlasStats) {
         stats.keys = self.tiles_by_key.len() as u32;
         for (key, tile) in &self.tiles_by_key {
-            let pixels =
-                (tile.bounds.size.width.0.max(0) as u64) * (tile.bounds.size.height.0.max(0) as u64);
+            let pixels = (tile.bounds.size.width.0.max(0) as u64)
+                * (tile.bounds.size.height.0.max(0) as u64);
             stats.kinds[tile.texture_id.kind as usize].tile_pixels += pixels;
             if let AtlasKey::Image(_) = key {
                 stats.image_keys += 1;

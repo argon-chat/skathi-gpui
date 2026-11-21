@@ -528,9 +528,10 @@ impl Element for Img {
                     // embedder may have swapped in a smaller copy).
                     let natural = data.natural_size(layout_state.frame_index);
                     let new_bounds = match style.vn_object_position {
-                        Some(position) => {
-                            self.style.object_fit.get_bounds_at(bounds, natural, position)
-                        }
+                        Some(position) => self
+                            .style
+                            .object_fit
+                            .get_bounds_at(bounds, natural, position),
                         None => self.style.object_fit.get_bounds(bounds, natural),
                     };
                     // vue-native fork: percentages and the overlap rule resolve
@@ -881,10 +882,7 @@ mod tests {
             ImageSampling::SmoothUpscale.mode(source, destination, scale_and_rotate),
             2
         );
-        assert_eq!(
-            ImageSampling::Nearest.mode(source, destination, unit),
-            4
-        );
+        assert_eq!(ImageSampling::Nearest.mode(source, destination, unit), 4);
         assert_eq!(
             ImageSampling::Linear.mode(source, destination, scale_and_rotate),
             0

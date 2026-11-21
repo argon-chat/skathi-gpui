@@ -2338,7 +2338,10 @@ mod tests {
         let mut renderer = MetalRenderer::new_internal(device, None, true, Default::default())?;
         let atlas = renderer.sprite_atlas().clone();
         let scene = hdr_tests::signed_scene(&*atlas)?;
-        let size = size(DevicePixels(SIGNED_WIDTH as i32), DevicePixels(HEIGHT as i32));
+        let size = size(
+            DevicePixels(SIGNED_WIDTH as i32),
+            DevicePixels(HEIGHT as i32),
+        );
         let sdr = renderer.render_scene_to_image(&scene, size)?;
         assert!(renderer.set_hdr_output(Some(HdrOutput {
             sdr_white: 1.0,
@@ -2602,7 +2605,12 @@ mod tests {
                     path: "text-shadow-coverage".into(),
                     size: tile_size,
                 }),
-                &mut || Ok(Some((tile_size, std::borrow::Cow::Borrowed(coverage.as_slice())))),
+                &mut || {
+                    Ok(Some((
+                        tile_size,
+                        std::borrow::Cow::Borrowed(coverage.as_slice()),
+                    )))
+                },
             )?
             .context("shadow tile was not allocated")?;
         let frame = Bounds::new(

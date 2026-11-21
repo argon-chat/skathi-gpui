@@ -83,7 +83,11 @@ impl VnPathVerb {
             return;
         }
         arc.for_each_cubic_bezier(&mut |c| {
-            out.push(VnPathVerb::CubicTo([c.ctrl1.x, c.ctrl1.y], [c.ctrl2.x, c.ctrl2.y], [c.to.x, c.to.y]));
+            out.push(VnPathVerb::CubicTo(
+                [c.ctrl1.x, c.ctrl1.y],
+                [c.ctrl2.x, c.ctrl2.y],
+                [c.to.x, c.to.y],
+            ));
         });
         // The last cubic ends on `to` up to rounding; make it exact, so a
         // following relative command starts where the arc was asked to end.
@@ -121,7 +125,10 @@ impl VnClipOutline {
             min = [min[0].min(p[0]), min[1].min(p[1])];
             max = [max[0].max(p[0]), max[1].max(p[1])];
         }
-        Some(Bounds::from_corners(point(px(min[0]), px(min[1])), point(px(max[0]), px(max[1]))))
+        Some(Bounds::from_corners(
+            point(px(min[0]), px(min[1])),
+            point(px(max[0]), px(max[1])),
+        ))
     }
 }
 
@@ -168,7 +175,11 @@ impl VnClipGeometry {
     /// `transform` (a device-space matrix, as
     /// [`crate::Window::element_transform`]). Curves are cut to
     /// [`VN_CLIP_TOLERANCE`] in device pixels.
-    pub fn new(outline: &VnClipOutline, scale_factor: f32, transform: TransformationMatrix) -> Self {
+    pub fn new(
+        outline: &VnClipOutline,
+        scale_factor: f32,
+        transform: TransformationMatrix,
+    ) -> Self {
         let unit = transform.is_unit();
         let map = |p: [f32; 2]| -> [f32; 2] {
             let d = [p[0] * scale_factor, p[1] * scale_factor];
@@ -231,7 +242,11 @@ impl VnClipGeometry {
             close(&mut segments, current, start);
         }
         let bounds = segment_bounds(&segments);
-        VnClipGeometry { fill_rule: outline.fill_rule, segments, bounds }
+        VnClipGeometry {
+            fill_rule: outline.fill_rule,
+            segments,
+            bounds,
+        }
     }
 
     /// The winding number of the shape around `p` (device pixels): the
@@ -292,8 +307,7 @@ pub struct VnColorMatrix {
 impl VnColorMatrix {
     /// The identity transform.
     pub const IDENTITY: [f32; 20] = [
-        1., 0., 0., 0., 0., 0., 1., 0., 0., 0.,
-        0., 0., 1., 0., 0., 0., 0., 0., 1., 0.,
+        1., 0., 0., 0., 0., 0., 1., 0., 0., 0., 0., 0., 1., 0., 0., 0., 0., 0., 1., 0.,
     ];
 
     /// Four float4 coefficient rows followed by a float4 bias, for the GPU.
@@ -338,7 +352,10 @@ pub struct VnClipMask {
 
 impl std::fmt::Debug for VnClipMask {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("VnClipMask").field("mask", &self.mask).field("bounds", &self.bounds).finish()
+        f.debug_struct("VnClipMask")
+            .field("mask", &self.mask)
+            .field("bounds", &self.bounds)
+            .finish()
     }
 }
 
@@ -369,7 +386,10 @@ impl VnClipNode {
     /// [`Self::outermost_first`] without the clips `base` is already inside
     /// of: the layers a draw deferred from inside `base` reopens when it
     /// paints within it.
-    pub fn inside_of(this: &Arc<VnClipNode>, base: Option<&Arc<VnClipNode>>) -> Vec<Arc<VnClipNode>> {
+    pub fn inside_of(
+        this: &Arc<VnClipNode>,
+        base: Option<&Arc<VnClipNode>>,
+    ) -> Vec<Arc<VnClipNode>> {
         let chain = Self::outermost_first(this);
         let Some(base) = base else { return chain };
         let mut outer = Self::outermost_first(base).into_iter();
@@ -444,7 +464,11 @@ fn distance_to_segment(p: [f32; 2], s: [f32; 4]) -> f32 {
     let (ax, ay, bx, by) = (s[0], s[1], s[2], s[3]);
     let (dx, dy) = (bx - ax, by - ay);
     let len2 = dx * dx + dy * dy;
-    let t = if len2 > 0. { (((p[0] - ax) * dx + (p[1] - ay) * dy) / len2).clamp(0., 1.) } else { 0. };
+    let t = if len2 > 0. {
+        (((p[0] - ax) * dx + (p[1] - ay) * dy) / len2).clamp(0., 1.)
+    } else {
+        0.
+    };
     let (qx, qy) = (ax + t * dx - p[0], ay + t * dy - p[1]);
     (qx * qx + qy * qy).sqrt()
 }
@@ -453,7 +477,9 @@ fn distance_to_segment(p: [f32; 2], s: [f32; 4]) -> f32 {
 /// approximation to stay within the tolerance, from its largest second
 /// difference.
 fn segment_count(degree: f32, second_difference: f32) -> u32 {
-    let n = (degree * (degree - 1.) / 8. * second_difference / VN_CLIP_TOLERANCE).sqrt().ceil();
+    let n = (degree * (degree - 1.) / 8. * second_difference / VN_CLIP_TOLERANCE)
+        .sqrt()
+        .ceil();
     (n as u32).clamp(1, MAX_CURVE_SEGMENTS)
 }
 
@@ -467,7 +493,10 @@ fn flatten_quad(out: &mut Vec<[f32; 4]>, p0: [f32; 2], p1: [f32; 2], p2: [f32; 2
         let p = if i == n {
             p2
         } else {
-            [u * u * p0[0] + 2. * u * t * p1[0] + t * t * p2[0], u * u * p0[1] + 2. * u * t * p1[1] + t * t * p2[1]]
+            [
+                u * u * p0[0] + 2. * u * t * p1[0] + t * t * p2[0],
+                u * u * p0[1] + 2. * u * t * p1[1] + t * t * p2[1],
+            ]
         };
         if p != prev {
             out.push([prev[0], prev[1], p[0], p[1]]);
@@ -513,9 +542,17 @@ mod tests {
         use VnPathVerb::*;
         let mut v = vec![MoveTo([x, y])];
         if clockwise {
-            v.extend([LineTo([x + side, y]), LineTo([x + side, y + side]), LineTo([x, y + side])]);
+            v.extend([
+                LineTo([x + side, y]),
+                LineTo([x + side, y + side]),
+                LineTo([x, y + side]),
+            ]);
         } else {
-            v.extend([LineTo([x, y + side]), LineTo([x + side, y + side]), LineTo([x + side, y])]);
+            v.extend([
+                LineTo([x, y + side]),
+                LineTo([x + side, y + side]),
+                LineTo([x + side, y]),
+            ]);
         }
         v.push(Close);
         v
@@ -528,10 +565,13 @@ mod tests {
             values: std::array::from_fn(|index| index as f32),
             linear_rgb: true,
         };
-        assert_eq!(matrix.gpu_values(), [
-            0., 1., 2., 3., 5., 6., 7., 8., 10., 11., 12., 13., 15., 16., 17., 18.,
-            4., 9., 14., 19.,
-        ]);
+        assert_eq!(
+            matrix.gpu_values(),
+            [
+                0., 1., 2., 3., 5., 6., 7., 8., 10., 11., 12., 13., 15., 16., 17., 18., 4., 9.,
+                14., 19.,
+            ]
+        );
         assert_eq!(std::mem::size_of::<crate::VnLayer>(), 240);
         assert_eq!(std::mem::offset_of!(crate::VnLayer, color_matrix), 32);
         assert_eq!(std::mem::offset_of!(crate::VnLayer, bounds), 112);
@@ -542,7 +582,10 @@ mod tests {
         use VnPathVerb::*;
         // No `Z`: a fill closes the subpath.
         let g = VnClipGeometry::new(
-            &outline(VnFillRule::NonZero, vec![MoveTo([0., 0.]), LineTo([100., 0.]), LineTo([0., 100.])]),
+            &outline(
+                VnFillRule::NonZero,
+                vec![MoveTo([0., 0.]), LineTo([100., 0.]), LineTo([0., 100.])],
+            ),
             1.,
             TransformationMatrix::unit(),
         );
@@ -555,7 +598,12 @@ mod tests {
         // On the hypotenuse x + y = 100 the pixel is half covered.
         assert!((g.coverage([50., 50.]) - 0.5).abs() < 0.01);
         assert_eq!(
-            [g.bounds.origin.x.0, g.bounds.origin.y.0, g.bounds.size.width.0, g.bounds.size.height.0],
+            [
+                g.bounds.origin.x.0,
+                g.bounds.origin.y.0,
+                g.bounds.size.width.0,
+                g.bounds.size.height.0
+            ],
             [0., 0., 100., 100.]
         );
     }
@@ -565,15 +613,27 @@ mod tests {
         // A square inside a square, both clockwise: winding 2 in the middle.
         let mut verbs = square(0., 0., 100., true);
         verbs.extend(square(25., 25., 50., true));
-        let nonzero = VnClipGeometry::new(&outline(VnFillRule::NonZero, verbs.clone()), 1., TransformationMatrix::unit());
-        let evenodd = VnClipGeometry::new(&outline(VnFillRule::EvenOdd, verbs), 1., TransformationMatrix::unit());
+        let nonzero = VnClipGeometry::new(
+            &outline(VnFillRule::NonZero, verbs.clone()),
+            1.,
+            TransformationMatrix::unit(),
+        );
+        let evenodd = VnClipGeometry::new(
+            &outline(VnFillRule::EvenOdd, verbs),
+            1.,
+            TransformationMatrix::unit(),
+        );
         assert_eq!(nonzero.winding([50., 50.]).abs(), 2);
         assert!(nonzero.contains([50., 50.]) && nonzero.contains([10., 10.]));
         assert!(!evenodd.contains([50., 50.]) && evenodd.contains([10., 10.]));
         // The inner one counter-clockwise: a hole under nonzero too.
         let mut verbs = square(0., 0., 100., true);
         verbs.extend(square(25., 25., 50., false));
-        let g = VnClipGeometry::new(&outline(VnFillRule::NonZero, verbs), 1., TransformationMatrix::unit());
+        let g = VnClipGeometry::new(
+            &outline(VnFillRule::NonZero, verbs),
+            1.,
+            TransformationMatrix::unit(),
+        );
         assert!(!g.contains([50., 50.]) && g.contains([10., 10.]));
     }
 
@@ -590,22 +650,36 @@ mod tests {
             CubicTo([c + k, c - r], [c + r, c - k], [c + r, c]),
             Close,
         ];
-        let g = VnClipGeometry::new(&outline(VnFillRule::NonZero, verbs), 2., TransformationMatrix::unit());
+        let g = VnClipGeometry::new(
+            &outline(VnFillRule::NonZero, verbs),
+            2.,
+            TransformationMatrix::unit(),
+        );
         // At scale 2 the radius is 80 device pixels: every vertex on it.
         for s in &g.segments {
             let d = ((s[0] - 100.).powi(2) + (s[1] - 100.).powi(2)).sqrt();
             assert!((d - 80.).abs() < 0.1, "{d}");
         }
         // Few enough segments to evaluate per pixel, enough to be round.
-        assert!(g.segments.len() >= 16 && g.segments.len() <= 64, "{}", g.segments.len());
+        assert!(
+            g.segments.len() >= 16 && g.segments.len() <= 64,
+            "{}",
+            g.segments.len()
+        );
         assert!(g.contains([100., 100.]) && !g.contains([100. + 80. * 0.75, 100. + 80. * 0.75]));
         // A quadratic too.
         let q = VnClipGeometry::new(
-            &outline(VnFillRule::NonZero, vec![MoveTo([0., 0.]), QuadTo([50., 100.], [100., 0.]), Close]),
+            &outline(
+                VnFillRule::NonZero,
+                vec![MoveTo([0., 0.]), QuadTo([50., 100.], [100., 0.]), Close],
+            ),
             1.,
             TransformationMatrix::unit(),
         );
-        assert!(q.contains([50., 40.]) && !q.contains([50., 60.]), "the apex is at y = 50");
+        assert!(
+            q.contains([50., 40.]) && !q.contains([50., 60.]),
+            "the apex is at y = 50"
+        );
     }
 
     #[test]
@@ -616,7 +690,12 @@ mod tests {
             .translate(point(ScaledPixels(200.), ScaledPixels(0.)))
             .rotate(crate::Radians(std::f32::consts::FRAC_PI_2));
         use VnPathVerb::*;
-        let triangle = vec![MoveTo([0., 0.]), LineTo([100., 0.]), LineTo([0., 50.]), Close];
+        let triangle = vec![
+            MoveTo([0., 0.]),
+            LineTo([100., 0.]),
+            LineTo([0., 50.]),
+            Close,
+        ];
         let g = VnClipGeometry::new(&outline(VnFillRule::NonZero, triangle.clone()), 1., rotate);
         let probe = |p: [f32; 2]| {
             let q = rotate.apply(point(px(p[0]), px(p[1])));
@@ -624,21 +703,45 @@ mod tests {
         };
         assert!(g.contains(probe([10., 10.])));
         assert!(!g.contains(probe([90., 40.])));
-        assert!(!g.contains([10., 10.]), "not where the untransformed shape was");
+        assert!(
+            !g.contains([10., 10.]),
+            "not where the untransformed shape was"
+        );
     }
 
     #[test]
     fn arcs_become_cubics_that_end_where_asked() {
         let mut verbs = vec![VnPathVerb::MoveTo([0., 50.])];
         // A half circle of radius 50 from (0, 50) to (100, 50), over the top.
-        VnPathVerb::push_arc(&mut verbs, [0., 50.], [50., 50.], 0., false, true, [100., 50.]);
-        assert!(verbs.len() >= 3, "{verbs:?}");
-        assert_eq!(verbs.last(), Some(&VnPathVerb::CubicTo(
-            match verbs.last() { Some(VnPathVerb::CubicTo(a, _, _)) => *a, _ => unreachable!() },
-            match verbs.last() { Some(VnPathVerb::CubicTo(_, b, _)) => *b, _ => unreachable!() },
+        VnPathVerb::push_arc(
+            &mut verbs,
+            [0., 50.],
+            [50., 50.],
+            0.,
+            false,
+            true,
             [100., 50.],
-        )));
-        let g = VnClipGeometry::new(&outline(VnFillRule::NonZero, verbs), 1., TransformationMatrix::unit());
+        );
+        assert!(verbs.len() >= 3, "{verbs:?}");
+        assert_eq!(
+            verbs.last(),
+            Some(&VnPathVerb::CubicTo(
+                match verbs.last() {
+                    Some(VnPathVerb::CubicTo(a, _, _)) => *a,
+                    _ => unreachable!(),
+                },
+                match verbs.last() {
+                    Some(VnPathVerb::CubicTo(_, b, _)) => *b,
+                    _ => unreachable!(),
+                },
+                [100., 50.],
+            ))
+        );
+        let g = VnClipGeometry::new(
+            &outline(VnFillRule::NonZero, verbs),
+            1.,
+            TransformationMatrix::unit(),
+        );
         assert!(g.contains([50., 10.]), "the top of the half disc");
         assert!(!g.contains([50., 60.]), "below the diameter");
         assert!(!g.contains([5., 5.]), "outside the curve in the corner");
@@ -663,8 +766,20 @@ mod tests {
             1.,
             TransformationMatrix::unit(),
         ));
-        let outer = Arc::new(VnClipNode { geometry: left.clone(), color_matrix: None, capture: None, mask: None, parent: None });
-        let inner = Arc::new(VnClipNode { geometry: right.clone(), color_matrix: None, capture: None, mask: None, parent: Some(outer.clone()) });
+        let outer = Arc::new(VnClipNode {
+            geometry: left.clone(),
+            color_matrix: None,
+            capture: None,
+            mask: None,
+            parent: None,
+        });
+        let inner = Arc::new(VnClipNode {
+            geometry: right.clone(),
+            color_matrix: None,
+            capture: None,
+            mask: None,
+            parent: Some(outer.clone()),
+        });
         assert!(inner.contains([50., 10.]));
         assert!(!inner.contains([10., 10.]) && !inner.contains([90., 10.]));
         assert_eq!(VnClipNode::outermost_first(&inner).len(), 2);
@@ -675,7 +790,13 @@ mod tests {
             color_matrix: None,
             capture: None,
             mask: None,
-            parent: Some(Arc::new(VnClipNode { geometry: Arc::new((*left).clone()), color_matrix: None, capture: None, mask: None, parent: None })),
+            parent: Some(Arc::new(VnClipNode {
+                geometry: Arc::new((*left).clone()),
+                color_matrix: None,
+                capture: None,
+                mask: None,
+                parent: None,
+            })),
         }));
         assert!(VnClipNode::same(&Some(inner.clone()), &rebuilt));
         assert!(!VnClipNode::same(&Some(inner), &Some(outer)));
@@ -685,20 +806,36 @@ mod tests {
     fn fixed_escapes_preserve_color_groups_while_dropping_geometric_clips() {
         let geometry = Arc::new(VnClipGeometry::new(
             &outline(VnFillRule::NonZero, square(0., 0., 100., true)),
-            1., TransformationMatrix::unit(),
+            1.,
+            TransformationMatrix::unit(),
         ));
-        let clip = Arc::new(VnClipNode { geometry: geometry.clone(), color_matrix: None, capture: None, mask: None, parent: None });
+        let clip = Arc::new(VnClipNode {
+            geometry: geometry.clone(),
+            color_matrix: None,
+            capture: None,
+            mask: None,
+            parent: None,
+        });
         let filter = Arc::new(VnClipNode {
             geometry: geometry.clone(),
-            color_matrix: Some(VnColorMatrix { group_id: 7, values: VnColorMatrix::IDENTITY, linear_rgb: true }),
+            color_matrix: Some(VnColorMatrix {
+                group_id: 7,
+                values: VnColorMatrix::IDENTITY,
+                linear_rgb: true,
+            }),
             capture: None,
             mask: None,
             parent: Some(clip),
         });
-        let inside = Some(Arc::new(VnClipNode { geometry, color_matrix: None, capture: None, mask: None, parent: Some(filter) }));
+        let inside = Some(Arc::new(VnClipNode {
+            geometry,
+            color_matrix: None,
+            capture: None,
+            mask: None,
+            parent: Some(filter),
+        }));
         let retained = VnClipNode::color_filters(&inside).expect("filter retained");
         assert_eq!(retained.color_matrix.expect("matrix").group_id, 7);
         assert!(retained.parent.is_none(), "geometric clipping is escaped");
     }
-
 }

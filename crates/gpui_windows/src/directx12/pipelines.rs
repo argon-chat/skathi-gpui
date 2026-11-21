@@ -1,11 +1,6 @@
 #[cfg(test)]
 use std::ffi::CString;
-use std::{
-    borrow::Cow,
-    mem::ManuallyDrop,
-    sync::Arc,
-    time::Instant,
-};
+use std::{borrow::Cow, mem::ManuallyDrop, sync::Arc, time::Instant};
 
 use parking_lot::Mutex;
 
@@ -273,7 +268,9 @@ impl Pipelines {
             .spawn(move || {
                 for (module, samples) in WARM_MODULES {
                     // The renderer is gone (closed window, lost device).
-                    let Some(warmed) = warmed.upgrade() else { return };
+                    let Some(warmed) = warmed.upgrade() else {
+                        return;
+                    };
                     let key = PipelineKey {
                         kind: PipelineKind::Primitive(module),
                         format,
@@ -507,7 +504,11 @@ impl Pipelines {
             ),
             PipelineKind::VnPlusLighter => {
                 let (vertex, fragment) = embedded::module(ShaderModule::VnLayer);
-                (Cow::Borrowed(vertex), Cow::Borrowed(fragment), Blend::PlusLighter)
+                (
+                    Cow::Borrowed(vertex),
+                    Cow::Borrowed(fragment),
+                    Blend::PlusLighter,
+                )
             }
             PipelineKind::HdrOutput => {
                 let (vertex, fragment) = compile_hdr_output()?;

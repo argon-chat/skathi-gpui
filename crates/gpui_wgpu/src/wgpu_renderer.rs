@@ -3202,8 +3202,8 @@ mod text_shadow_tests {
 #[cfg(all(test, any(target_os = "linux", target_os = "windows")))]
 mod corner_shape_tests {
     use super::*;
-    use gpui::corner_shape_fixture::{SIZE, expectations, scene};
     use gpui::PlatformHeadlessRenderer;
+    use gpui::corner_shape_fixture::{SIZE, expectations, scene};
 
     #[test]
     fn corner_shapes_cut_and_fill_where_their_curves_say() -> Result<()> {

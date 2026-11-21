@@ -111,8 +111,7 @@ impl MetalRenderer {
             let Some(bindings) = draw.layers else {
                 return Ok(());
             };
-            let Some(texture) = self.vn_layers.snapshots.get(&id).map(|s| s.texture.clone())
-            else {
+            let Some(texture) = self.vn_layers.snapshots.get(&id).map(|s| s.texture.clone()) else {
                 return Ok(());
             };
             let Some(pipeline) = self.vn_composite_pipeline(layer.flags) else {
@@ -239,7 +238,9 @@ impl MetalRenderer {
                     MTLTextureUsage::ShaderRead,
                     self.target_format,
                 )?;
-                self.vn_layers.snapshots.insert(id, Snapshot { texture, idle: 0 });
+                self.vn_layers
+                    .snapshots
+                    .insert(id, Snapshot { texture, idle: 0 });
             }
             let snapshot = self.vn_layers.snapshots.get_mut(&id).context("snapshot")?;
             snapshot.idle = 0;
@@ -270,14 +271,19 @@ impl MetalRenderer {
         let state = &mut self.vn_layers;
         if !state.snapshots.is_empty() {
             for layer in &scene.vn_layers {
-                if let Some(snapshot) = layer.snapshot_id().and_then(|id| state.snapshots.get_mut(&id)) {
+                if let Some(snapshot) = layer
+                    .snapshot_id()
+                    .and_then(|id| state.snapshots.get_mut(&id))
+                {
                     snapshot.idle = 0;
                 }
             }
             for snapshot in state.snapshots.values_mut() {
                 snapshot.idle += 1;
             }
-            state.snapshots.retain(|_, snapshot| snapshot.idle <= SNAPSHOT_IDLE_RENDERS);
+            state
+                .snapshots
+                .retain(|_, snapshot| snapshot.idle <= SNAPSHOT_IDLE_RENDERS);
         }
         if state.depth_used >= state.targets.len() {
             state.idle_frames = 0;
@@ -712,8 +718,16 @@ mod tests {
         assert_close(pixel(&image, 40, 16), [182, 0, 73, 255], "green luminance");
         assert_close(pixel(&image, 8, 48), [0, 0, 255, 255], "an empty mask");
         assert_close(pixel(&image, 40, 40), [255, 0, 0, 255], "inside a clip");
-        assert_close(pixel(&image, 56, 40), [0, 0, 255, 255], "masked inside a clip");
-        assert_eq!(renderer.vn_layers.targets.len(), 3, "a nested mask draws two levels down");
+        assert_close(
+            pixel(&image, 56, 40),
+            [0, 0, 255, 255],
+            "masked inside a clip",
+        );
+        assert_eq!(
+            renderer.vn_layers.targets.len(),
+            3,
+            "a nested mask draws two levels down"
+        );
         Ok(())
     }
 
@@ -819,7 +833,12 @@ mod tests {
         Ok(())
     }
 
-    fn snapshot_into(id: u64, rect: Bounds<ScaledPixels>, opacity: f32, plus_lighter: bool) -> VnSnapshotPaint {
+    fn snapshot_into(
+        id: u64,
+        rect: Bounds<ScaledPixels>,
+        opacity: f32,
+        plus_lighter: bool,
+    ) -> VnSnapshotPaint {
         let (x, y) = (rect.origin.x.0, rect.origin.y.0);
         let (w, h) = (rect.size.width.0, rect.size.height.0);
         VnSnapshotPaint {
@@ -851,7 +870,11 @@ mod tests {
         scene.finish();
         let ink = scene.vn_captures[0].ink;
         let image = render_transparent(&mut renderer, &scene)?;
-        assert_eq!(pixel(&image, 10, 10), [0; 4], "a capture composites nowhere");
+        assert_eq!(
+            pixel(&image, 10, 10),
+            [0; 4],
+            "a capture composites nowhere"
+        );
 
         let mut scene = Scene::default();
         scene.vn_insert_snapshot(snapshot_into(7, bounds(28., 28., 32., 32.), 1., false));
@@ -864,14 +887,29 @@ mod tests {
         scene.vn_resolve_snapshots(|id| (id == 7).then_some((info, ink)));
         let image = render_transparent(&mut renderer, &scene)?;
 
-        assert_close(pixel(&image, 44, 44), [255, 0, 0, 255], "the snapshot in its new box");
-        assert_eq!(pixel(&image, 10, 10), [0; 4], "nothing where it was captured");
-        assert_close(pixel(&image, 14, 48), [255, 0, 0, 255], "two halves add up to opaque");
+        assert_close(
+            pixel(&image, 44, 44),
+            [255, 0, 0, 255],
+            "the snapshot in its new box",
+        );
+        assert_eq!(
+            pixel(&image, 10, 10),
+            [0; 4],
+            "nothing where it was captured"
+        );
+        assert_close(
+            pixel(&image, 14, 48),
+            [255, 0, 0, 255],
+            "two halves add up to opaque",
+        );
 
         for _ in 0..=SNAPSHOT_IDLE_RENDERS {
             render_transparent(&mut renderer, &Scene::default())?;
         }
-        assert!(renderer.vn_layers.snapshots.is_empty(), "an unused snapshot is freed");
+        assert!(
+            renderer.vn_layers.snapshots.is_empty(),
+            "an unused snapshot is freed"
+        );
         Ok(())
     }
 }

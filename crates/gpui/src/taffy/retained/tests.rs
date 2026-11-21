@@ -63,7 +63,12 @@ fn a_child_that_became_a_root_forgets_the_parent_that_was_not_requested() {
     engine.enable_retention();
     let spacer = request_layout(&mut engine, Some(scope("spacer")), fixed(40., 10.), &[]);
     let child = request_layout(&mut engine, Some(scope("child")), fixed(30., 10.), &[]);
-    let parent = request_layout(&mut engine, Some(scope("parent")), Default::default(), &[child]);
+    let parent = request_layout(
+        &mut engine,
+        Some(scope("parent")),
+        Default::default(),
+        &[child],
+    );
     let root = request_layout(
         &mut engine,
         Some(scope("root")),

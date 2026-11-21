@@ -248,10 +248,10 @@ impl WindowsWindowInner {
         let border = &self.state.border_offset;
         let info = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
         if let Some(min) = constraints.min {
-            info.ptMinTrackSize.x =
-                ((min.width.as_f32() * scale).ceil() as i32).saturating_add(border.width_offset.get());
-            info.ptMinTrackSize.y =
-                ((min.height.as_f32() * scale).ceil() as i32).saturating_add(border.height_offset.get());
+            info.ptMinTrackSize.x = ((min.width.as_f32() * scale).ceil() as i32)
+                .saturating_add(border.width_offset.get());
+            info.ptMinTrackSize.y = ((min.height.as_f32() * scale).ceil() as i32)
+                .saturating_add(border.height_offset.get());
         }
         if let Some(max) = constraints.max {
             info.ptMaxTrackSize.x = ((max.width.as_f32() * scale).floor() as i32)
@@ -1227,7 +1227,9 @@ impl WindowsWindowInner {
             return None;
         }
         let position = logical_point(
-            cursor_point.x as f32, cursor_point.y as f32, self.state.scale_factor.get(),
+            cursor_point.x as f32,
+            cursor_point.y as f32,
+            self.state.scale_factor.get(),
         );
         let callback = self.state.callbacks.hit_test_window_control.take();
         let drag_area = if let Some(mut callback) = callback {

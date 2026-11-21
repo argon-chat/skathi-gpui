@@ -158,11 +158,17 @@ fn native_prewarmed_pipelines_serve_their_first_use() -> Result<()> {
             .warmed
             .lock()
             .iter()
-            .find(|cached| cached.key.kind == PipelineKind::Primitive(module) && cached.key.samples == samples)
+            .find(|cached| {
+                cached.key.kind == PipelineKind::Primitive(module) && cached.key.samples == samples
+            })
             .map(|cached| cached.state.as_raw())
             .context("warmed pipeline missing")?;
         let served = pipelines.pipeline(module, format, samples)?;
-        assert_eq!(served.as_raw(), warmed, "{module:?} must come from the warmup");
+        assert_eq!(
+            served.as_raw(),
+            warmed,
+            "{module:?} must come from the warmup"
+        );
     }
     assert_eq!(pipelines.cache.len(), WARM_MODULES.len());
     Ok(())

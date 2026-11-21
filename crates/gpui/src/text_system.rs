@@ -77,7 +77,11 @@ const MAX_REPORTED_MISSING_GLYPHS: usize = 1024;
 /// own features (`font-feature-settings`) is left to win, as it does in Chrome.
 fn spacing_font(font: &Font, tracking: Pixels) -> Cow<'_, Font> {
     let features = font.features.tag_value_list();
-    if tracking == px(0.) || features.iter().any(|(tag, _)| tag == "liga" || tag == "clig") {
+    if tracking == px(0.)
+        || features
+            .iter()
+            .any(|(tag, _)| tag == "liga" || tag == "clig")
+    {
         return Cow::Borrowed(font);
     }
     let mut features = features.to_vec();
@@ -567,7 +571,11 @@ impl TextSystem {
         let lock = &mut self.wrapper_pool.lock();
         let font_id = self.resolve_font(&font);
         let char_widths = lock
-            .entry(FontIdWithSize { font_id, font_size, tracking })
+            .entry(FontIdWithSize {
+                font_id,
+                font_size,
+                tracking,
+            })
             .or_default()
             .pop()
             .unwrap_or_default();
@@ -1297,7 +1305,11 @@ pub fn blur_glyph_coverage(
     let width = size.width.0.max(0) as usize;
     let height = size.height.0.max(0) as usize;
     let count = width * height;
-    let channels = if count > 0 && pixels.len() >= count * 4 { 4 } else { 1 };
+    let channels = if count > 0 && pixels.len() >= count * 4 {
+        4
+    } else {
+        1
+    };
     let coverage = |x: usize, y: usize| -> f32 {
         let index = (y * width + x) * channels + channels - 1;
         f32::from(pixels.get(index).copied().unwrap_or(0))

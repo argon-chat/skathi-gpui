@@ -81,4 +81,3 @@ pub(super) fn host_ns() -> u64 {
     let hz = objc2_core_video::CVGetHostClockFrequency();
     (ticks as f64 * 1e9 / hz) as u64
 }
-
