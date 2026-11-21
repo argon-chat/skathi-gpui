@@ -799,7 +799,9 @@ impl PlatformWindow for WindowsWindow {
             GetCursorPos(&mut point)
                 .context("unable to get cursor position")
                 .log_err();
-            ScreenToClient(self.0.hwnd, &mut point).ok().log_err();
+            if self.0.state.destroyed.get().is_none() {
+                ScreenToClient(self.0.hwnd, &mut point).ok().log_err();
+            }
             point
         };
         logical_point(point.x as f32, point.y as f32, scale_factor)

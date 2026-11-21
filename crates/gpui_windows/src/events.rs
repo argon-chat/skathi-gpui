@@ -1077,6 +1077,10 @@ impl WindowsWindowInner {
 
         self.executor
             .spawn(async move {
+                // Hiding the active window on close deactivates it; by now it may be gone.
+                if this.state.destroyed.get().is_some() {
+                    return;
+                }
                 if let Some(mut func) = this.state.callbacks.active_status_change.take() {
                     func(activated);
                     this.state.callbacks.active_status_change.set(Some(func));
