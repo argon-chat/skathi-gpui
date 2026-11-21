@@ -6,7 +6,7 @@
 //   signature:  frost(<number:strength>, <length:radius>?, <color:tint>?)
 //   slang:      2026.12
 //   schema:     11
-//   src-sha256: 3878d0fc85a790a8abcc1fbc6369c3ea64093adaeb4c20ec1fa443908052dada
+//   src-sha256: 9024d32ca088179a5696533d2e2277f02d429ad8a9b78b9e09f279a3ab5615da
 //   output:     premultiplied RGBA, written with blending disabled (it owns its quad)
 //
 // The VERTEX half lives in gpui_wgpu/src/shaders_effects.wgsl and is shared
@@ -83,6 +83,7 @@ struct Frost_0
      strength_0 : f32,
      radius_0 : f32,
      tint_0 : vec4<f32>,
+     quality_0 : f32,
 };
 
 struct EffectInput_0
@@ -145,9 +146,25 @@ fn Frost_shade_0( this_0 : Frost_0,  input_0 : EffectInput_0) -> vec4<f32>
 {
     var amount_0 : f32 = saturate(this_0.strength_0);
     var grain_uv_0 : vec2<f32> = input_0.px_0 / vec2<f32>(max(input_0.scale_1, 0.00100000004749745f));
+    var crystal_0 : f32;
+    if((this_0.quality_0) < 0.5f)
+    {
+        crystal_0 = (sk_fbm_0(grain_uv_0 * vec2<f32>(0.18000000715255737f)) + 0.5f * sk_fbm_0(vec2<f32>(grain_uv_0.x * 0.89999997615814209f, grain_uv_0.y * 0.31000000238418579f) * vec2<f32>(0.55000001192092896f))) / 1.5f - 0.5f;
+    }
+    else
+    {
+        if((this_0.quality_0) < 1.5f)
+        {
+            crystal_0 = sk_hash12_0(floor(grain_uv_0)) - 0.5f;
+        }
+        else
+        {
+            crystal_0 = 0.0f;
+        }
+    }
     var rim_0 : f32 = saturate(1.0f + input_0.sd_0 / max(2.5f * input_0.scale_1, 1.0f));
     var _S4 : f32 = input_0.backdrop_0.w;
-    var result_0 : vec4<f32> = vec4<f32>(input_0.backdrop_0.xyz + vec3<f32>((_S4 * (((sk_fbm_0(grain_uv_0 * vec2<f32>(0.18000000715255737f)) + 0.5f * sk_fbm_0(vec2<f32>(grain_uv_0.x * 0.89999997615814209f, grain_uv_0.y * 0.31000000238418579f) * vec2<f32>(0.55000001192092896f))) / 1.5f - 0.5f) * 0.05499999970197678f + rim_0 * rim_0 * 0.15999999642372131f) * amount_0)), _S4);
+    var result_0 : vec4<f32> = vec4<f32>(input_0.backdrop_0.xyz + vec3<f32>((_S4 * (crystal_0 * 0.05499999970197678f + rim_0 * rim_0 * 0.15999999642372131f) * amount_0)), _S4);
     var _S5 : f32 = this_0.tint_0.w;
     var result_1 : vec4<f32>;
     if(_S5 > 0.0f)
@@ -764,6 +781,7 @@ fn effect_fragment( _S51 : pixelInput_0, @builtin(position) sk_position_0 : vec4
     sk_material_0.strength_0 = EffectInput_param_0(sk_in_0, u32(0));
     sk_material_0.radius_0 = EffectInput_param_0(sk_in_0, u32(1));
     sk_material_0.tint_0 = vec4<f32>(EffectInput_param_0(sk_in_0, u32(4)), EffectInput_param_0(sk_in_0, u32(5)), EffectInput_param_0(sk_in_0, u32(6)), EffectInput_param_0(sk_in_0, u32(7)));
+    sk_material_0.quality_0 = EffectInput_param_0(sk_in_0, u32(2));
     var _S52 : pixelOutput_0 = pixelOutput_0( sk_finish_0(sk_material_0, sk_in_0) );
     return _S52;
 }

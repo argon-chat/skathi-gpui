@@ -3,7 +3,7 @@
   "slang": "2026.12",
   "compiler": "redslangc 0.1.1",
   "kind": "builtin",
-  "preludeSha256": "d42a878b904f014ebb0be013c868cf8b65aabec838b5984ac25a02ca2395c73c",
+  "preludeSha256": "b939152907af0027b7f919886163a03471038c59daa425dd21d030990a968775",
   "effects": [
     {
       "id": 0,
@@ -17,11 +17,11 @@
       "wgsl": "frost.wgsl",
       "metal": "frost.metal",
       "source": "crates/sk-effects/shaders/frost.slang",
-      "sourceSha256": "3878d0fc85a790a8abcc1fbc6369c3ea64093adaeb4c20ec1fa443908052dada",
+      "sourceSha256": "9024d32ca088179a5696533d2e2277f02d429ad8a9b78b9e09f279a3ab5615da",
       "generatedSha256": {
-        "hlsl": "accfcd967f415626c21a13b2c429fdc20c95462074c1d216d4a785065498ea9d",
-        "wgsl": "f707ac0a5bc315936e38996cb419f4a8b0acb5a6842f21f5cb59ed6a5bd40cea",
-        "metal": "2640ed90cd1dcc875271ded3438030edc6f7b710176cce9b6954fdd619b72c41"
+        "hlsl": "4f738840906d54956a349181b6e91b78fe822ec937e8b2efe8308ebc7f696644",
+        "wgsl": "3e30face6e0615d22c439aee1438f7574a127a058f8bf1292e59bf5e236db8af",
+        "metal": "f6c62d19f0704d0bb17814edf6a3f57f68ccdfc1ff2aed57a2e353aa3e0bbcb6"
       },
       "signature": "frost(<number:strength>, <length:radius>?, <color:tint>?)",
       "backdropRadiusParam": 1,
@@ -29,6 +29,7 @@
       "animatedParam": null,
       "pointerParam": null,
       "pointerTimesParam": null,
+      "qualityParam": 2,
       "clockSlots": [],
       "clockWindow": null,
       "params": [
@@ -153,11 +154,11 @@
       "wgsl": "noise.wgsl",
       "metal": "noise.metal",
       "source": "crates/sk-effects/shaders/noise.slang",
-      "sourceSha256": "aac4ac76e76e5b7df379ca8f6356d05d5eb7f84b754cef6ff0712c4edddcbecd",
+      "sourceSha256": "4dca94745eb5795fef3b21c9d73c37a1c39707bf030e58a748f0ba393529ca9f",
       "generatedSha256": {
-        "hlsl": "87315b61978d20acf1b1d8dcda147b4132794907e0f1bbaa850749fb2e2931f0",
-        "wgsl": "7addc2fdfc00bae2fbca1731bc7e1da5a03de1f87a4c7e985142d936ff46a2c0",
-        "metal": "f53445b742d63d27b06267920d441242a8be2adef778203f46a7b6013ed68964"
+        "hlsl": "64e65fbed616c5c52f28c0adfd229b492dc50f80e3eda7cdb6a74e7db54bdb67",
+        "wgsl": "ed6d49f68433e8c48b8733779cce6250a916a5ef0ebbbc18ce4a6b6e26c733e0",
+        "metal": "38192f8f7547f33d2b3d6b7df1ea1c5187e6fb696c4291eba961b749f99424b2"
       },
       "signature": "noise(<number:amount>, <length:scale>?, <number:speed>?)",
       "backdropRadiusParam": null,
@@ -165,6 +166,7 @@
       "animatedParam": 2,
       "pointerParam": null,
       "pointerTimesParam": null,
+      "qualityParam": 3,
       "clockSlots": [],
       "clockWindow": null,
       "params": [
@@ -294,9 +296,9 @@
       "source": "crates/sk-effects/shaders/glow.slang",
       "sourceSha256": "de1d06dddb28503e5a23a3494d73227436591594943428bd0ecec042d3926caa",
       "generatedSha256": {
-        "hlsl": "ac00705dd177e0943f68b1a3f565b02820bbd7b86e06cdc96d8d0e01740cab0e",
+        "hlsl": "449870fed34bed30c01c72eb5fcd1886f970468e00478fc6b1ab615cfe12a573",
         "wgsl": "74df038bda06c7624946e2938568a286df43b5746e611bb062063abbd2859868",
-        "metal": "126dcfa6642759b247aae4863d58cff845598785efc5cd6353f0abce55c74e2f"
+        "metal": "8ddaf63a85ad2c069be73d4f98efdf91396022abf73408b2cdf412544d7501ab"
       },
       "signature": "glow(<color>?, <length:radius>, <number:strength>)",
       "backdropRadiusParam": null,
@@ -304,6 +306,7 @@
       "animatedParam": null,
       "pointerParam": null,
       "pointerTimesParam": null,
+      "qualityParam": null,
       "clockSlots": [],
       "clockWindow": null,
       "params": [

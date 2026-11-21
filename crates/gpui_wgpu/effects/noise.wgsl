@@ -6,7 +6,7 @@
 //   signature:  noise(<number:amount>, <length:scale>?, <number:speed>?)
 //   slang:      2026.12
 //   schema:     11
-//   src-sha256: aac4ac76e76e5b7df379ca8f6356d05d5eb7f84b754cef6ff0712c4edddcbecd
+//   src-sha256: 4dca94745eb5795fef3b21c9d73c37a1c39707bf030e58a748f0ba393529ca9f
 //   output:     premultiplied RGBA, blended One, OneMinusSrcAlpha
 //
 // The VERTEX half lives in gpui_wgpu/src/shaders_effects.wgsl and is shared
@@ -83,6 +83,7 @@ struct Noise_0
      amount_0 : f32,
      scale_1 : f32,
      speed_0 : f32,
+     quality_0 : f32,
 };
 
 struct EffectInput_0
@@ -118,14 +119,19 @@ fn sk_hash12_0( p_0 : vec2<f32>) -> f32
 
 fn Noise_shade_0( this_0 : Noise_0,  input_0 : EffectInput_0) -> vec4<f32>
 {
+    var peak_0 : f32 = saturate(this_0.amount_0);
     var frame_0 : f32 = floor(input_0.time_1 * max(this_0.speed_0, 0.0f));
     var cell_0 : vec2<f32> = floor(input_0.px_0 / vec2<f32>(max(this_0.scale_1, 0.05000000074505806f)));
     var _S2 : f32 = frame_0 * 17.12999916076660156f;
     var _S3 : f32 = frame_0 * 7.30999994277954102f;
     var g_0 : f32 = sk_hash12_0(cell_0 + vec2<f32>(_S2, _S3));
+    if((this_0.quality_0) >= 0.5f)
+    {
+        return vec4<f32>(vec3<f32>(g_0, g_0, g_0), peak_0 * saturate(abs(g_0 - 0.5f) * 2.0f + 0.15000000596046448f));
+    }
     var _S4 : vec3<f32> = vec3<f32>(0.5f);
     var chroma_0 : vec3<f32> = mix(vec3<f32>(g_0, g_0, g_0) - _S4, vec3<f32>(sk_hash12_0(cell_0 + vec2<f32>(_S2 + 91.6999969482421875f, _S3 + 13.10000038146972656f)), g_0, sk_hash12_0(cell_0 + vec2<f32>(_S2 + 41.29999923706054688f, _S3 + 57.90000152587890625f))) - _S4, vec3<f32>(0.34999999403953552f));
-    return vec4<f32>(saturate(_S4 + chroma_0 * vec3<f32>(2.0f)), saturate(this_0.amount_0) * saturate(abs(chroma_0.y) * 2.0f + 0.15000000596046448f));
+    return vec4<f32>(saturate(_S4 + chroma_0 * vec3<f32>(2.0f)), peak_0 * saturate(abs(chroma_0.y) * 2.0f + 0.15000000596046448f));
 }
 
 fn IEffect_updatex24defaultImpl_0( this_1 : Noise_0,  input_1 : EffectInput_0) -> vec4<f32>
@@ -731,6 +737,7 @@ fn effect_fragment( _S50 : pixelInput_0, @builtin(position) sk_position_0 : vec4
     sk_material_0.amount_0 = EffectInput_param_0(sk_in_0, u32(0));
     sk_material_0.scale_1 = EffectInput_param_0(sk_in_0, u32(1));
     sk_material_0.speed_0 = EffectInput_param_0(sk_in_0, u32(2));
+    sk_material_0.quality_0 = EffectInput_param_0(sk_in_0, u32(3));
     var _S51 : pixelOutput_0 = pixelOutput_0( sk_finish_0(sk_material_0, sk_in_0) );
     return _S51;
 }

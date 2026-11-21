@@ -6,7 +6,7 @@
 //   signature:  noise(<number:amount>, <length:scale>?, <number:speed>?)
 //   slang:      2026.12
 //   schema:     11
-//   src-sha256: aac4ac76e76e5b7df379ca8f6356d05d5eb7f84b754cef6ff0712c4edddcbecd
+//   src-sha256: 4dca94745eb5795fef3b21c9d73c37a1c39707bf030e58a748f0ba393529ca9f
 //   output:     premultiplied RGBA, blended One, OneMinusSrcAlpha
 //
 // Compiled at ps_5_0 (effects only — the core gpui shaders stay at ps_4_1).
@@ -24,7 +24,7 @@
 #endif
 
 
-#line 293 "sk.slang"
+#line 300 "sk.slang"
 struct SkBounds_0
 {
     float2 origin_0;
@@ -49,7 +49,7 @@ struct SkCornerShapes_0
 };
 
 
-#line 322
+#line 329
 struct SkEffectQuad_0
 {
     uint order_0;
@@ -75,7 +75,7 @@ struct SkEffectQuad_0
 StructuredBuffer<SkEffectQuad_0 > sk_effect_quads_0 : register(t1);
 
 
-#line 372
+#line 379
 struct SLANG_ParameterGroup_GlobalParams_0
 {
     float4 sk_gamma_ratios_0;
@@ -89,13 +89,13 @@ struct SLANG_ParameterGroup_GlobalParams_0
 };
 
 
-#line 372
+#line 379
 cbuffer GlobalParams_0 : register(b0)
 {
     SLANG_ParameterGroup_GlobalParams_0 GlobalParams_0;
 }
 
-#line 346
+#line 353
 Texture2D<float4 > sk_backdrop_input_0 : register(t0);
 
 
@@ -107,7 +107,7 @@ Texture2D<float4 > sk_content_0 : register(t7);
 Texture2D<float4 > sk_history_0 : register(t8);
 
 
-#line 348
+#line 355
 Texture2D<float4 > sk_backdrop_original_0 : register(t2);
 
 
@@ -117,10 +117,11 @@ struct Noise_0
     float amount_0;
     float scale_1;
     float speed_0;
+    float quality_0;
 };
 
 
-#line 396 "sk.slang"
+#line 403 "sk.slang"
 struct EffectInput_0
 {
     float2 uv_0;
@@ -145,23 +146,24 @@ struct EffectInput_0
 };
 
 
-#line 940
+#line 947
 float sk_hash12_0(float2 p_0)
 {
     float _S1 = p_0.x;
 
-#line 942
+#line 949
     float3 p3_0 = frac(float3(_S1, p_0.y, _S1) * 0.1031000018119812f);
     float3 p3_1 = p3_0 + dot(p3_0, float3(p3_0.y + 33.3300018310546875f, p3_0.z + 33.3300018310546875f, p3_0.x + 33.3300018310546875f));
     return frac((p3_1.x + p3_1.y) * p3_1.z);
 }
 
 
-#line 30 "crates/sk-effects/shaders/noise.slang+wrapper"
+#line 32 "crates/sk-effects/shaders/noise.slang+wrapper"
 float4 Noise_shade_0(Noise_0 this_0, EffectInput_0 input_0)
 {
+    float peak_0 = saturate(this_0.amount_0);
 
-#line 38
+#line 40
     float frame_0 = floor(input_0.time_1 * max(this_0.speed_0, 0.0f));
     float2 cell_0 = floor(input_0.px_0 / max(this_0.scale_1, 0.05000000074505806f));
 
@@ -169,49 +171,55 @@ float4 Noise_shade_0(Noise_0 this_0, EffectInput_0 input_0)
 
     float _S2 = frame_0 * 17.12999916076660156f;
 
-#line 43
+#line 45
     float _S3 = frame_0 * 7.30999994277954102f;
 
-#line 43
+#line 45
     float g_0 = sk_hash12_0(cell_0 + float2(_S2, _S3));
+    if((this_0.quality_0) >= 0.5f)
+    {
 
-#line 50
+
+        return float4(float3(g_0, g_0, g_0), peak_0 * saturate(abs(g_0 - 0.5f) * 2.0f + 0.15000000596046448f));
+    }
+
+#line 58
     float3 chroma_0 = lerp(float3(g_0, g_0, g_0) - 0.5f, float3(sk_hash12_0(cell_0 + float2(_S2 + 91.6999969482421875f, _S3 + 13.10000038146972656f)), g_0, sk_hash12_0(cell_0 + float2(_S2 + 41.29999923706054688f, _S3 + 57.90000152587890625f))) - 0.5f, (float3)0.34999999403953552f);
 
-#line 55
-    return float4(saturate(0.5f + chroma_0 * 2.0f), saturate(this_0.amount_0) * saturate(abs(chroma_0.y) * 2.0f + 0.15000000596046448f));
+#line 63
+    return float4(saturate(0.5f + chroma_0 * 2.0f), peak_0 * saturate(abs(chroma_0.y) * 2.0f + 0.15000000596046448f));
 }
 
 
-#line 655 "sk.slang"
+#line 662 "sk.slang"
 float4 IEffect_updatex24defaultImpl_0(Noise_0 this_1, EffectInput_0 input_1)
 {
 
-#line 655
+#line 662
     return Noise_shade_0(this_1, input_1);
 }
 
 
-#line 28 "crates/sk-effects/shaders/noise.slang+wrapper"
+#line 30 "crates/sk-effects/shaders/noise.slang+wrapper"
 bool Noise_straightAlpha_0()
 {
 
-#line 28
+#line 30
     return true;
 }
 
 
-#line 797 "sk.slang"
+#line 804 "sk.slang"
 float4 sk_clamp_premultiplied_0(float4 color_0)
 {
 
-#line 803
+#line 810
     float a_0 = saturate(color_0.w);
     return float4(clamp(color_0.xyz, (float3)0.0f, float3(a_0, a_0, a_0)), a_0);
 }
 
 
-#line 879
+#line 886
 float4 sk_finish_0(Noise_0 material_0, EffectInput_0 i_0)
 {
     if(i_0.historyPass_0)
@@ -220,24 +228,24 @@ float4 sk_finish_0(Noise_0 material_0, EffectInput_0 i_0)
     }
     float4 shaded_0 = Noise_shade_0(material_0, i_0);
 
-#line 885
+#line 892
     float4 shaded_1;
     if(Noise_straightAlpha_0())
     {
         float _S4 = shaded_0.w;
 
-#line 888
+#line 895
         shaded_1 = float4(shaded_0.xyz * _S4, _S4);
 
-#line 886
+#line 893
     }
     else
     {
 
-#line 886
+#line 893
         shaded_1 = shaded_0;
 
-#line 886
+#line 893
     }
 
 
@@ -247,93 +255,93 @@ float4 sk_finish_0(Noise_0 material_0, EffectInput_0 i_0)
 
     float coverage_1 = saturate(0.5f - (i_0.sd_0 - i_0.bleed_1)) * saturate(i_0.opacity_1) * i_0.clip_0;
 
-#line 893
+#line 900
     float4 result_0;
 
-#line 898
+#line 905
     if(i_0.hasBackdrop_0)
     {
 
-#line 898
+#line 905
         result_0 = lerp(sk_backdrop_original_0.SampleLevel(sk_clamp_sampler_0, i_0.uv_0, 0.0f), shaded_2, (float4)coverage_1);
 
-#line 898
+#line 905
     }
     else
     {
 
-#line 898
+#line 905
         result_0 = shaded_2 * coverage_1;
 
-#line 898
+#line 905
     }
 
-#line 908
+#line 915
     return sk_clamp_premultiplied_0(result_0);
 }
 
 
-#line 670
+#line 677
 float sk_pick_corner_radius_0(float2 center_to_point_0, SkCorners_0 radii_0)
 {
 
-#line 676
+#line 683
     bool _S5 = (center_to_point_0.x) < 0.0f;
 
-#line 676
+#line 683
     float top_0;
 
-#line 676
+#line 683
     if(_S5)
     {
 
-#line 676
+#line 683
         top_0 = radii_0.top_left_0;
 
-#line 676
+#line 683
     }
     else
     {
 
-#line 676
+#line 683
         top_0 = radii_0.top_right_0;
 
-#line 676
+#line 683
     }
 
-#line 676
+#line 683
     float bottom_0;
     if(_S5)
     {
 
-#line 677
+#line 684
         bottom_0 = radii_0.bottom_left_0;
 
-#line 677
+#line 684
     }
     else
     {
 
-#line 677
+#line 684
         bottom_0 = radii_0.bottom_right_0;
 
-#line 677
+#line 684
     }
     if((center_to_point_0.y) < 0.0f)
     {
 
-#line 678
+#line 685
     }
     else
     {
 
-#line 678
+#line 685
         top_0 = bottom_0;
 
-#line 678
+#line 685
     }
 
-#line 678
+#line 685
     return top_0;
 }
 
@@ -357,87 +365,87 @@ uint sk_pick_corner_shape_0(float2 center_to_point_2, SkCornerShapes_0 shapes_0)
 {
     bool _S6 = (center_to_point_2.x) < 0.0f;
 
-#line 699
+#line 706
     uint top_1;
 
-#line 699
+#line 706
     if(_S6)
     {
 
-#line 699
+#line 706
         top_1 = shapes_0.top_left_1;
 
-#line 699
+#line 706
     }
     else
     {
 
-#line 699
+#line 706
         top_1 = shapes_0.top_right_1;
 
-#line 699
+#line 706
     }
 
-#line 699
+#line 706
     uint bottom_1;
     if(_S6)
     {
 
-#line 700
+#line 707
         bottom_1 = shapes_0.bottom_left_1;
 
-#line 700
+#line 707
     }
     else
     {
 
-#line 700
+#line 707
         bottom_1 = shapes_0.bottom_right_1;
 
-#line 700
+#line 707
     }
     if((center_to_point_2.y) < 0.0f)
     {
 
-#line 701
+#line 708
     }
     else
     {
 
-#line 701
+#line 708
         top_1 = bottom_1;
 
-#line 701
+#line 708
     }
 
-#line 701
+#line 708
     return top_1;
 }
 
 float sk_shape_pow_0(float x_0, float e_0)
 {
 
-#line 704
+#line 711
     float _S7;
 
     if(x_0 <= 0.0f)
     {
 
-#line 706
+#line 713
         _S7 = 0.0f;
 
-#line 706
+#line 713
     }
     else
     {
 
-#line 706
+#line 713
         _S7 = (exp2((e_0 * log2(x_0))));
 
-#line 706
+#line 713
     }
 
-#line 706
+#line 713
     return _S7;
 }
 
@@ -448,44 +456,44 @@ float sk_shaped_corner_piece_0(float2 q_0, float r_0, uint word_0, float2 inset_
 {
     uint code_0 = word_0 & 4095U;
 
-#line 714
+#line 721
     bool _S8;
     if(code_0 == 0U)
     {
 
-#line 715
+#line 722
         _S8 = true;
 
-#line 715
+#line 722
     }
     else
     {
 
-#line 715
+#line 722
         _S8 = code_0 == 4095U;
 
-#line 715
+#line 722
     }
 
-#line 715
+#line 722
     if(_S8)
     {
 
-#line 715
+#line 722
         _S8 = true;
 
-#line 715
+#line 722
     }
     else
     {
 
-#line 715
+#line 722
         _S8 = r_0 <= 0.0f;
 
-#line 715
+#line 722
     }
 
-#line 715
+#line 722
     if(_S8)
     {
         return -3.00000000549775576e+38f;
@@ -496,59 +504,59 @@ float sk_shaped_corner_piece_0(float2 q_0, float r_0, uint word_0, float2 inset_
     float2 b_0 = float2(0.0f, r_0);
     float _S9 = inset_0.x;
 
-#line 723
+#line 730
     if(_S9 > 0.0f)
     {
 
-#line 723
+#line 730
         _S8 = true;
 
-#line 723
+#line 730
     }
     else
     {
 
-#line 723
+#line 730
         _S8 = (inset_0.y) > 0.0f;
 
-#line 723
+#line 730
     }
 
-#line 723
+#line 730
     float start_0;
 
-#line 723
+#line 730
     float2 a_2;
 
-#line 723
+#line 730
     float2 b_1;
 
-#line 723
+#line 730
     if(_S8)
     {
         float cp_0 = saturate(2.41421365737915039f * h_0 - 0.70710676908493042f);
         float _S10 = inset_0.y;
 
-#line 726
+#line 733
         float d_0 = clamp(_S9 - _S10, - r_0, r_0);
         if(h_0 <= 0.5f)
         {
 
-#line 727
+#line 734
             _S8 = (abs(d_0)) >= r_0;
 
-#line 727
+#line 734
         }
         else
         {
 
-#line 727
+#line 734
             _S8 = false;
 
-#line 727
+#line 734
         }
 
-#line 727
+#line 734
         if(_S8)
         {
             return -3.00000000549775576e+38f;
@@ -561,94 +569,94 @@ float sk_shaped_corner_piece_0(float2 q_0, float r_0, uint word_0, float2 inset_
             if(convex_0)
             {
 
-#line 736
+#line 743
                 start_0 = 1.0f - (1.0f - bevel_0) * 2.0f * (1.0f - cp_0);
 
-#line 736
+#line 743
             }
             else
             {
 
-#line 736
+#line 743
                 start_0 = bevel_0 * 2.0f * cp_0;
 
-#line 736
+#line 743
             }
 
-#line 732
+#line 739
         }
         else
         {
 
-#line 732
+#line 739
             start_0 = cp_0;
 
-#line 732
+#line 739
         }
 
-#line 738
+#line 745
         float end_0 = 2.0f * cp_0 - start_0;
 
         float2 _S11 = b_0 + normalize(float2(end_0, 1.0f - end_0)) * _S9;
 
-#line 740
+#line 747
         a_2 = a_1 + normalize(float2(1.0f - start_0, start_0)) * _S10;
 
-#line 740
+#line 747
         b_1 = _S11;
 
-#line 723
+#line 730
     }
     else
     {
 
-#line 723
+#line 730
         a_2 = a_1;
 
-#line 723
+#line 730
         b_1 = b_0;
 
-#line 723
+#line 730
     }
 
-#line 742
+#line 749
     float _S12 = a_2.x;
 
-#line 742
+#line 749
     float _S13 = b_1.x;
 
-#line 742
+#line 749
     float _S14 = _S12 - _S13;
 
-#line 742
+#line 749
     float _S15 = b_1.y;
 
-#line 742
+#line 749
     float _S16 = a_2.y;
 
-#line 742
+#line 749
     float _S17 = _S15 - _S16;
 
-#line 742
+#line 749
     float2 axes_0 = float2(_S14, _S17);
     if(_S14 <= 0.0f)
     {
 
-#line 743
+#line 750
         _S8 = true;
 
-#line 743
+#line 750
     }
     else
     {
 
-#line 743
+#line 750
         _S8 = _S17 <= 0.0f;
 
-#line 743
+#line 750
     }
 
-#line 743
+#line 750
     if(_S8)
     {
         return -3.00000000549775576e+38f;
@@ -656,47 +664,47 @@ float sk_shaped_corner_piece_0(float2 q_0, float r_0, uint word_0, float2 inset_
     if(convex_0)
     {
 
-#line 747
+#line 754
         start_0 = h_0;
 
-#line 747
+#line 754
     }
     else
     {
 
-#line 747
+#line 754
         start_0 = 1.0f - h_0;
 
-#line 747
+#line 754
     }
 
-#line 747
+#line 754
     float n_0 = -0.69314718246459961f / min(log(start_0), -0.00009999999747379f);
     if(convex_0)
     {
 
-#line 748
+#line 755
         a_2 = (float2(_S12, _S15) - q_0) / axes_0;
 
-#line 748
+#line 755
     }
     else
     {
 
-#line 748
+#line 755
         a_2 = (q_0 - float2(_S13, _S16)) / axes_0;
 
-#line 748
+#line 755
     }
 
-#line 748
+#line 755
     float2 uv_1 = max(a_2, float2(0.0f, 0.0f));
     float _S18 = uv_1.x;
 
-#line 749
+#line 756
     float _S19 = uv_1.y;
 
-#line 749
+#line 756
     float _S20 = max(_S18, _S19);
     if(_S20 <= 0.0f)
     {
@@ -704,67 +712,67 @@ float sk_shaped_corner_piece_0(float2 q_0, float r_0, uint word_0, float2 inset_
         if(convex_0)
         {
 
-#line 753
+#line 760
             start_0 = - _S21;
 
-#line 753
+#line 760
         }
         else
         {
 
-#line 753
+#line 760
             start_0 = _S21;
 
-#line 753
+#line 760
         }
 
-#line 753
+#line 760
         return start_0;
     }
     float l_0 = _S20 * sk_shape_pow_0(sk_shape_pow_0(_S18 / _S20, n_0) + sk_shape_pow_0(_S19 / _S20, n_0), 1.0f / n_0);
 
-#line 755
+#line 762
     float2 slope_0;
 
     if(n_0 > 1.00010001659393311f)
     {
 
-#line 757
+#line 764
         float _S22 = n_0 - 1.0f;
 
-#line 757
+#line 764
         slope_0 = float2(sk_shape_pow_0(_S18 / l_0, _S22), sk_shape_pow_0(_S19 / l_0, _S22));
 
-#line 757
+#line 764
     }
     else
     {
 
-#line 757
+#line 764
         slope_0 = float2(1.0f, 1.0f);
 
-#line 757
+#line 764
     }
 
     float distance_0 = (l_0 - 1.0f) / max(length(slope_0 / axes_0), 9.99999997475242708e-07f);
     if(convex_0)
     {
 
-#line 760
+#line 767
         start_0 = distance_0;
 
-#line 760
+#line 767
     }
     else
     {
 
-#line 760
+#line 767
         start_0 = - distance_0;
 
-#line 760
+#line 767
     }
 
-#line 760
+#line 767
     return start_0;
 }
 
@@ -785,162 +793,162 @@ float sk_shaped_quad_sdf_0(float2 point_1, SkBounds_0 bounds_2, SkCorners_0 radi
 }
 
 
-#line 471
+#line 478
 float4 EffectInput_backdropAt_0(EffectInput_0 this_2, float2 uv_2)
 {
 
-#line 471
+#line 478
     float4 _S23;
 
 
     if(this_2.hasBackdrop_0)
     {
 
-#line 474
+#line 481
         _S23 = sk_backdrop_input_0.SampleLevel(sk_clamp_sampler_0, uv_2, 0.0f);
 
-#line 474
+#line 481
     }
     else
     {
 
-#line 474
+#line 481
         _S23 = float4(0.0f, 0.0f, 0.0f, 0.0f);
 
-#line 474
+#line 481
     }
 
-#line 473
+#line 480
     return _S23;
 }
 
 
-#line 510
+#line 517
 float4 EffectInput_contentAt_0(EffectInput_0 this_3, float2 uv_3)
 {
 
-#line 510
+#line 517
     float4 _S24;
 
 
     if(this_3.hasContent_0)
     {
 
-#line 513
+#line 520
         _S24 = sk_content_0.SampleLevel(sk_clamp_sampler_0, uv_3, 0.0f);
 
-#line 513
+#line 520
     }
     else
     {
 
-#line 513
+#line 520
         _S24 = float4(0.0f, 0.0f, 0.0f, 0.0f);
 
-#line 513
+#line 520
     }
 
-#line 512
+#line 519
     return _S24;
 }
 
 
-#line 550
+#line 557
 float2 EffectInput_historySize_0(EffectInput_0 this_4)
 {
     return max(round(sk_effect_quads_0[this_4.quad_0].bounds_0.size_0), float2(1.0f, 1.0f));
 }
 
 
-#line 535
+#line 542
 float4 EffectInput_historyAtPx_0(EffectInput_0 this_5, float2 px_1)
 {
     float2 size_2 = EffectInput_historySize_0(this_5);
 
-#line 537
+#line 544
     float4 _S25;
 
     if(this_5.hasHistory_0)
     {
 
-#line 539
+#line 546
         _S25 = sk_history_0.SampleLevel(sk_clamp_sampler_0, (px_1 + this_5.bleed_1) / size_2, 0.0f);
 
-#line 539
+#line 546
     }
     else
     {
 
-#line 539
+#line 546
         _S25 = float4(0.0f, 0.0f, 0.0f, 0.0f);
 
-#line 539
+#line 546
     }
 
-#line 538
+#line 545
     return _S25;
 }
 
 
-#line 784
+#line 791
 float sk_content_mask_coverage_0(float2 position_0, SkBounds_0 mask_0, SkCorners_0 radii_3, SkCornerShapes_0 shapes_2)
 {
 
-#line 784
+#line 791
     bool _S26;
 
     if((radii_3.top_left_0) == 0.0f)
     {
 
-#line 786
+#line 793
         _S26 = (radii_3.top_right_0) == 0.0f;
 
-#line 786
+#line 793
     }
     else
     {
 
-#line 786
+#line 793
         _S26 = false;
 
-#line 786
+#line 793
     }
 
-#line 786
+#line 793
     if(_S26)
     {
 
-#line 786
+#line 793
         _S26 = (radii_3.bottom_right_0) == 0.0f;
 
-#line 786
+#line 793
     }
     else
     {
 
-#line 786
+#line 793
         _S26 = false;
 
-#line 786
+#line 793
     }
     if(_S26)
     {
 
-#line 787
+#line 794
         _S26 = (radii_3.bottom_left_0) == 0.0f;
 
-#line 787
+#line 794
     }
     else
     {
 
-#line 787
+#line 794
         _S26 = false;
 
-#line 787
+#line 794
     }
 
-#line 786
+#line 793
     if(_S26)
     {
 
@@ -950,56 +958,56 @@ float sk_content_mask_coverage_0(float2 position_0, SkBounds_0 mask_0, SkCorners
 }
 
 
-#line 808
+#line 815
 EffectInput_0 sk_begin_0(uint id_0, float4 frag_position_0)
 {
 
-#line 808
+#line 815
     uint _S27 = sk_effect_quads_0[id_0].flags_0;
 
 
     bool history_pass_0 = ((sk_effect_quads_0[id_0].flags_0) & 8U) != 0U;
 
-#line 811
+#line 818
     float2 position_1;
 
 
     if(history_pass_0)
     {
 
-#line 814
+#line 821
         position_1 = sk_effect_quads_0[id_0].bounds_0.origin_0 + frag_position_0.xy;
 
-#line 814
+#line 821
     }
     else
     {
 
-#line 814
+#line 821
         position_1 = frag_position_0.xy;
 
-#line 814
+#line 821
     }
 
 
     float2 uv_4 = position_1 / GlobalParams_0.sk_viewport_size_0;
 
-#line 817
+#line 824
     SkCorners_0 _S28 = sk_effect_quads_0[id_0].corner_radii_0;
 
-#line 817
+#line 824
     float _S29 = sk_effect_quads_0[id_0].bleed_0;
 
-#line 825
+#line 832
     float _S30 = sk_quad_sdf_0(position_1, sk_effect_quads_0[id_0].bounds_0, sk_effect_quads_0[id_0].corner_radii_0) + sk_effect_quads_0[id_0].bleed_0;
 
     float2 element_origin_0 = sk_effect_quads_0[id_0].bounds_0.origin_0 + sk_effect_quads_0[id_0].bleed_0;
     float2 element_size_0 = max(sk_effect_quads_0[id_0].bounds_0.size_0 - 2.0f * sk_effect_quads_0[id_0].bleed_0, float2(1.0f, 1.0f));
 
-#line 828
+#line 835
     SkCornerShapes_0 shapes_3 = sk_effect_quads_0[id_0].corner_shapes_0;
 
-#line 828
+#line 835
     float sd_element_0;
 
 
@@ -1015,28 +1023,28 @@ EffectInput_0 sk_begin_0(uint id_0, float4 frag_position_0)
         radii_4.bottom_right_0 = max(_S28.bottom_right_0 - _S29, 0.0f);
         radii_4.bottom_left_0 = max(_S28.bottom_left_0 - _S29, 0.0f);
 
-#line 841
+#line 848
         sd_element_0 = sk_shaped_quad_sdf_0(position_1, element_0, radii_4, shapes_3);
 
-#line 832
+#line 839
     }
     else
     {
 
-#line 832
+#line 839
         sd_element_0 = _S30;
 
-#line 832
+#line 839
     }
 
-#line 845
+#line 852
     bool has_backdrop_0 = (_S27 & 1U) != 0U;
 
     EffectInput_0 i_1;
     i_1.uv_0 = uv_4;
     float2 _S31 = position_1 - element_origin_0;
 
-#line 849
+#line 856
     i_1.px_0 = _S31;
     i_1.size_1 = element_size_0;
     i_1.local_0 = _S31 / element_size_0;
@@ -1059,14 +1067,14 @@ EffectInput_0 sk_begin_0(uint id_0, float4 frag_position_0)
 }
 
 
-#line 455
+#line 462
 float EffectInput_param_0(EffectInput_0 this_6, uint slot_0)
 {
     return sk_effect_quads_0[this_6.quad_0].params_0[slot_0];
 }
 
 
-#line 76 "crates/sk-effects/shaders/noise.slang+wrapper"
+#line 84 "crates/sk-effects/shaders/noise.slang+wrapper"
 float4 effect_fragment(nointerpolation uint sk_id_0 : TEXCOORD0, float4 sk_position_0 : SV_Position) : SV_TARGET
 {
     EffectInput_0 sk_in_0 = sk_begin_0(sk_id_0, sk_position_0);
@@ -1077,6 +1085,7 @@ float4 effect_fragment(nointerpolation uint sk_id_0 : TEXCOORD0, float4 sk_posit
     sk_material_0.amount_0 = EffectInput_param_0(sk_in_0, 0U);
     sk_material_0.scale_1 = EffectInput_param_0(sk_in_0, 1U);
     sk_material_0.speed_0 = EffectInput_param_0(sk_in_0, 2U);
+    sk_material_0.quality_0 = EffectInput_param_0(sk_in_0, 3U);
 
     return sk_finish_0(sk_material_0, sk_in_0);
 }

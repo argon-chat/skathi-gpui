@@ -1868,6 +1868,9 @@ pub struct Window {
     /// vue-native fork: per element and effect, how far its `[SkAnimated]`
     /// speed has advanced it ([`VnEffectPhase`]).
     vn_effect_phases: FxHashMap<u64, VnEffectPhase>,
+    // All reduced-cadence effects in this window share one timer.
+    vn_effect_ticks: FxHashMap<EntityId, Instant>,
+    vn_effect_wakeup: Option<(Instant, Task<()>)>,
     /// vue-native fork: the scope a draw deferred now goes to, while
     /// prepainting.
     vn_defer_scope: Option<VnDeferScope>,
@@ -3129,6 +3132,8 @@ impl Window {
             vn_effect_pointer: VnEffectPointer::new(hovered.get()),
             vn_effect_element: 0,
             vn_effect_phases: FxHashMap::default(),
+            vn_effect_ticks: FxHashMap::default(),
+            vn_effect_wakeup: None,
             vn_defer_scope: None,
             vn_scopes_painted: FxHashSet::default(),
             pointer_inside: hovered.get(),
@@ -4275,6 +4280,55 @@ impl Window {
             .render_to_image(&self.rendered_frame.scene)
     }
 
+    /// Effects actually submitted in the last frame, including isolated content layers.
+    pub fn vn_painted_effects(&self) -> impl Iterator<Item = &EffectQuad> {
+        let scene = &self.rendered_frame.scene;
+        scene
+            .effect_quads
+            .iter()
+            .chain(scene.vn_effect_draws.iter().map(|d| &d.quad))
+    }
+
+    /// Whether this window currently needs automatic power and pressure updates.
+    pub fn vn_uses_auto_effect_quality(&self) -> bool {
+        self.vn_painted_effects()
+            .any(|q| q.flags & crate::EFFECT_FLAG_AUTO_QUALITY != 0)
+    }
+
+    fn schedule_effect_wakeup(&mut self, cx: &App) {
+        let Some(deadline) = self.vn_effect_ticks.values().min().copied() else {
+            return;
+        };
+        if self
+            .vn_effect_wakeup
+            .as_ref()
+            .is_some_and(|(armed, _)| *armed <= deadline)
+        {
+            return;
+        }
+        self.vn_effect_wakeup = Some((
+            deadline,
+            self.spawn(cx, async move |cx| {
+                cx.background_executor
+                    .timer(deadline.saturating_duration_since(Instant::now()))
+                    .await;
+                let _ = cx.update(|window, cx| {
+                    window.vn_effect_wakeup.take();
+                    let now = Instant::now();
+                    window.vn_effect_ticks.retain(|view, due| {
+                        if *due <= now {
+                            cx.notify(*view);
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                    window.schedule_effect_wakeup(cx);
+                });
+            }),
+        ));
+    }
+
     /// Borrows the most recently rendered frame's scene, so benchmarks can validate their
     /// output and report batch counts without cloning it.
     #[cfg(feature = "bench-support")]
@@ -4935,6 +4989,7 @@ impl Window {
         if !cx.mode.skip_drawing() {
             self.vn_scopes_painted.clear();
             self.draw_roots(cx);
+            self.schedule_effect_wakeup(cx);
             let now = crate::effect_clock_seconds();
             self.vn_effect_phases
                 .retain(|_, phase| now - phase.at < VnEffectPhase::KEEP);
@@ -7530,7 +7585,40 @@ impl Window {
             return None;
         };
         let bleed = bleed.scale(scale_factor);
-        let now = crate::effect_clock_seconds();
+        let elapsed = crate::scene::effect_clock_elapsed();
+        let real_time = elapsed.as_secs_f32();
+        let mut flags = spec.flags;
+        let mut tier = 0;
+        if let Some(param) = spec
+            .quality_param
+            .and_then(|slot| params.get_mut(usize::from(slot)))
+        {
+            if draw_bounds
+                .intersect(&self.snapped_content_mask().bounds)
+                .is_empty()
+            {
+                return None;
+            }
+            if spec.quality == crate::EffectQuality::Auto {
+                flags |= crate::EFFECT_FLAG_AUTO_QUALITY;
+            }
+            tier = spec.quality.tier();
+            *param = f32::from(tier);
+        }
+        // Quantize the shader clock even when another animation repaints the window faster.
+        // Keep the deadline in f64 even once long uptime reduces GPU clock precision.
+        let hz = match tier {
+            1 => Some(30.),
+            2 => Some(15.),
+            _ => None,
+        };
+        let tick = hz.map(|hz| {
+            let seconds = elapsed.as_secs_f64();
+            let index = (seconds * hz).floor();
+            let remaining = ((index + 1.) / hz - seconds).max(0.);
+            ((index / hz) as f32, Duration::from_secs_f64(remaining))
+        });
+        let now = tick.map_or(real_time, |(time, _)| time);
 
         if let Some(slot) = spec.pointer_param.map(usize::from)
             && slot + 2 <= params.len()
@@ -7567,9 +7655,17 @@ impl Window {
 
         let mut clocked = spec;
         clocked.params = params;
-        if spec.animated || clocked.clock_running(now) {
-            // Nothing else in the frame is going to ask for the next one.
-            self.request_animation_frame();
+        if spec.animated || clocked.clock_running(real_time) {
+            if let Some((_, delay)) = tick {
+                let due = Instant::now() + delay;
+                let view = self.current_view();
+                self.vn_effect_ticks
+                    .entry(view)
+                    .and_modify(|d| *d = (*d).min(due))
+                    .or_insert(due);
+            } else {
+                self.request_animation_frame();
+            }
         }
 
         Some(EffectQuad {
@@ -7584,7 +7680,7 @@ impl Window {
             bleed,
             backdrop_blur_radius: px(spec.backdrop_blur_radius()).scale(scale_factor),
             scale: scale_factor,
-            flags: spec.flags,
+            flags,
             corner_shapes: CornerShapes::new(&corner_shapes),
         })
     }

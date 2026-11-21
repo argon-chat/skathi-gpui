@@ -2146,6 +2146,47 @@ pub const EFFECT_FLAG_HISTORY: u32 = 4;
 /// the next history state instead of the element's pixels.
 pub const EFFECT_FLAG_HISTORY_PASS: u32 = 8;
 
+/// Host-only flag identifying visible consumers of automatic effect quality.
+pub(crate) const EFFECT_FLAG_AUTO_QUALITY: u32 = 16;
+
+/// CSS quality choice for an effect with a host-filled quality slot.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(JsonSchema))]
+pub enum EffectQuality {
+    /// Follow the host's energy and compute pressure policy.
+    #[default]
+    Auto,
+    /// Render every detail at display cadence.
+    Full,
+    /// Prefer cheaper shading and up to 30 animation ticks per second.
+    Reduced,
+    /// Prefer the cheapest path and up to 15 animation ticks per second.
+    Minimal,
+}
+
+static AUTO_EFFECT_TIER: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Publishes the tier used by subsequent paints of auto-quality effects.
+pub fn set_auto_effect_quality(quality: EffectQuality) {
+    let tier = match quality {
+        EffectQuality::Reduced => 1,
+        EffectQuality::Minimal => 2,
+        _ => 0,
+    };
+    AUTO_EFFECT_TIER.store(tier, std::sync::atomic::Ordering::Relaxed);
+}
+
+impl EffectQuality {
+    pub(crate) fn tier(self) -> u8 {
+        match self {
+            Self::Auto => AUTO_EFFECT_TIER.load(std::sync::atomic::Ordering::Relaxed),
+            Self::Full => 0,
+            Self::Reduced => 1,
+            Self::Minimal => 2,
+        }
+    }
+}
+
 /// CSS `transform`, as the cascade computed it, carried on [`crate::Style`]
 /// and turned into a [`TransformationMatrix`] at paint time by
 /// [`crate::Style::paint`].
@@ -2405,6 +2446,12 @@ pub struct EffectSpec {
     /// `Some(i)`: the painter writes the pointer's last move, entry into the
     /// window and exit from it, on the effect clock, into `params[i..i + 3]`.
     pub pointer_times_param: Option<u8>,
+    /// Scalar slot for the effective quality tier. Absent in legacy shaders.
+    #[serde(default)]
+    pub quality_param: Option<u8>,
+    /// Quality chosen by the element's style.
+    #[serde(default)]
+    pub quality: EffectQuality,
     /// Bit *i* set means `params[i]` is a time on the effect clock; the
     /// element keeps repainting until `clock_window` seconds after the latest.
     pub clock_mask: u32,
@@ -2431,6 +2478,8 @@ impl EffectSpec {
         animated_param: None,
         pointer_param: None,
         pointer_times_param: None,
+        quality_param: None,
+        quality: EffectQuality::Auto,
         clock_mask: 0,
         clock_window: 0.,
         params: [0.; EFFECT_PARAM_SLOTS],
@@ -2643,10 +2692,13 @@ static EFFECT_CLOCK_ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync:
 /// for the first couple of hours instead of quantising to ~64 ms the way a
 /// UNIX-epoch value would.
 pub fn effect_clock_seconds() -> f32 {
+    effect_clock_elapsed().as_secs_f32()
+}
+
+pub(crate) fn effect_clock_elapsed() -> std::time::Duration {
     EFFECT_CLOCK_ORIGIN
         .get_or_init(std::time::Instant::now)
         .elapsed()
-        .as_secs_f32()
 }
 
 /// Anchors the effect clock, so an embedder can make it share a zero with its

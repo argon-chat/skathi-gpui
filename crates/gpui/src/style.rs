@@ -689,6 +689,9 @@ pub struct Style {
     /// the property entirely anyway, so nothing renders differently there.
     pub vn_effect: Option<EffectSpec>,
 
+    /// Local CSS quality selection for effects declaring [SkQuality].
+    pub vn_effect_quality: crate::EffectQuality,
+
     /// A `--shading` transition between different effects: the outgoing one,
     /// painted beneath `vn_effect` while they cross-fade.
     pub vn_effect_fade: Option<EffectCrossFade>,
@@ -713,6 +716,12 @@ pub struct Style {
     /// when it was inserted and the pointer is mapped back through the inverse,
     /// so a rotated button is clickable where it is *drawn*.
     pub vn_transform: Option<TransformSpec>,
+    /// Independent CSS translation applied outside the transform list.
+    pub vn_translate: Option<TransformSpec>,
+    /// Independent CSS rotation applied outside the transform list.
+    pub vn_rotate: Option<TransformSpec>,
+    /// Whether the consumer omits this box's content while retaining the box itself.
+    pub vn_content_hidden: Option<bool>,
 
     /// The text style of this element
     #[refineable]
@@ -1734,12 +1743,22 @@ impl Style {
     /// Shared by paint (which pushes it onto the primitives) and prepaint
     /// (which records it on the hitbox), so the picture and the hit test can
     /// never disagree about where the element is.
-    pub fn transform_matrix(&self, bounds: Bounds<Pixels>, scale_factor: f32) -> TransformationMatrix
-    {
-        self.vn_transform
-            .filter(|t| !t.is_identity())
-            .map(|t| t.to_matrix(bounds, scale_factor))
-            .unwrap_or_else(TransformationMatrix::unit)
+    pub fn transform_matrix(
+        &self,
+        bounds: Bounds<Pixels>,
+        scale_factor: f32,
+    ) -> TransformationMatrix {
+        let origin = self
+            .vn_transform
+            .map_or(TransformSpec::CENTRE_ORIGIN, |t| t.origin);
+        [self.vn_translate, self.vn_rotate, self.vn_transform]
+            .into_iter()
+            .flatten()
+            .filter(|transform| !transform.is_identity())
+            .fold(TransformationMatrix::unit(), |matrix, mut transform| {
+                transform.origin = origin;
+                matrix.compose(transform.to_matrix(bounds, scale_factor))
+            })
     }
 
     /// Paints the background of an element styled with this style.
@@ -1836,6 +1855,7 @@ impl Style {
         let reduce_motion = cx.reduce_motion();
         let layer = |mut spec: EffectSpec, weight: f32| {
             (spec.is_some() && !self.vn_mask_ring && weight > 0.).then(|| {
+                spec.quality = self.vn_effect_quality;
                 spec.animated &= !reduce_motion;
                 if reduce_motion {
                     spec.clock_mask = 0;
@@ -2242,8 +2262,12 @@ impl Default for Style {
             vn_shadow_under_box: false,
             backdrop_blur: None,
             vn_effect: None,
+            vn_effect_quality: crate::EffectQuality::Auto,
             vn_effect_fade: None,
             vn_transform: None,
+            vn_translate: None,
+            vn_rotate: None,
+            vn_content_hidden: None,
             text: TextStyleRefinement::default(),
             mouse_cursor: None,
             opacity: None,
