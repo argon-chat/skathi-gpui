@@ -441,11 +441,48 @@ impl MacPlatform {
                         // we don't have a NSTextView/NSTextField to enable them on.
                         Some(gpui::OsAction::Undo) => sel!(handleGPUIMenuItem:),
                         Some(gpui::OsAction::Redo) => sel!(handleGPUIMenuItem:),
+                        Some(gpui::OsAction::About) => sel!(orderFrontStandardAboutPanel:),
+                        Some(gpui::OsAction::Hide) => sel!(hide:),
+                        Some(gpui::OsAction::HideOthers) => sel!(hideOtherApplications:),
+                        Some(gpui::OsAction::ShowAll) => sel!(unhideAllApplications:),
+                        Some(gpui::OsAction::Quit) => sel!(terminate:),
+                        Some(gpui::OsAction::Minimize) => sel!(performMiniaturize:),
+                        Some(gpui::OsAction::Zoom) => sel!(performZoom:),
+                        Some(gpui::OsAction::Close) => sel!(performClose:),
+                        Some(gpui::OsAction::ToggleFullScreen) => sel!(toggleFullScreen:),
+                        Some(gpui::OsAction::BringAllToFront) => sel!(arrangeInFront:),
                         None => sel!(handleGPUIMenuItem:),
                     };
+                    // The standard key equivalent of an AppKit action no binding names.
+                    let standard = match os_action {
+                        Some(gpui::OsAction::Hide) => Some(("h", NSEventModifierFlags::Command)),
+                        Some(gpui::OsAction::HideOthers) => Some((
+                            "h",
+                            NSEventModifierFlags::Command | NSEventModifierFlags::Option,
+                        )),
+                        Some(gpui::OsAction::Quit) => Some(("q", NSEventModifierFlags::Command)),
+                        Some(gpui::OsAction::Minimize) => {
+                            Some(("m", NSEventModifierFlags::Command))
+                        }
+                        Some(gpui::OsAction::Close) => Some(("w", NSEventModifierFlags::Command)),
+                        Some(gpui::OsAction::ToggleFullScreen) => Some((
+                            "f",
+                            NSEventModifierFlags::Command | NSEventModifierFlags::Control,
+                        )),
+                        _ => None,
+                    }
+                    .filter(|_| keystrokes.is_none());
 
                     let item;
-                    if let Some(keystrokes) = keystrokes {
+                    if let Some((key, mask)) = standard {
+                        item = NSMenuItem::initWithTitle_action_keyEquivalent(
+                            NSMenuItem::alloc(self.1),
+                            &NSString::from_str(name),
+                            Some(selector),
+                            &NSString::from_str(key),
+                        );
+                        item.setKeyEquivalentModifierMask(mask);
+                    } else if let Some(keystrokes) = keystrokes {
                         if keystrokes.len() == 1 {
                             let keystroke = &keystrokes[0];
                             let mut mask = NSEventModifierFlags::empty();

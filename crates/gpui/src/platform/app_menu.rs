@@ -326,6 +326,36 @@ pub enum OsAction {
 
     /// The 'redo' action
     Redo,
+
+    /// The standard About panel
+    About,
+
+    /// Hide this application (⌘H)
+    Hide,
+
+    /// Hide the other applications (⌥⌘H)
+    HideOthers,
+
+    /// Show every application
+    ShowAll,
+
+    /// Quit through the platform's terminate request (⌘Q)
+    Quit,
+
+    /// Minimize the key window (⌘M)
+    Minimize,
+
+    /// Zoom the key window
+    Zoom,
+
+    /// Close the key window as its close button does (⌘W)
+    Close,
+
+    /// Enter or leave full screen on the key window (⌃⌘F)
+    ToggleFullScreen,
+
+    /// Bring every window of the application to the front
+    BringAllToFront,
 }
 
 pub(crate) fn init_app_menus(platform: &dyn Platform, cx: &App) {
