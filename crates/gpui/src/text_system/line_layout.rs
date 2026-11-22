@@ -71,8 +71,108 @@ pub struct LineLayout {
 pub struct ShapedRun {
     /// The font id for this run
     pub font_id: FontId,
+    /// vue-native fork: the font size this run was shaped at. A platform text system leaves
+    /// it, `ascent` and `descent` as [`ShapedRun::new`] does; the layout cache fills them in.
+    pub font_size: Pixels,
+    /// vue-native fork: the run's extent above the baseline, at its own size.
+    pub ascent: Pixels,
+    /// vue-native fork: the run's extent below the baseline, at its own size.
+    pub descent: Pixels,
+    /// vue-native fork: the run holds the place of an [`InlineBox`]; its one glyph is not painted.
+    pub inline_box: bool,
     /// The glyphs that make up this run
     pub glyphs: Vec<ShapedGlyph>,
+}
+
+impl ShapedRun {
+    /// A run of glyphs in `font_id`, as a platform text system produces it.
+    pub fn new(font_id: FontId, glyphs: Vec<ShapedGlyph>) -> Self {
+        Self {
+            font_id,
+            font_size: px(0.),
+            ascent: px(0.),
+            descent: px(0.),
+            inline_box: false,
+            glyphs,
+        }
+    }
+
+    pub(crate) fn with_glyphs(&self, glyphs: Vec<ShapedGlyph>) -> Self {
+        Self {
+            font_id: self.font_id,
+            font_size: self.font_size,
+            ascent: self.ascent,
+            descent: self.descent,
+            inline_box: self.inline_box,
+            glyphs,
+        }
+    }
+}
+
+/// vue-native fork: room reserved in a line for an element placed there, such as an
+/// editor's atom. The run it is set on lays out as one unbreakable glyph of this size.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct InlineBox {
+    /// The advance the box takes in the line.
+    pub width: Pixels,
+    /// How far the box reaches above the baseline.
+    pub ascent: Pixels,
+    /// How far the box reaches below the baseline.
+    pub descent: Pixels,
+}
+
+/// vue-native fork: where one visual line of a layout sits, relative to the top of the layout.
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct LineBox {
+    /// The line's top.
+    pub top: Pixels,
+    /// The line's height.
+    pub height: Pixels,
+    /// The baseline's distance from the line's top.
+    pub baseline: Pixels,
+}
+
+/// The visual lines of a layout: all alike unless its runs differ in size or hold inline boxes.
+pub(crate) enum LineBoxes {
+    Uniform { height: Pixels, baseline: Pixels },
+    Mixed(SmallVec<[LineBox; 1]>),
+}
+
+impl LineBoxes {
+    pub(crate) fn get(&self, ix: usize) -> LineBox {
+        match self {
+            Self::Uniform { height, baseline } => LineBox {
+                top: *height * ix as f32,
+                height: *height,
+                baseline: *baseline,
+            },
+            Self::Mixed(boxes) => boxes.get(ix).copied().unwrap_or_else(|| {
+                let last = boxes.last().copied().unwrap_or_default();
+                LineBox {
+                    top: last.top + last.height * (ix + 1 - boxes.len()) as f32,
+                    ..last
+                }
+            }),
+        }
+    }
+
+    /// The visual line that `y` falls in, counting lines past the last as uniform ones would.
+    fn line_at(&self, y: Pixels) -> usize {
+        match self {
+            Self::Uniform { height, .. } => (y / *height) as usize,
+            Self::Mixed(boxes) => boxes
+                .iter()
+                .position(|line| y < line.top + line.height)
+                .unwrap_or(boxes.len()),
+        }
+    }
+
+    fn total_height(&self, lines: usize) -> Pixels {
+        match self {
+            Self::Uniform { height, .. } => *height * lines as f32,
+            Self::Mixed(boxes) => boxes.last().map_or(px(0.), |line| line.top + line.height),
+        }
+    }
 }
 
 /// A single glyph, ready to paint.
@@ -163,6 +263,85 @@ impl LineLayout {
         None
     }
 
+    /// vue-native fork: whether a run differs from the line in font size or is an inline box,
+    /// which makes each visual line as tall as what it holds.
+    pub fn has_mixed_runs(&self) -> bool {
+        self.runs
+            .iter()
+            .any(|run| run.inline_box || run.font_size != self.font_size)
+    }
+
+    /// vue-native fork: the visual lines of this layout broken at `wrap_boundaries`, for
+    /// the `line_height` of its font size. A run at another size gets a line height scaled
+    /// by its size, as a unitless CSS `line-height` does; an inline box gets its own extent.
+    /// The runs of a line share a baseline, and the line is as tall as they need.
+    pub fn line_boxes(
+        &self,
+        wrap_boundaries: &[WrapBoundary],
+        line_height: Pixels,
+    ) -> SmallVec<[LineBox; 1]> {
+        let lines = self.visual_lines(wrap_boundaries, line_height);
+        (0..=wrap_boundaries.len())
+            .map(|ix| lines.get(ix))
+            .collect()
+    }
+
+    pub(crate) fn visual_lines(
+        &self,
+        wrap_boundaries: &[WrapBoundary],
+        line_height: Pixels,
+    ) -> LineBoxes {
+        if !self.has_mixed_runs() {
+            let padding_top = (line_height - self.ascent - self.descent) / 2.;
+            return LineBoxes::Uniform {
+                height: line_height,
+                baseline: padding_top + self.ascent,
+            };
+        }
+        let mut boxes = SmallVec::new();
+        let mut top = px(0.);
+        let mut extent: Option<(Pixels, Pixels)> = None;
+        let mut close = |extent: Option<(Pixels, Pixels)>| {
+            let (above, below) = extent.unwrap_or_else(|| {
+                let half_leading = (line_height - self.ascent - self.descent) / 2.;
+                (self.ascent + half_leading, self.descent + half_leading)
+            });
+            boxes.push(LineBox {
+                top,
+                height: above + below,
+                baseline: above,
+            });
+            top += above + below;
+        };
+        let mut wraps = wrap_boundaries.iter().peekable();
+        for (run_ix, run) in self.runs.iter().enumerate() {
+            let (above, below) = self.run_extent(run, line_height);
+            for glyph_ix in 0..run.glyphs.len() {
+                if wraps.peek() == Some(&&WrapBoundary { run_ix, glyph_ix }) {
+                    wraps.next();
+                    close(extent.take());
+                }
+                extent = Some(extent.map_or((above, below), |(a, b)| (a.max(above), b.max(below))));
+            }
+        }
+        close(extent);
+        LineBoxes::Mixed(boxes)
+    }
+
+    /// How far a run reaches above and below the baseline, its half-leading included.
+    fn run_extent(&self, run: &ShapedRun, line_height: Pixels) -> (Pixels, Pixels) {
+        if run.inline_box {
+            return (run.ascent, run.descent);
+        }
+        let run_line_height = if self.font_size > px(0.) {
+            line_height * (run.font_size / self.font_size)
+        } else {
+            line_height
+        };
+        let half_leading = (run_line_height - run.ascent - run.descent) / 2.;
+        (run.ascent + half_leading, run.descent + half_leading)
+    }
+
     /// Split this layout at a byte index, returning `(prefix, suffix)`.
     ///
     /// - `prefix` contains glyphs for bytes `[0, byte_index)` with original positions.
@@ -181,10 +360,7 @@ impl LineLayout {
             let split_pos = run.glyphs.partition_point(|g| g.index < byte_index);
 
             if split_pos > 0 {
-                left_runs.push(ShapedRun {
-                    font_id: run.font_id,
-                    glyphs: run.glyphs[..split_pos].to_vec(),
-                });
+                left_runs.push(run.with_glyphs(run.glyphs[..split_pos].to_vec()));
             }
 
             if split_pos < run.glyphs.len() {
@@ -197,10 +373,7 @@ impl LineLayout {
                         is_emoji: g.is_emoji,
                     })
                     .collect();
-                right_runs.push(ShapedRun {
-                    font_id: run.font_id,
-                    glyphs: right_glyphs,
-                });
+                right_runs.push(run.with_glyphs(right_glyphs));
             }
         }
 
@@ -617,8 +790,21 @@ impl WrappedLineLayout {
     pub fn size(&self, line_height: Pixels) -> Size<Pixels> {
         Size {
             width: self.width(),
-            height: line_height * (self.wrap_boundaries.len() + 1),
+            height: self
+                .visual_lines(line_height)
+                .total_height(self.wrap_boundaries.len() + 1),
         }
+    }
+
+    /// vue-native fork: where each visual line sits; see [`LineLayout::line_boxes`].
+    pub fn line_boxes(&self, line_height: Pixels) -> SmallVec<[LineBox; 1]> {
+        self.unwrapped_layout
+            .line_boxes(&self.wrap_boundaries, line_height)
+    }
+
+    pub(crate) fn visual_lines(&self, line_height: Pixels) -> LineBoxes {
+        self.unwrapped_layout
+            .visual_lines(&self.wrap_boundaries, line_height)
     }
 
     /// The ascent of a line in this layout
@@ -676,7 +862,7 @@ impl WrappedLineLayout {
         line_height: Pixels,
         closest: bool,
     ) -> Result<usize, usize> {
-        let wrapped_line_ix = (position.y / line_height) as usize;
+        let wrapped_line_ix = self.visual_lines(line_height).line_at(position.y);
 
         let wrapped_line_start_index;
         let wrapped_line_start_x;
@@ -730,6 +916,7 @@ impl WrappedLineLayout {
 
     /// Returns the pixel position for the given byte index.
     pub fn position_for_index(&self, index: usize, line_height: Pixels) -> Option<Point<Pixels>> {
+        let lines = self.visual_lines(line_height);
         let mut line_start_ix = 0;
         let line_end_indices = self
             .wrap_boundaries
@@ -742,7 +929,7 @@ impl WrappedLineLayout {
             .chain([self.len()])
             .enumerate();
         for (ix, line_end_ix) in line_end_indices {
-            let line_y = ix as f32 * line_height;
+            let line_y = lines.get(ix).top;
             if index < line_start_ix {
                 break;
             } else if index > line_end_ix {
@@ -908,6 +1095,7 @@ impl LineLayoutCache {
         text: Text,
         font_size: Pixels,
         runs: &[FontRun],
+        spans: &[LayoutSpan],
         wrap_width: Option<Pixels>,
         max_lines: Option<usize>,
         rules: TextWrap,
@@ -921,6 +1109,7 @@ impl LineLayoutCache {
             text: text.as_ref(),
             font_size,
             runs,
+            spans,
             wrap_width,
             force_width: None,
             wrap: rules,
@@ -944,7 +1133,8 @@ impl LineLayoutCache {
         } else {
             drop(state);
             let text = SharedString::from(text);
-            let unwrapped_layout = self.layout_line::<&SharedString>(&text, font_size, runs, None);
+            let unwrapped_layout =
+                self.layout_line::<&SharedString>(&text, font_size, runs, spans, None);
             let wrapping = if let Some(wrap_width) = wrap_width {
                 let hyphen_width = self.hyphen_width(&text, font_size, runs, rules);
                 unwrapped_layout.wrap(
@@ -969,6 +1159,7 @@ impl LineLayoutCache {
                 text,
                 font_size,
                 runs: SmallVec::from(runs),
+                spans: SmallVec::from(spans),
                 wrap_width,
                 force_width: None,
                 wrap: rules,
@@ -990,6 +1181,7 @@ impl LineLayoutCache {
         text: Text,
         font_size: Pixels,
         runs: &[FontRun],
+        spans: &[LayoutSpan],
         force_width: Option<Pixels>,
     ) -> Arc<LineLayout>
     where
@@ -1001,6 +1193,7 @@ impl LineLayoutCache {
             text: text.as_ref(),
             font_size,
             runs,
+            spans,
             wrap_width: None,
             force_width,
             wrap: TextWrap::default(),
@@ -1025,9 +1218,19 @@ impl LineLayoutCache {
         } else {
             let text = SharedString::from(text);
             let shaping = std::time::Instant::now();
-            let mut layout = self
-                .platform_text_system
-                .layout_line(&text, font_size, runs);
+            let mut layout = if spans.is_empty() {
+                let mut layout = self
+                    .platform_text_system
+                    .layout_line(&text, font_size, runs);
+                for run in &mut layout.runs {
+                    run.font_size = font_size;
+                    run.ascent = layout.ascent;
+                    run.descent = layout.descent;
+                }
+                layout
+            } else {
+                self.layout_spans(&text, font_size, runs, spans)
+            };
             count_shape(shaping);
 
             // Spacing first: `force_width` assigns each cluster an ABSOLUTE
@@ -1042,6 +1245,7 @@ impl LineLayoutCache {
                 text,
                 font_size,
                 runs: SmallVec::from(runs),
+                spans: SmallVec::from(spans),
                 wrap_width: None,
                 force_width,
                 wrap: TextWrap::default(),
@@ -1051,6 +1255,86 @@ impl LineLayoutCache {
             current_frame.used_lines.push(key);
             layout
         }
+    }
+
+    /// vue-native fork: a line with stretches at other font sizes, or inline boxes. Each
+    /// stretch of text is shaped on its own, at its size, and the stretches are laid end to
+    /// end on one baseline: shaping does not carry across a change of size, as in browsers.
+    fn layout_spans(
+        &self,
+        text: &str,
+        font_size: Pixels,
+        runs: &[FontRun],
+        spans: &[LayoutSpan],
+    ) -> LineLayout {
+        let mut layout = LineLayout {
+            font_size,
+            len: text.len(),
+            ..Default::default()
+        };
+        let mut runs = runs.iter().copied();
+        let mut pending: Option<FontRun> = None;
+        let mut segment_runs = SmallVec::<[FontRun; 4]>::new();
+        let mut start = 0;
+        for span in spans {
+            let end = (start + span.len).min(text.len());
+            segment_runs.clear();
+            let mut needed = end - start;
+            while needed > 0 {
+                let Some(run) = pending.take().or_else(|| runs.next()) else {
+                    break;
+                };
+                let len = run.len.min(needed);
+                segment_runs.push(FontRun { len, ..run });
+                if run.len > len {
+                    pending = Some(FontRun {
+                        len: run.len - len,
+                        ..run
+                    });
+                }
+                needed -= len;
+            }
+            if let Some(inline_box) = span.inline_box {
+                let font_id = segment_runs.first().map_or(FontId(0), |run| run.font_id);
+                layout.runs.push(ShapedRun {
+                    font_id,
+                    font_size: span.font_size,
+                    ascent: inline_box.ascent,
+                    descent: inline_box.descent,
+                    inline_box: true,
+                    glyphs: vec![ShapedGlyph {
+                        id: GlyphId(0),
+                        position: point(layout.width, px(0.)),
+                        index: start,
+                        is_emoji: false,
+                    }],
+                });
+                layout.width += inline_box.width;
+                layout.ascent = layout.ascent.max(inline_box.ascent);
+                layout.descent = layout.descent.max(inline_box.descent);
+            } else if end > start {
+                let segment = self.platform_text_system.layout_line(
+                    &text[start..end],
+                    span.font_size,
+                    &segment_runs,
+                );
+                for mut run in segment.runs {
+                    for glyph in &mut run.glyphs {
+                        glyph.index += start;
+                        glyph.position.x += layout.width;
+                    }
+                    run.font_size = span.font_size;
+                    run.ascent = segment.ascent;
+                    run.descent = segment.descent;
+                    layout.runs.push(run);
+                }
+                layout.width += segment.width;
+                layout.ascent = layout.ascent.max(segment.ascent);
+                layout.descent = layout.descent.max(segment.descent);
+            }
+            start = end;
+        }
+        layout
     }
 
     fn clear_if_font_generation_changed(&self) -> usize {
@@ -1186,6 +1470,15 @@ pub struct FontRun {
     pub word_spacing: Pixels,
 }
 
+/// vue-native fork: a stretch of a line shaped at one font size, or laid out as an inline
+/// box. A line whose text is all at the size it is shaped at, with no inline box, has none.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub(crate) struct LayoutSpan {
+    pub(crate) len: usize,
+    pub(crate) font_size: Pixels,
+    pub(crate) inline_box: Option<InlineBox>,
+}
+
 trait AsCacheKeyRef {
     fn as_cache_key_ref(&self) -> CacheKeyRef<'_>;
 }
@@ -1195,6 +1488,7 @@ struct CacheKey {
     text: SharedString,
     font_size: Pixels,
     runs: SmallVec<[FontRun; 1]>,
+    spans: SmallVec<[LayoutSpan; 0]>,
     wrap_width: Option<Pixels>,
     force_width: Option<Pixels>,
     /// vue-native fork: the same text wraps differently under other rules.
@@ -1206,6 +1500,7 @@ struct CacheKeyRef<'a> {
     text: &'a str,
     font_size: Pixels,
     runs: &'a [FontRun],
+    spans: &'a [LayoutSpan],
     wrap_width: Option<Pixels>,
     force_width: Option<Pixels>,
     wrap: TextWrap,
@@ -1231,6 +1526,7 @@ impl AsCacheKeyRef for CacheKey {
             text: &self.text,
             font_size: self.font_size,
             runs: self.runs.as_slice(),
+            spans: self.spans.as_slice(),
             wrap_width: self.wrap_width,
             force_width: self.force_width,
             wrap: self.wrap,
@@ -1263,11 +1559,306 @@ impl AsCacheKeyRef for CacheKeyRef<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::{
-        GlyphId, NoopTextSystem, OverflowWrap, TextRun, TextSystem, WindowTextSystem, font,
+        Bounds, DevicePixels, Font, FontMetrics, GlyphId, NoopTextSystem, OverflowWrap,
+        RenderGlyphParams, Result, TextRun, TextSystem, WindowTextSystem, font, size,
     };
+    use parking_lot::Mutex;
+
+    /// Advances half the font size per character, with 80% of the size above the baseline
+    /// and 20% below; remembers the sizes glyphs are rasterized at.
+    #[derive(Default)]
+    pub(crate) struct ProportionalTextSystem {
+        pub(crate) rasterized_sizes: Mutex<Vec<Pixels>>,
+    }
+
+    impl PlatformTextSystem for ProportionalTextSystem {
+        fn add_fonts(&self, fonts: Vec<std::borrow::Cow<'static, [u8]>>) -> Result<()> {
+            NoopTextSystem.add_fonts(fonts)
+        }
+
+        fn all_font_names(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn font_id(&self, descriptor: &Font) -> Result<FontId> {
+            NoopTextSystem.font_id(descriptor)
+        }
+
+        fn font_metrics(&self, font_id: FontId) -> FontMetrics {
+            NoopTextSystem.font_metrics(font_id)
+        }
+
+        fn typographic_bounds(&self, font_id: FontId, glyph_id: GlyphId) -> Result<Bounds<f32>> {
+            NoopTextSystem.typographic_bounds(font_id, glyph_id)
+        }
+
+        fn advance(&self, font_id: FontId, glyph_id: GlyphId) -> Result<Size<f32>> {
+            NoopTextSystem.advance(font_id, glyph_id)
+        }
+
+        fn glyph_for_char(&self, font_id: FontId, ch: char) -> Option<GlyphId> {
+            NoopTextSystem.glyph_for_char(font_id, ch)
+        }
+
+        fn glyph_raster_bounds(&self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
+            self.rasterized_sizes.lock().push(params.font_size);
+            Ok(Bounds::new(
+                point(DevicePixels(0), DevicePixels(0)),
+                size(DevicePixels(2), DevicePixels(2)),
+            ))
+        }
+
+        fn rasterize_glyph(
+            &self,
+            _: &RenderGlyphParams,
+            bounds: Bounds<DevicePixels>,
+        ) -> Result<(Size<DevicePixels>, Vec<u8>)> {
+            let pixels = (bounds.size.width.0 * bounds.size.height.0) as usize;
+            Ok((bounds.size, vec![255; pixels]))
+        }
+
+        fn layout_line(&self, text: &str, font_size: Pixels, _: &[FontRun]) -> LineLayout {
+            let advance = font_size * 0.5;
+            let glyphs: Vec<_> = text
+                .char_indices()
+                .enumerate()
+                .map(|(n, (index, _))| ShapedGlyph {
+                    id: GlyphId(1),
+                    position: point(advance * n as f32, px(0.)),
+                    index,
+                    is_emoji: false,
+                })
+                .collect();
+            LineLayout {
+                font_size,
+                width: advance * glyphs.len() as f32,
+                ascent: font_size * 0.8,
+                descent: font_size * 0.2,
+                runs: if glyphs.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![ShapedRun::new(FontId(1), glyphs)]
+                },
+                len: text.len(),
+            }
+        }
+
+        fn recommended_rendering_mode(&self, _: FontId, _: Pixels) -> crate::TextRenderingMode {
+            crate::TextRenderingMode::Grayscale
+        }
+    }
+
+    fn proportional() -> WindowTextSystem {
+        WindowTextSystem::new(Arc::new(TextSystem::new(Arc::new(
+            ProportionalTextSystem::default(),
+        ))))
+    }
+
+    pub(crate) fn sized_runs(spans: &[(usize, Option<f32>, Option<InlineBox>)]) -> Vec<TextRun> {
+        spans
+            .iter()
+            .map(|&(len, size, inline_box)| TextRun {
+                len,
+                font: font(".ZedMono"),
+                font_size: size.map(px),
+                inline_box,
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    fn assert_close(actual: Pixels, expected: f32, what: &str) {
+        assert!(
+            (actual.0 - expected).abs() < 0.001,
+            "{what}: {actual:?}, expected {expected}"
+        );
+    }
+
+    fn assert_box(line: LineBox, top: f32, height: f32, baseline: f32) {
+        assert_close(line.top, top, "top");
+        assert_close(line.height, height, "height");
+        assert_close(line.baseline, baseline, "baseline");
+    }
+
+    fn glyph_xs(layout: &LineLayout) -> Vec<(usize, f32)> {
+        layout
+            .runs
+            .iter()
+            .flat_map(|run| run.glyphs.iter())
+            .map(|glyph| (glyph.index, glyph.position.x.0))
+            .collect()
+    }
+
+    #[test]
+    fn runs_at_their_own_size_are_shaped_at_it_on_one_baseline() {
+        let text_system = proportional();
+        let runs = sized_runs(&[(2, None, None), (2, Some(32.), None), (2, None, None)]);
+        let layout = text_system.layout_line("abCDef", px(16.), &runs, None);
+
+        assert_eq!(
+            glyph_xs(&layout),
+            vec![(0, 0.), (1, 8.), (2, 16.), (3, 32.), (4, 48.), (5, 56.)]
+        );
+        assert_eq!(layout.width, px(64.));
+        assert_eq!(
+            layout
+                .runs
+                .iter()
+                .map(|run| run.font_size)
+                .collect::<Vec<_>>(),
+            vec![px(16.), px(32.), px(16.)]
+        );
+        assert_close(layout.ascent, 25.6, "ascent");
+        assert_close(layout.descent, 6.4, "descent");
+        assert!(layout.has_mixed_runs());
+
+        // The 32 px run's line height scales with it: 40 px, 4 px of half-leading.
+        let boxes = layout.line_boxes(&[], px(20.));
+        assert_eq!(boxes.len(), 1);
+        assert_box(boxes[0], 0., 40., 29.6);
+
+        for index in 0..=layout.len {
+            assert_eq!(layout.closest_index_for_x(layout.x_for_index(index)), index);
+        }
+    }
+
+    #[test]
+    fn a_run_at_the_lines_own_size_takes_the_single_size_path() {
+        let text_system = proportional();
+        let plain = text_system.layout_line("abc", px(16.), &sized_runs(&[(3, None, None)]), None);
+        let same =
+            text_system.layout_line("abc", px(16.), &sized_runs(&[(3, Some(16.), None)]), None);
+        assert!(Arc::ptr_eq(&plain, &same));
+        assert!(!plain.has_mixed_runs());
+        assert_eq!(
+            plain.line_boxes(&[], px(20.)).as_slice(),
+            &[LineBox {
+                top: px(0.),
+                height: px(20.),
+                baseline: (px(20.) - plain.ascent - plain.descent) / 2. + plain.ascent,
+            }]
+        );
+
+        let larger = text_system.layout_line(
+            "abc",
+            px(16.),
+            &sized_runs(&[(1, None, None), (2, Some(24.), None)]),
+            None,
+        );
+        assert!(!Arc::ptr_eq(&plain, &larger));
+        assert_eq!(larger.width, px(8. + 24.));
+    }
+
+    #[test]
+    fn wrapped_lines_are_as_tall_as_their_largest_run() {
+        let text_system = proportional();
+        let text = "aa BBBB cc";
+        let runs = sized_runs(&[(3, None, None), (4, Some(32.), None), (3, None, None)]);
+        let lines = text_system
+            .shape_text(text.into(), px(16.), &runs, Some(px(70.)), None)
+            .unwrap();
+        let line = &lines[0];
+
+        let breaks: Vec<_> = line
+            .wrap_boundaries()
+            .iter()
+            .map(|boundary| line.runs()[boundary.run_ix].glyphs[boundary.glyph_ix].index)
+            .collect();
+        assert_eq!(breaks, vec![3, 8]);
+
+        let boxes = line.line_boxes(px(20.));
+        assert_eq!(boxes.len(), 3);
+        assert_box(boxes[0], 0., 20., 14.8);
+        assert_box(boxes[1], 20., 40., 29.6);
+        assert_box(boxes[2], 60., 20., 14.8);
+        assert_eq!(line.size(px(20.)).height, px(80.));
+
+        assert_eq!(
+            line.position_for_index(4, px(20.)),
+            Some(point(px(16.), px(20.)))
+        );
+        assert_eq!(
+            line.position_for_index(9, px(20.)),
+            Some(point(px(8.), px(60.)))
+        );
+        // Below a uniform second line, still inside the taller one.
+        assert_eq!(
+            line.closest_index_for_position(point(px(16.), px(50.)), px(20.)),
+            Ok(4)
+        );
+        for index in [1, 2, 4, 5, 6, 9] {
+            let position = line.position_for_index(index, px(20.)).unwrap();
+            assert_eq!(
+                line.closest_index_for_position(position + point(px(0.), px(5.)), px(20.)),
+                Ok(index),
+                "index {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_inline_box_takes_its_width_and_extent_as_one_character() {
+        let text_system = proportional();
+        let inline_box = InlineBox {
+            width: px(30.),
+            ascent: px(24.),
+            descent: px(6.),
+        };
+        let text = "a\u{FFFC}b";
+        let runs = sized_runs(&[
+            (1, None, None),
+            (3, None, Some(inline_box)),
+            (1, None, None),
+        ]);
+        let layout = text_system.layout_line(text, px(16.), &runs, None);
+
+        assert_eq!(glyph_xs(&layout), vec![(0, 0.), (1, 8.), (4, 38.)]);
+        assert_eq!(layout.width, px(46.));
+        assert_eq!(
+            layout
+                .runs
+                .iter()
+                .map(|run| run.inline_box)
+                .collect::<Vec<_>>(),
+            vec![false, true, false]
+        );
+        assert_close(layout.ascent, 24., "ascent");
+        assert_close(layout.descent, 6., "descent");
+        assert_box(layout.line_boxes(&[], px(20.))[0], 0., 30., 24.);
+
+        // A caret goes before or after the box, never into it.
+        assert_eq!(layout.closest_index_for_x(px(18.)), 1);
+        assert_eq!(layout.closest_index_for_x(px(30.)), 4);
+        assert_eq!(layout.index_for_x(px(30.)), Some(1));
+
+        let text = "aaaa\u{FFFC}";
+        let runs = sized_runs(&[(4, None, None), (3, None, Some(inline_box))]);
+        let lines = text_system
+            .shape_text(text.into(), px(16.), &runs, Some(px(40.)), None)
+            .unwrap();
+        let line = &lines[0];
+        assert_eq!(
+            line.wrap_boundaries(),
+            &[WrapBoundary {
+                run_ix: 1,
+                glyph_ix: 0
+            }]
+        );
+        let boxes = line.line_boxes(px(20.));
+        assert_box(boxes[0], 0., 20., 14.8);
+        assert_box(boxes[1], 20., 30., 24.);
+        assert_eq!(
+            line.position_for_index(4, px(20.)),
+            Some(point(px(32.), px(0.)))
+        );
+        assert_eq!(
+            line.closest_index_for_position(point(px(20.), px(45.)), px(20.)),
+            Ok(7)
+        );
+    }
 
     impl LineLayout {
         /// Upstream's wrapping entry point, as these tests call it: gpui's
@@ -1325,6 +1916,10 @@ mod tests {
             ascent: px(12.),
             descent: px(4.),
             runs: vec![ShapedRun {
+                font_size: px(16.0),
+                ascent: px(12.0),
+                descent: px(4.0),
+                inline_box: false,
                 font_id: FontId(0),
                 glyphs,
             }],

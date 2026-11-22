@@ -863,10 +863,7 @@ impl CosmicTextSystemState {
             {
                 last_run.glyphs.push(shaped_glyph);
             } else {
-                runs.push(ShapedRun {
-                    font_id,
-                    glyphs: vec![shaped_glyph],
-                });
+                runs.push(ShapedRun::new(font_id, vec![shaped_glyph]));
             }
         }
 
@@ -1452,6 +1449,39 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[1].len(), "\u{05d0}\u{001c}A".len());
         assert!(lines[1].width() > Pixels::ZERO);
+        Ok(())
+    }
+
+    #[test]
+    fn runs_at_their_own_size_shape_as_lines_at_that_size_would() -> Result<()> {
+        let platform_text_system = Arc::new(text_system()?);
+        let text_system = Arc::new(gpui::TextSystem::new(platform_text_system));
+        let window_text_system = gpui::WindowTextSystem::new(text_system);
+        let run = |len, font_size: Option<f32>| gpui::TextRun {
+            len,
+            font: gpui::font("IBM Plex Sans"),
+            font_size: font_size.map(gpui::px),
+            ..Default::default()
+        };
+
+        let small = window_text_system.layout_line("Hello ", gpui::px(14.), &[run(6, None)], None);
+        let large = window_text_system.layout_line("World", gpui::px(28.), &[run(5, None)], None);
+        let mixed = window_text_system.layout_line(
+            "Hello World",
+            gpui::px(14.),
+            &[run(6, None), run(5, Some(28.))],
+            None,
+        );
+        assert!((mixed.width - (small.width + large.width)).abs() < gpui::px(0.01));
+        assert_eq!(mixed.ascent, large.ascent);
+        assert_eq!(mixed.descent, large.descent);
+        let first_large = mixed
+            .runs
+            .iter()
+            .flat_map(|run| run.glyphs.iter())
+            .find(|glyph| glyph.index == 6)
+            .unwrap();
+        assert!((first_large.position.x - small.width).abs() < gpui::px(0.01));
         Ok(())
     }
 

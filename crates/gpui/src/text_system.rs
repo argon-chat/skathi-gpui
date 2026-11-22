@@ -692,6 +692,7 @@ impl TextSystem {
 pub struct WindowTextSystem {
     line_layout_cache: LineLayoutCache,
     font_runs_buffer: Cell<Vec<FontRun>>,
+    layout_spans_buffer: Cell<Vec<LayoutSpan>>,
     text_system: Arc<TextSystem>,
 }
 
@@ -706,6 +707,7 @@ impl WindowTextSystem {
                 text_system.font_generation.clone(),
             ),
             font_runs_buffer: Cell::default(),
+            layout_spans_buffer: Cell::default(),
             text_system,
         }
     }
@@ -804,8 +806,10 @@ impl WindowTextSystem {
         line_clamp: Option<usize>,
         rules: TextWrap,
     ) -> Result<SmallVec<[WrappedLine; 1]>> {
+        let own_layouts = runs.iter().any(|run| run.has_own_layout(font_size));
         let mut runs = runs.iter().filter(|run| run.len > 0).cloned().peekable();
         let mut font_runs = self.font_runs_buffer.take();
+        let mut spans = self.layout_spans_buffer.take();
 
         let mut lines = SmallVec::new();
         let max_wrap_lines = line_clamp;
@@ -813,6 +817,7 @@ impl WindowTextSystem {
 
         let mut process_line = |line_text: SharedString, line_start, line_end| {
             font_runs.clear();
+            spans.clear();
 
             let mut decoration_runs = <Vec<DecorationRun>>::new();
             let mut run_start = line_start;
@@ -861,6 +866,9 @@ impl WindowTextSystem {
                         word_spacing: run.word_spacing,
                     });
                 }
+                if own_layouts {
+                    push_layout_span(&mut spans, run_len_within_line, run, font_size);
+                }
 
                 // Preserve the remainder of the run for the next line
                 run.len -= run_len_within_line;
@@ -869,11 +877,13 @@ impl WindowTextSystem {
                 }
                 run_start += run_len_within_line;
             }
+            settle_layout_spans(&mut spans, font_size);
 
             let layout = self.line_layout_cache.layout_wrapped_line(
                 &line_text,
                 font_size,
                 &font_runs,
+                &spans,
                 wrap_width,
                 max_wrap_lines.map(|max| max.saturating_sub(wrapped_lines)),
                 rules,
@@ -927,6 +937,7 @@ impl WindowTextSystem {
         }
 
         self.font_runs_buffer.set(font_runs);
+        self.layout_spans_buffer.set(spans);
 
         Ok(lines)
     }
@@ -951,10 +962,19 @@ impl WindowTextSystem {
         SharedString: From<Text>,
     {
         let font_runs = self.font_runs(runs);
-        let layout = self
-            .line_layout_cache
-            .layout_line(text, font_size, &font_runs, force_width);
+        let mut spans = self.layout_spans_buffer.take();
+        spans.clear();
+        if runs.iter().any(|run| run.has_own_layout(font_size)) {
+            for run in runs {
+                push_layout_span(&mut spans, run.len, run, font_size);
+            }
+            settle_layout_spans(&mut spans, font_size);
+        }
+        let layout =
+            self.line_layout_cache
+                .layout_line(text, font_size, &font_runs, &spans, force_width);
         self.font_runs_buffer.set(font_runs);
+        self.layout_spans_buffer.set(spans);
         layout
     }
 
@@ -1015,6 +1035,7 @@ impl WindowTextSystem {
                     tracking: px(0.),
                     word_spacing: px(0.),
                 }],
+                &[],
                 None,
             )
             .width
@@ -1207,6 +1228,45 @@ pub struct TextRun {
     pub word_spacing: Pixels,
     /// CSS `text-shadow`, first on top.
     pub text_shadow: Vec<TextShadow>,
+    /// vue-native fork: the run's own font size; `None` takes the size the text is shaped at.
+    pub font_size: Option<Pixels>,
+    /// vue-native fork: lays the run out as one unbreakable box of this size in place of its
+    /// glyphs, which are not painted. Its text is usually one U+FFFC.
+    pub inline_box: Option<InlineBox>,
+}
+
+impl TextRun {
+    fn has_own_layout(&self, font_size: Pixels) -> bool {
+        self.inline_box.is_some() || self.font_size.is_some_and(|size| size != font_size)
+    }
+}
+
+/// vue-native fork: adds `len` bytes of `run` to the spans of a line shaped at `font_size`.
+fn push_layout_span(spans: &mut Vec<LayoutSpan>, len: usize, run: &TextRun, font_size: Pixels) {
+    let size = run.font_size.unwrap_or(font_size);
+    if run.inline_box.is_none()
+        && let Some(last) = spans.last_mut()
+        && last.inline_box.is_none()
+        && last.font_size == size
+    {
+        last.len += len;
+        return;
+    }
+    spans.push(LayoutSpan {
+        len,
+        font_size: size,
+        inline_box: run.inline_box,
+    });
+}
+
+/// vue-native fork: drops spans that would lay the line out as one shaping call does.
+fn settle_layout_spans(spans: &mut Vec<LayoutSpan>, font_size: Pixels) {
+    if let [span] = spans.as_slice()
+        && span.inline_box.is_none()
+        && span.font_size == font_size
+    {
+        spans.clear();
+    }
 }
 
 #[cfg(all(target_os = "macos", test))]

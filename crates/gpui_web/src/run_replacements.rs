@@ -165,10 +165,9 @@ pub(crate) fn apply_replacements(layout: &mut LineLayout, replacements: Vec<Repl
     layout.width += shift;
 
     let source_run_count = layout.runs.len();
-    layout.runs.resize_with(final_run_count, || ShapedRun {
-        font_id: FontId(0),
-        glyphs: Vec::new(),
-    });
+    layout
+        .runs
+        .resize_with(final_run_count, || ShapedRun::new(FontId(0), Vec::new()));
 
     // Every destination is at or after its source. Expanding from the right
     // therefore cannot overwrite an original run that still needs processing.
@@ -189,10 +188,7 @@ pub(crate) fn apply_replacements(layout: &mut LineLayout, replacements: Vec<Repl
                         .glyphs
                         .drain(glyph_start..glyph_end),
                 );
-                layout.runs[destination_index] = ShapedRun {
-                    font_id: segment.font_id,
-                    glyphs,
-                };
+                layout.runs[destination_index] = ShapedRun::new(segment.font_id, glyphs);
                 glyph_end = glyph_start;
             }
         }
@@ -383,10 +379,7 @@ mod tests {
             .map(|(font, length)| {
                 let glyphs = (index..index + length).map(glyph).collect();
                 index += length;
-                ShapedRun {
-                    font_id: FontId(font),
-                    glyphs,
-                }
+                ShapedRun::new(FontId(font), glyphs)
             })
             .collect();
         LineLayout {
@@ -447,10 +440,7 @@ mod tests {
             if let Some(run) = layout.runs.last_mut().filter(|run| run.font_id == font_id) {
                 run.glyphs.push(glyph);
             } else {
-                layout.runs.push(ShapedRun {
-                    font_id,
-                    glyphs: vec![glyph],
-                });
+                layout.runs.push(ShapedRun::new(font_id, vec![glyph]));
             }
         }
         layout.width += shift;

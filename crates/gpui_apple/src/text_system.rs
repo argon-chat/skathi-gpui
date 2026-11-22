@@ -604,10 +604,10 @@ impl AppleTextSystemState {
             let glyphs = match runs.last_mut() {
                 Some(run) if run.font_id == font_id => &mut run.glyphs,
                 _ => {
-                    runs.push(ShapedRun {
+                    runs.push(ShapedRun::new(
                         font_id,
-                        glyphs: Vec::with_capacity(run.glyph_count().try_into().unwrap_or(0)),
-                    });
+                        Vec::with_capacity(run.glyph_count().try_into().unwrap_or(0)),
+                    ));
                     &mut runs.last_mut().unwrap().glyphs
                 }
             };

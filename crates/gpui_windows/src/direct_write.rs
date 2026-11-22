@@ -1809,7 +1809,7 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
                 context.width += metrics.width;
             }
             if !glyphs.is_empty() {
-                context.runs.push(ShapedRun { font_id, glyphs });
+                context.runs.push(ShapedRun::new(font_id, glyphs));
             }
         } else {
             let color_font = unsafe { font_face.IsColorFont().as_bool() };
@@ -1872,7 +1872,7 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
                 }
                 glyph_idx += cluster_glyph_count;
             }
-            context.runs.push(ShapedRun { font_id, glyphs });
+            context.runs.push(ShapedRun::new(font_id, glyphs));
         }
         Ok(())
     }
@@ -2329,8 +2329,8 @@ mod tests {
     use crate::direct_write::ClusterAnalyzer;
     use anyhow::Result;
     use gpui::{
-        Font, FontWeight, PlatformTextSystem, RenderGlyphParams, TextRun, TextSystem,
-        WindowTextSystem, point, px,
+        Font, FontWeight, InlineBox, LineLayout, PlatformTextSystem, RenderGlyphParams, TextRun,
+        TextSystem, WindowTextSystem, point, px,
     };
     use std::sync::Arc;
     use windows::Win32::Graphics::DirectWrite::{DWRITE_FONT_STRETCH_NORMAL, DWRITE_TEXT_METRICS};
@@ -2609,6 +2609,79 @@ mod tests {
         platform_text_system.font_id(&font)?;
         let text_system = WindowTextSystem::new(Arc::new(TextSystem::new(platform_text_system)));
         Ok((font, text_system))
+    }
+
+    #[test]
+    fn runs_at_their_own_size_shape_as_lines_at_that_size_would() -> Result<()> {
+        let (font, text_system) = separator_text_system()?;
+        let run = |len, font_size: Option<f32>, inline_box| TextRun {
+            len,
+            font: font.clone(),
+            font_size: font_size.map(px),
+            inline_box,
+            ..Default::default()
+        };
+        let small = text_system.layout_line("Hello ", px(14.), &[run(6, None, None)], None);
+        let large = text_system.layout_line("World", px(28.), &[run(5, None, None)], None);
+        let mixed = text_system.layout_line(
+            "Hello World",
+            px(14.),
+            &[run(6, None, None), run(5, Some(28.), None)],
+            None,
+        );
+        assert!(
+            (mixed.width.as_f32() - (small.width.as_f32() + large.width.as_f32())).abs() < 0.01
+        );
+        assert_eq!(mixed.ascent, large.ascent);
+        assert_eq!(mixed.descent, large.descent);
+        let xs = |layout: &LineLayout, from: usize| -> Vec<f32> {
+            layout
+                .runs
+                .iter()
+                .flat_map(|run| run.glyphs.iter())
+                .filter(|glyph| glyph.index >= from)
+                .map(|glyph| glyph.position.x.as_f32())
+                .collect()
+        };
+        let shifted: Vec<f32> = xs(&large, 0)
+            .into_iter()
+            .map(|x| x + small.width.as_f32())
+            .collect();
+        let placed = xs(&mixed, 6);
+        assert_eq!(placed.len(), shifted.len());
+        assert!(
+            placed
+                .iter()
+                .zip(&shifted)
+                .all(|(a, b)| (a - b).abs() < 0.01)
+        );
+        assert!(mixed.runs.iter().all(|run| run.font_size
+            == if run.glyphs[0].index < 6 {
+                px(14.)
+            } else {
+                px(28.)
+            }));
+
+        let inline_box = InlineBox {
+            width: px(30.),
+            ascent: px(40.),
+            descent: px(2.),
+        };
+        let a = text_system.layout_line("a", px(14.), &[run(1, None, None)], None);
+        let boxed = text_system.layout_line(
+            "a\u{FFFC}b",
+            px(14.),
+            &[
+                run(1, None, None),
+                run(3, None, Some(inline_box)),
+                run(1, None, None),
+            ],
+            None,
+        );
+        let b_x = xs(&boxed, 4)[0];
+        assert!((b_x - (a.width.as_f32() + 30.)).abs() < 0.01);
+        assert_eq!(boxed.ascent, px(40.));
+        Ok(())
     }
 
     /// vue-native fork: the case that used to render BLANK — four or more

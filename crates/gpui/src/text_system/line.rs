@@ -1,3 +1,5 @@
+use super::UNDERLINE_DESCENT_OFFSET_FACTOR;
+use super::line_layout::{LineBox, LineBoxes};
 use crate::util::impl_deref;
 use crate::{
     App, Bounds, DevicePixels, Half, Hsla, LineLayout, Pixels, Point, RenderGlyphParams, Result,
@@ -314,18 +316,19 @@ impl<'a> ShapedLineCursor<'a> {
             }
             let end = self.glyph_index;
             if start < end {
-                runs.push(crate::ShapedRun {
-                    font_id: run.font_id,
-                    glyphs: run.glyphs[start..end]
-                        .iter()
-                        .map(|glyph| crate::ShapedGlyph {
-                            id: glyph.id,
-                            position: point(glyph.position.x - previous_x, glyph.position.y),
-                            index: glyph.index - previous_index,
-                            is_emoji: glyph.is_emoji,
-                        })
-                        .collect(),
-                });
+                runs.push(
+                    run.with_glyphs(
+                        run.glyphs[start..end]
+                            .iter()
+                            .map(|glyph| crate::ShapedGlyph {
+                                id: glyph.id,
+                                position: point(glyph.position.x - previous_x, glyph.position.y),
+                                index: glyph.index - previous_index,
+                                is_emoji: glyph.is_emoji,
+                            })
+                            .collect(),
+                    ),
+                );
             }
             if let Some(glyph) = run.glyphs.get(self.glyph_index) {
                 next_x = glyph.position.x;
@@ -545,10 +548,15 @@ fn paint_line(
 ) -> Result<()> {
     // vue-native fork: each `text-shadow` is a pass of its own beneath the text, last first, in a
     // layer of its own so its sprites order below the glyphs they shadow.
+    let lines = layout.visual_lines(wrap_boundaries, line_height);
+    let line_underline_y = |line: LineBox| match lines {
+        LineBoxes::Uniform { .. } => underline_y_offset(line_height, layout.ascent, layout.descent),
+        LineBoxes::Mixed(_) => line.baseline + layout.descent * UNDERLINE_DESCENT_OFFSET_FACTOR,
+    };
     let mut paint_pass = |shadow_ix: Option<usize>, window: &mut Window| -> Result<()> {
-        let padding_top = (line_height - layout.ascent - layout.descent) / 2.;
-        let baseline_offset = point(px(0.), padding_top + layout.ascent);
-        let underline_y_offset = underline_y_offset(line_height, layout.ascent, layout.descent);
+        let mut line = lines.get(0);
+        let mut baseline_offset = point(px(0.), line.baseline);
+        let mut underline_y_offset = line_underline_y(line);
         let mut decoration_runs = decoration_runs.iter();
         let mut wraps = wrap_boundaries.iter().peekable();
         let mut run_end = 0;
@@ -575,8 +583,9 @@ fn paint_line(
         // glyph before it, for the hyphen a soft-hyphen break shows.
         let mut wrap_ix = 0;
         let mut prev_font_id = layout.runs.first().map(|run| run.font_id);
+        let mut prev_font_size = layout.font_size;
         for (run_ix, run) in layout.runs.iter().enumerate() {
-            max_glyph_size = text_system.bounding_box(run.font_id, layout.font_size).size;
+            max_glyph_size = text_system.bounding_box(run.font_id, run.font_size).size;
 
             for (glyph_ix, glyph) in run.glyphs.iter().enumerate() {
                 glyph_origin.x += glyph.position.x - prev_glyph_position.x;
@@ -604,7 +613,7 @@ fn paint_line(
                                     glyph_origin + baseline_offset,
                                     font_id,
                                     hyphen,
-                                    layout.font_size,
+                                    prev_font_size,
                                     false,
                                 )?;
                             }
@@ -620,7 +629,7 @@ fn paint_line(
                                         glyph_origin + baseline_offset,
                                         font_id,
                                         hyphen,
-                                        layout.font_size,
+                                        prev_font_size,
                                         crate::white(),
                                     )
                                 })?;
@@ -630,13 +639,15 @@ fn paint_line(
                                     glyph_origin + baseline_offset,
                                     font_id,
                                     hyphen,
-                                    layout.font_size,
+                                    prev_font_size,
                                     color,
                                 )?;
                             }
                         }
                     }
                     wrap_ix += 1;
+                    let next_line = lines.get(wrap_ix);
+                    let next_underline_y_offset = line_underline_y(next_line);
                     if let Some((underline_origin, underline_style, underline_range)) =
                         current_underline.as_mut()
                     {
@@ -654,7 +665,8 @@ fn paint_line(
                         }
                         if glyph.index < run_end {
                             underline_origin.x = origin.x;
-                            underline_origin.y += line_height;
+                            underline_origin.y +=
+                                line.height + (next_underline_y_offset - underline_y_offset);
                         } else {
                             current_underline = None;
                         }
@@ -674,7 +686,8 @@ fn paint_line(
                         }
                         if glyph.index < run_end {
                             strikethrough_origin.x = origin.x;
-                            strikethrough_origin.y += line_height;
+                            strikethrough_origin.y +=
+                                line.height + (next_line.baseline - line.baseline) * 0.5;
                         } else {
                             current_strikethrough = None;
                         }
@@ -688,10 +701,14 @@ fn paint_line(
                         layout,
                         wraps.peek(),
                     );
-                    glyph_origin.y += line_height;
+                    glyph_origin.y += line.height;
+                    line = next_line;
+                    baseline_offset.y = line.baseline;
+                    underline_y_offset = next_underline_y_offset;
                 }
                 prev_glyph_position = glyph.position;
                 prev_font_id = Some(run.font_id);
+                prev_font_size = run.font_size;
 
                 let mut finished_underline: Option<(Point<Pixels>, UnderlineStyle, Range<usize>)> =
                     None;
@@ -794,6 +811,9 @@ fn paint_line(
                     );
                 }
 
+                if run.inline_box {
+                    continue;
+                }
                 let max_glyph_bounds = Bounds {
                     origin: glyph_origin,
                     size: max_glyph_size,
@@ -816,7 +836,7 @@ fn paint_line(
                             glyph_origin + baseline_offset + point(px(0.0), glyph.position.y),
                             run.font_id,
                             glyph.id,
-                            layout.font_size,
+                            run.font_size,
                             glyph.is_emoji,
                         )?;
                     }
@@ -835,13 +855,13 @@ fn paint_line(
                         window.vn_with_text_mask(text_paint, |window| {
                             let origin = glyph_origin + baseline_offset + vertical_offset;
                             if glyph.is_emoji {
-                                window.paint_emoji(origin, run.font_id, glyph.id, layout.font_size)
+                                window.paint_emoji(origin, run.font_id, glyph.id, run.font_size)
                             } else {
                                 window.paint_glyph(
                                     origin,
                                     run.font_id,
                                     glyph.id,
-                                    layout.font_size,
+                                    run.font_size,
                                     crate::white(),
                                 )
                             }
@@ -858,7 +878,7 @@ fn paint_line(
                                 glyph_origin + baseline_offset + vertical_offset,
                                 run.font_id,
                                 glyph.id,
-                                layout.font_size,
+                                run.font_size,
                             )
                         })?;
                     } else {
@@ -866,7 +886,7 @@ fn paint_line(
                             glyph_origin + baseline_offset + vertical_offset,
                             run.font_id,
                             glyph.id,
-                            layout.font_size,
+                            run.font_size,
                             color,
                         )?;
                     }
@@ -980,7 +1000,10 @@ fn paint_line_background(
     window: &mut Window,
     cx: &mut App,
 ) -> Result<()> {
+    let lines = layout.visual_lines(wrap_boundaries, line_height);
     window.paint_layer(|window| {
+        let mut wrap_ix = 0;
+        let mut line = lines.get(0);
         let mut decoration_runs = decoration_runs.iter();
         let mut wraps = wrap_boundaries.iter().peekable();
         let mut run_end = 0;
@@ -1000,7 +1023,7 @@ fn paint_line_background(
         let mut prev_glyph_position = Point::default();
         let mut max_glyph_size = size(px(0.), px(0.));
         for (run_ix, run) in layout.runs.iter().enumerate() {
-            max_glyph_size = text_system.bounding_box(run.font_id, layout.font_size).size;
+            max_glyph_size = text_system.bounding_box(run.font_id, run.font_size).size;
 
             for (glyph_ix, glyph) in run.glyphs.iter().enumerate() {
                 glyph_origin.x += glyph.position.x - prev_glyph_position.x;
@@ -1015,13 +1038,13 @@ fn paint_line_background(
                         window.paint_quad(fill(
                             Bounds {
                                 origin: *background_origin,
-                                size: size(glyph_origin.x - background_origin.x, line_height),
+                                size: size(glyph_origin.x - background_origin.x, line.height),
                             },
                             *background_color,
                         ));
                         if glyph.index < run_end {
                             background_origin.x = origin.x;
-                            background_origin.y += line_height;
+                            background_origin.y += line.height;
                         } else {
                             current_background = None;
                         }
@@ -1035,7 +1058,9 @@ fn paint_line_background(
                         layout,
                         wraps.peek(),
                     );
-                    glyph_origin.y += line_height;
+                    glyph_origin.y += line.height;
+                    wrap_ix += 1;
+                    line = lines.get(wrap_ix);
                 }
                 prev_glyph_position = glyph.position;
 
@@ -1079,7 +1104,7 @@ fn paint_line_background(
                     window.paint_quad(fill(
                         Bounds {
                             origin: background_origin,
-                            size: size(width, line_height),
+                            size: size(width, line.height),
                         },
                         background_color,
                     ));
@@ -1101,7 +1126,7 @@ fn paint_line_background(
             window.paint_quad(fill(
                 Bounds {
                     origin: background_origin,
-                    size: size(last_line_end_x - background_origin.x, line_height),
+                    size: size(last_line_end_x - background_origin.x, line.height),
                 },
                 background_color,
             ));
@@ -1168,6 +1193,10 @@ mod tests {
                 ascent: px(12.0),
                 descent: px(4.0),
                 runs: vec![ShapedRun {
+                    font_size: px(16.0),
+                    ascent: px(12.0),
+                    descent: px(4.0),
+                    inline_box: false,
                     font_id: FontId(0),
                     glyphs: shaped_glyphs,
                 }],
@@ -1633,6 +1662,84 @@ mod tests {
             .unwrap();
     }
 
+    #[test]
+    fn mixed_runs_paint_at_their_sizes_on_each_lines_baseline() {
+        use super::super::line_layout::tests::{ProportionalTextSystem, sized_runs};
+
+        let platform = Arc::new(ProportionalTextSystem::default());
+        let mut context = TestAppContext::build_with_text_system(
+            crate::TestDispatcher::new(0),
+            None,
+            platform.clone(),
+        );
+        let window = context.add_window(|_, _| {
+            UnderlineHandlerTestView(Rc::new(|window, cx| {
+                let inline_box = crate::InlineBox {
+                    width: px(30.),
+                    ascent: px(24.),
+                    descent: px(6.),
+                };
+                let runs: Vec<_> = sized_runs(&[
+                    (3, None, None),
+                    (4, Some(32.), None),
+                    (1, None, None),
+                    (3, None, Some(inline_box)),
+                    (1, None, None),
+                ])
+                .into_iter()
+                .map(|run| TextRun {
+                    color: black(),
+                    ..run
+                })
+                .collect();
+                let lines = window
+                    .text_system()
+                    .shape_text(
+                        "aa BBBB \u{FFFC}c".into(),
+                        px(16.),
+                        &runs,
+                        Some(px(70.)),
+                        None,
+                    )
+                    .unwrap();
+                let line = &lines[0];
+                assert_eq!(line.wrap_boundaries().len(), 2);
+
+                window.next_frame.scene.clear();
+                line.paint(
+                    point(px(0.), px(0.)),
+                    px(20.),
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                )
+                .unwrap();
+                let sprites = &window.next_frame.scene.monochrome_sprites;
+                assert_eq!(sprites.len(), 9, "every glyph but the inline box's");
+
+                let mut ys: Vec<f32> = sprites.iter().map(|s| s.bounds.origin.y.0).collect();
+                ys.dedup();
+                assert_eq!(ys.len(), 3, "one baseline per visual line: {ys:?}");
+                let scale = window.scale_factor();
+                // Baselines at 14.8, 20 + 29.6 and 60 + 24.
+                assert!(
+                    (ys[1] - ys[0] - (49.6 - 14.8) * scale).abs() <= 1.,
+                    "{ys:?}"
+                );
+                assert!((ys[2] - ys[1] - (84. - 49.6) * scale).abs() <= 1., "{ys:?}");
+            }))
+        });
+        context
+            .update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+
+        let mut sizes = platform.rasterized_sizes.lock().clone();
+        sizes.sort_by(|a, b| a.0.total_cmp(&b.0));
+        sizes.dedup();
+        assert_eq!(sizes, vec![px(16.), px(32.)]);
+    }
+
     #[gpui::test]
     fn test_underline_handler_matches_default_paint(cx: &mut TestAppContext) {
         test_underline_handler_at_scales(cx, |window, cx| {
@@ -2016,6 +2123,10 @@ mod tests {
                 descent: px(4.0),
                 runs: vec![
                     ShapedRun {
+                        font_size: px(16.0),
+                        ascent: px(12.0),
+                        descent: px(4.0),
+                        inline_box: false,
                         font_id: FontId(0),
                         glyphs: vec![
                             ShapedGlyph {
@@ -2039,6 +2150,10 @@ mod tests {
                         ],
                     },
                     ShapedRun {
+                        font_size: px(16.0),
+                        ascent: px(12.0),
+                        descent: px(4.0),
+                        inline_box: false,
                         font_id: FontId(1),
                         glyphs: vec![
                             ShapedGlyph {
@@ -2265,6 +2380,10 @@ mod tests {
                 descent: px(4.0),
                 runs: vec![
                     ShapedRun {
+                        font_size: px(16.0),
+                        ascent: px(12.0),
+                        descent: px(4.0),
+                        inline_box: false,
                         font_id: FontId(3),
                         glyphs: vec![
                             ShapedGlyph {
@@ -2288,6 +2407,10 @@ mod tests {
                         ],
                     },
                     ShapedRun {
+                        font_size: px(16.0),
+                        ascent: px(12.0),
+                        descent: px(4.0),
+                        inline_box: false,
                         font_id: FontId(8),
                         glyphs: vec![
                             ShapedGlyph {

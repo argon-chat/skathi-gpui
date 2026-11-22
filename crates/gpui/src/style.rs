@@ -1325,6 +1325,8 @@ impl TextStyle {
             tracking: self.letter_spacing,
             word_spacing: self.word_spacing,
             text_shadow: self.text_shadow.clone(),
+            font_size: None,
+            inline_box: None,
         }
     }
 }
