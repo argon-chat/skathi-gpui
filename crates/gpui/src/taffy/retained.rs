@@ -271,6 +271,7 @@ pub(super) fn request_measured_layout(
     engine: &mut TaffyLayoutEngine,
     scope: Option<GlobalElementId>,
     requested: taffy::style::Style,
+    baseline: Option<Pixels>,
     mut measure: impl FnMut(
         Size<Option<Pixels>>,
         Size<AvailableSpace>,
@@ -289,7 +290,13 @@ pub(super) fn request_measured_layout(
         }
     });
     let previous_log = previous.and_then(|entry| entry.log);
-    let unchanged_style = prior.is_some_and(|id| !style(engine, id, &requested));
+    let unchanged_style = prior.is_some_and(|id| {
+        !style(engine, id, &requested)
+            && engine
+                .taffy
+                .get_node_context(id.into())
+                .is_some_and(|context| context.baseline == baseline)
+    });
     let replay = unchanged_style
         && previous_log
             .as_ref()
@@ -315,10 +322,11 @@ pub(super) fn request_measured_layout(
             // Replacing via set_node_context would dirty every ancestor even
             // when every new measurement is identical to the old one.
             context.measure = measure;
+            context.baseline = baseline;
         } else {
             engine
                 .taffy
-                .set_node_context(id.into(), Some(NodeContext { measure }))
+                .set_node_context(id.into(), Some(NodeContext { measure, baseline }))
                 .expect(EXPECT_MESSAGE);
         }
         if replay {
@@ -330,7 +338,7 @@ pub(super) fn request_measured_layout(
     } else {
         engine
             .taffy
-            .new_leaf_with_context(requested, NodeContext { measure })
+            .new_leaf_with_context(requested, NodeContext { measure, baseline })
             .expect(EXPECT_MESSAGE)
             .into()
     };

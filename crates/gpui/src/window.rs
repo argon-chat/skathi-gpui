@@ -8866,6 +8866,21 @@ impl Window {
         F: Fn(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>
             + 'static,
     {
+        self.request_measured_layout_with_baseline(style, None, measure)
+    }
+
+    /// vue-native fork: [`Window::request_measured_layout`] for a leaf whose first baseline is
+    /// `baseline` below its top edge, which a baseline-aligned flex row lines up.
+    pub fn request_measured_layout_with_baseline<F>(
+        &mut self,
+        style: Style,
+        baseline: Option<Pixels>,
+        measure: F,
+    ) -> LayoutId
+    where
+        F: Fn(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>
+            + 'static,
+    {
         self.invalidator.debug_assert_prepaint();
 
         let rem_size = self.rem_size();
@@ -8876,18 +8891,17 @@ impl Window {
             .unwrap()
             .retention_enabled()
             .then(|| self.element_id_stack.global_id());
-        let engine = self.layout_engine.as_mut().unwrap();
-        if let Some(scope) = scope {
-            engine.request_measured_layout_in_scope(
-                Some(scope),
+        self.layout_engine
+            .as_mut()
+            .unwrap()
+            .request_measured_layout_in_scope(
+                scope,
                 style,
                 rem_size,
                 scale_factor,
+                baseline,
                 measure,
             )
-        } else {
-            engine.request_measured_layout(style, rem_size, scale_factor, measure)
-        }
     }
 
     /// Compute the layout for the given id within the given available space.

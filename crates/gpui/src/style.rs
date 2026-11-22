@@ -514,6 +514,19 @@ fn vn_clip_ellipse(
     (point(cx, cy), one(&radius[0], true), one(&radius[1], false))
 }
 
+/// vue-native fork: the baseline a flex item aligns by, down from its top edge: `own` times its
+/// own baseline (its bottom edge when it has none), plus `height` times its height, plus `offset`.
+#[derive(Copy, Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(JsonSchema))]
+pub struct VnBaselineShift {
+    /// The weight of the item's own baseline.
+    pub own: f32,
+    /// The weight of the item's height.
+    pub height: f32,
+    /// A fixed distance.
+    pub offset: Pixels,
+}
+
 /// The CSS styling that can be applied to an element via the `Styled` trait
 #[derive(Clone, Refineable, Debug)]
 #[refineable(Debug, PartialEq, Serialize, Deserialize)]
@@ -619,6 +632,9 @@ pub struct Style {
     /// CSS `order`: a flex or grid item is laid out in ascending order, ties in document order.
     /// Painting, hit-testing and focus order keep document order.
     pub vn_order: i32,
+    /// vue-native fork: CSS `vertical-align` of an item in a baseline-aligned flex row, as the
+    /// baseline it aligns by; `None` is its own.
+    pub vn_baseline_shift: Option<VnBaselineShift>,
     /// CSS `object-position` of an image painted in this box; `None` keeps
     /// [`ObjectFit::get_bounds`]'s placement.
     pub vn_object_position: Option<ObjectPosition>,
@@ -2449,6 +2465,7 @@ impl Default for Style {
             flex_grow: 0.0,
             flex_shrink: 1.0,
             vn_order: 0,
+            vn_baseline_shift: None,
             vn_object_position: None,
             flex_basis: Length::Auto,
             background: None,

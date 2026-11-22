@@ -652,6 +652,25 @@ fn soft_hyphen_width(
         .map_or(Pixels::ZERO, |size| size.width)
 }
 
+/// vue-native fork: the first line's baseline below the text's top, when every run is at the
+/// text's size and none holds an inline box, so the first line's box is the uniform one.
+fn first_baseline(
+    runs: &[TextRun],
+    font_size: Pixels,
+    line_height: Pixels,
+    window: &Window,
+) -> Option<Pixels> {
+    let first = runs.first()?;
+    if runs.iter().any(|run| run.has_own_layout(font_size)) {
+        return None;
+    }
+    let text_system = window.text_system();
+    let font_id = text_system.resolve_font(&first.font);
+    let ascent = text_system.ascent(font_id, font_size).abs();
+    let descent = text_system.descent(font_id, font_size).abs();
+    Some((line_height - ascent - descent) / 2. + ascent)
+}
+
 struct TextLayoutInner {
     len: usize,
     lines: SmallVec<[WrappedLine; 1]>,
@@ -683,7 +702,8 @@ impl TextLayout {
         } else {
             vec![text_style.to_run(text.len())]
         };
-        window.request_measured_layout(Default::default(), {
+        let baseline = first_baseline(&runs, font_size, line_height, window);
+        window.request_measured_layout_with_baseline(Default::default(), baseline, {
             let element_state = self.clone();
 
             move |known_dimensions, available_space, window, cx| {
@@ -1402,5 +1422,67 @@ mod tests {
             make_text_unstable_id(false).id,
             make_text_unstable_id(true).id
         );
+    }
+
+    /// vue-native fork: text reports its first baseline, so a baseline-aligned row lines up
+    /// texts of different sizes by their baselines rather than by their bottom edges.
+    struct BaselineRow {
+        bounds: std::rc::Rc<std::cell::RefCell<Vec<Bounds<Pixels>>>>,
+    }
+
+    impl crate::Render for BaselineRow {
+        fn render(
+            &mut self,
+            _: &mut Window,
+            _: &mut crate::Context<Self>,
+        ) -> impl crate::IntoElement {
+            use crate::{ParentElement as _, Styled as _, canvas, div, px};
+            let item = |size: f32, line: f32| {
+                let bounds = self.bounds.clone();
+                div()
+                    .relative()
+                    .text_size(px(size))
+                    .line_height(px(line))
+                    .child("Ag")
+                    .child(
+                        canvas(move |b, _, _| bounds.borrow_mut().push(b), |_, _, _, _| {})
+                            .absolute()
+                            .size_full(),
+                    )
+            };
+            div()
+                .flex()
+                .items_baseline()
+                .child(item(30., 40.))
+                .child(item(12., 40.))
+        }
+    }
+
+    #[crate::test]
+    fn texts_of_two_sizes_share_a_baseline(cx: &mut crate::TestAppContext) {
+        use crate::{AppContext as _, px};
+        let bounds = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let window = cx.add_window({
+            let bounds = bounds.clone();
+            move |_, _| BaselineRow { bounds }
+        });
+        cx.update_window(crate::AnyWindowHandle::from(window), |_, window, cx| {
+            window.draw(cx).clear(cx)
+        })
+        .unwrap();
+        let cx_text = cx.update(|cx| cx.text_system().clone());
+        let baseline = |size: f32| {
+            let font = cx_text.resolve_font(&crate::font(".SystemUIFont"));
+            let (ascent, descent) = (
+                cx_text.ascent(font, px(size)).abs(),
+                cx_text.descent(font, px(size)).abs(),
+            );
+            (px(40.) - ascent - descent) / 2. + ascent
+        };
+        let b = bounds.borrow();
+        let (big, small) = (b[0], b[1]);
+        let apart = (big.origin.y + baseline(30.)) - (small.origin.y + baseline(12.));
+        assert!(apart.abs() <= px(0.5), "baselines {apart:?} apart");
+        assert!(small.origin.y > big.origin.y, "the small text sits lower");
     }
 }

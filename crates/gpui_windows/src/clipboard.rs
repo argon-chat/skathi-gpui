@@ -343,12 +343,21 @@ fn gpui_to_image_format(value: ImageFormat) -> Option<image::ImageFormat> {
 struct ClipboardGuard;
 
 impl ClipboardGuard {
+    /// vue-native fork: another process (a clipboard history or a reader of the change just
+    /// made) can hold the clipboard for a moment, so a few short retries before giving up.
     fn open() -> Option<Self> {
-        match unsafe { OpenClipboard(None) } {
-            Ok(()) => Some(Self),
-            Err(e) => {
-                log::error!("Failed to open clipboard: {e}");
-                None
+        let mut attempt = 0;
+        loop {
+            match unsafe { OpenClipboard(None) } {
+                Ok(()) => return Some(Self),
+                Err(_) if attempt < 5 => {
+                    attempt += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(e) => {
+                    log::error!("Failed to open clipboard: {e}");
+                    return None;
+                }
             }
         }
     }

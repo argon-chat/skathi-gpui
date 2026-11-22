@@ -33,6 +33,8 @@ type NodeMeasureFn = StackSafe<Box<MeasureFn>>;
 
 struct NodeContext {
     measure: NodeMeasureFn,
+    /// vue-native fork: the leaf's first baseline below its top edge, for baseline alignment.
+    baseline: Option<Pixels>,
 }
 pub struct TaffyLayoutEngine {
     taffy: TaffyTree<NodeContext>,
@@ -164,28 +166,13 @@ impl TaffyLayoutEngine {
         Some(sorted)
     }
 
-    pub fn request_measured_layout(
-        &mut self,
-        style: Style,
-        rem_size: Pixels,
-        scale_factor: f32,
-        measure: impl FnMut(
-            Size<Option<Pixels>>,
-            Size<AvailableSpace>,
-            &mut Window,
-            &mut App,
-        ) -> Size<Pixels>
-        + 'static,
-    ) -> LayoutId {
-        self.request_measured_layout_in_scope(None, style, rem_size, scale_factor, measure)
-    }
-
     pub(crate) fn request_measured_layout_in_scope(
         &mut self,
         scope: Option<crate::GlobalElementId>,
         style: Style,
         rem_size: Pixels,
         scale_factor: f32,
+        baseline: Option<Pixels>,
         measure: impl FnMut(
             Size<Option<Pixels>>,
             Size<AvailableSpace>,
@@ -196,14 +183,14 @@ impl TaffyLayoutEngine {
     ) -> LayoutId {
         let taffy_style = style.to_taffy(rem_size, scale_factor);
         let id = if self.retention.enabled {
-            retained::request_measured_layout(self, scope, taffy_style, measure)
+            retained::request_measured_layout(self, scope, taffy_style, baseline, measure)
         } else {
             let measure = Box::new(measure) as Box<MeasureFn>;
             #[cfg(feature = "stacker")]
             let measure = StackSafe::new(measure);
 
             self.taffy
-                .new_leaf_with_context(taffy_style, NodeContext { measure })
+                .new_leaf_with_context(taffy_style, NodeContext { measure, baseline })
                 .expect(EXPECT_MESSAGE)
                 .into()
         };
@@ -389,7 +376,8 @@ impl TaffyLayoutEngine {
                 id.into(),
                 available_space.into(),
                 |input, id, node_context, style| {
-                    taffy::compute_leaf_layout(
+                    let baseline = node_context.as_ref().and_then(|c| c.baseline);
+                    let mut output = taffy::compute_leaf_layout(
                         input,
                         style,
                         // vue-native fork: a leaf's padding, border and size
@@ -435,7 +423,12 @@ impl TaffyLayoutEngine {
                             );
                             snap_measured_size_to_device_pixels(measured_size, scale_factor).into()
                         },
-                    )
+                    );
+                    if let Some(baseline) = baseline {
+                        output.baselines =
+                            taffy::Baselines::from_first(Some(baseline.0 * scale_factor));
+                    }
+                    output
                 },
             )
             .expect(EXPECT_MESSAGE);
@@ -991,6 +984,15 @@ impl ToTaffy<taffy::style::Style> for Style {
             flex_basis: self.flex_basis.to_taffy(rem_size, scale_factor),
             flex_grow: self.flex_grow,
             flex_shrink: self.flex_shrink,
+            baseline_shift: self
+                .vn_baseline_shift
+                .map_or(taffy::style::BaselineShift::NONE, |s| {
+                    taffy::style::BaselineShift {
+                        own: s.own,
+                        height: s.height,
+                        offset: s.offset.0 * scale_factor,
+                    }
+                }),
             // An explicit track list wins over the `repeat(N, …)` shorthand.
             grid_template_rows: to_grid_tracks(&self.vn_grid_rows, self.vn_grid_rows_auto)
                 .unwrap_or_else(|| to_grid_repeat(&self.grid_rows)),

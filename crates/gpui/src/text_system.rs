@@ -1236,7 +1236,7 @@ pub struct TextRun {
 }
 
 impl TextRun {
-    fn has_own_layout(&self, font_size: Pixels) -> bool {
+    pub(crate) fn has_own_layout(&self, font_size: Pixels) -> bool {
         self.inline_box.is_some() || self.font_size.is_some_and(|size| size != font_size)
     }
 }
