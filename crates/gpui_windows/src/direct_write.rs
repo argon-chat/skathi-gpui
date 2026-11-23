@@ -133,6 +133,9 @@ impl DirectWriteTextSystem {
         let text_renderer = TextRendererWrapper::new(locale.clone());
 
         let system_subpixel_rendering = get_system_subpixel_rendering();
+        if gpui::text_experiment().log {
+            log::info!("SK_TEXT_EXPERIMENT: system ClearType {system_subpixel_rendering}");
+        }
         let system_ui_font_name = get_system_ui_font_name();
         let components = DirectWriteComponents {
             locale,
@@ -1034,10 +1037,8 @@ impl DirectWriteState {
             isSideways: BOOL(0),
             bidiLevel: 0,
         };
-        let baseline_origin = Vector2::new(
-            params.subpixel_variant.x as f32 / SUBPIXEL_VARIANTS_X as f32,
-            params.subpixel_variant.y as f32 / gpui::SUBPIXEL_VARIANTS_Y as f32,
-        );
+        let offset = gpui::subpixel_variant_offset(params.subpixel_variant);
+        let baseline_origin = Vector2::new(offset.x, offset.y);
         f(&glyph_run, baseline_origin)
     }
 
@@ -1061,6 +1062,15 @@ impl DirectWriteState {
                 &mut rendering_mode,
                 &mut grid_fit_mode,
             )?;
+        }
+        if gpui::text_experiment().log {
+            log::info!(
+                "SK_TEXT_EXPERIMENT: font {} at {} ppem: rendering mode {}, grid fit {}",
+                params.font_id.0,
+                params.font_size.as_f32() * params.scale_factor,
+                rendering_mode.0,
+                grid_fit_mode.0
+            );
         }
         // We rasterize into bitmaps, which outline rendering can't produce.
         let rendering_mode = match rendering_mode {

@@ -20,14 +20,14 @@ use crate::{
     PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
     PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
     RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
-    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
-    SpriteAnimation, SpriteAnimationId, StrikethroughStyle, Style, SubpixelSprite, Subscription,
-    SystemWindowTab, SystemWindowTabController, TabStopMap, Task, TextInputConfiguration,
-    TextInputStateChange, TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState,
-    TileSource, TileWrite, TransformationMatrix, Underline, UnderlineStyle, WindowAppearance,
-    WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations, WindowInsets,
-    WindowOptions, WindowParams, WindowTextSystem, WindowVisibility, blur_glyph_coverage, point,
-    prelude::*, px, rems, size, transparent_black,
+    ScaledPixels, Scene, Shadow, SharedString, Size, SpriteAnimation, SpriteAnimationId,
+    StrikethroughStyle, Style, SubpixelSprite, Subscription, SystemWindowTab,
+    SystemWindowTabController, TabStopMap, Task, TextInputConfiguration, TextInputStateChange,
+    TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState, TileSource, TileWrite,
+    TransformationMatrix, Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance,
+    WindowBounds, WindowControls, WindowDecorations, WindowInsets, WindowOptions, WindowParams,
+    WindowTextSystem, WindowVisibility, blur_glyph_coverage, point, prelude::*, px, rems, size,
+    transparent_black,
 };
 
 use crate::gestures::{GestureTuning, RecognizedTouchGesture, TouchGestureRecognizer};
@@ -8031,20 +8031,9 @@ impl Window {
         self.invalidator.debug_assert_paint();
 
         let element_opacity = self.element_opacity();
-        let scale_factor = self.scale_factor();
-        let (glyph_origin, transformation) = self.glyph_placement(origin);
-
-        let quantized_origin = Point::new(
-            round_half_toward_zero(glyph_origin.x.0 * SUBPIXEL_VARIANTS_X as f32)
-                / SUBPIXEL_VARIANTS_X as f32,
-            round_half_toward_zero(glyph_origin.y.0 * SUBPIXEL_VARIANTS_Y as f32)
-                / SUBPIXEL_VARIANTS_Y as f32,
-        );
-        let subpixel_variant = Point::new(
-            (quantized_origin.x.fract() * SUBPIXEL_VARIANTS_X as f32) as u8,
-            (quantized_origin.y.fract() * SUBPIXEL_VARIANTS_Y as f32) as u8,
-        );
-        let integer_origin = quantized_origin.map(|c| ScaledPixels(c.trunc()));
+        let (glyph_origin, transformation, scale_factor) = self.text_glyph_placement(origin);
+        let (integer_origin, subpixel_variant) =
+            crate::text_system::quantize_glyph_origin(glyph_origin, font_size.0 * scale_factor);
         let subpixel_rendering = self.should_use_subpixel_rendering(font_id, font_size);
         let dilation = self.text_system().glyph_dilation_for_color(color);
         let params = RenderGlyphParams {
@@ -8119,6 +8108,40 @@ impl Window {
         )
     }
 
+    /// vue-native fork: [`Self::glyph_placement`] as `SK_TEXT_EXPERIMENT` changes it, with the
+    /// scale factor to rasterize at.
+    fn text_glyph_placement(
+        &self,
+        origin: Point<Pixels>,
+    ) -> (Point<ScaledPixels>, TransformationMatrix, f32) {
+        use crate::text_system::GlyphTransform;
+        let scale_factor = self.scale_factor();
+        let transform = self.element_transform;
+        match crate::text_system::glyph_transform(&transform) {
+            GlyphTransform::Default => {
+                let (origin, transform) = self.glyph_placement(origin);
+                (origin, transform, scale_factor)
+            }
+            GlyphTransform::Resample => (origin.scale(scale_factor), transform, scale_factor),
+            GlyphTransform::Pending => {
+                self.request_animation_frame();
+                (origin.scale(scale_factor), transform, scale_factor)
+            }
+            GlyphTransform::Fold { scale } => {
+                let origin = origin.scale(scale_factor);
+                let [x, y] = transform.translation;
+                (
+                    point(
+                        ScaledPixels(origin.x.0 * scale + x),
+                        ScaledPixels(origin.y.0 * scale + y),
+                    ),
+                    TransformationMatrix::unit(),
+                    scale_factor * scale,
+                )
+            }
+        }
+    }
+
     /// vue-native fork: paints a glyph's CSS `text-shadow`, its coverage in `color` blurred by
     /// `blur_radius`. `origin` is the shadow's baseline origin, offset included.
     pub fn paint_glyph_shadow(
@@ -8136,27 +8159,14 @@ impl Window {
             return self.paint_glyph(origin, font_id, glyph_id, font_size, color);
         }
 
-        let scale_factor = self.scale_factor();
-        let (glyph_origin, transformation) = self.glyph_placement(origin);
+        let (glyph_origin, transformation, scale_factor) = self.text_glyph_placement(origin);
         let (integer_origin, subpixel_variant) = if is_emoji {
             (
                 glyph_origin.map(|c| ScaledPixels(round_half_toward_zero(c.0))),
                 Point::default(),
             )
         } else {
-            let quantized_origin = Point::new(
-                round_half_toward_zero(glyph_origin.x.0 * SUBPIXEL_VARIANTS_X as f32)
-                    / SUBPIXEL_VARIANTS_X as f32,
-                round_half_toward_zero(glyph_origin.y.0 * SUBPIXEL_VARIANTS_Y as f32)
-                    / SUBPIXEL_VARIANTS_Y as f32,
-            );
-            (
-                quantized_origin.map(|c| ScaledPixels(c.trunc())),
-                Point::new(
-                    (quantized_origin.x.fract() * SUBPIXEL_VARIANTS_X as f32) as u8,
-                    (quantized_origin.y.fract() * SUBPIXEL_VARIANTS_Y as f32) as u8,
-                ),
-            )
+            crate::text_system::quantize_glyph_origin(glyph_origin, font_size.0 * scale_factor)
         };
         let glyph = RenderGlyphParams {
             font_id,

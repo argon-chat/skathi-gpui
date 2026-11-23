@@ -7,7 +7,23 @@ float color_brightness(float3 color) {
     return dot(color, float3(0.30f, 0.59f, 0.11f));
 }
 
+// vue-native fork: the macOS luminance level of a text colour, `round(4 Y) / 4` of its linear
+// luminance.
+float text_luminance_level(float3 color) {
+    float3 linear_color = color <= 0.04045f ? color / 12.92f : pow((color + 0.055f) / 1.055f, 2.4f);
+    return floor(4.0f * dot(linear_color, float3(0.2126f, 0.7152f, 0.0722f)) + 0.5f) / 4.0f;
+}
+
 float light_on_dark_contrast(float enhancedContrast, float3 color) {
+    if (text_experiment_contrast == 1u) {
+        return enhancedContrast;
+    }
+    if (text_experiment_contrast == 2u) {
+        return enhancedContrast * (0.0058f + 0.01f * text_luminance_level(color)) / 0.0058f;
+    }
+    if (text_experiment_contrast == 3u) {
+        return enhancedContrast * (1.0f + 0.86f * text_luminance_level(color));
+    }
     float brightness = color_brightness(color);
     float multiplier = saturate(4.0f * (0.75f - brightness));
     return enhancedContrast * multiplier;

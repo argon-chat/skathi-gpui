@@ -1,13 +1,15 @@
-#include "alpha_correction.hlsl"
-
 cbuffer GlobalParams: register(b0) {
     float4 gamma_ratios;
     float2 global_viewport_size;
     float grayscale_enhanced_contrast;
     float subpixel_enhanced_contrast;
     uint is_bgr;
-    uint3 global_pad;
+    // vue-native fork: `SK_TEXT_EXPERIMENT`'s contrast mode, 0 when unset.
+    uint text_experiment_contrast;
+    uint2 global_pad;
 };
+
+#include "alpha_correction.hlsl"
 
 cbuffer BatchParams: register(b1) {
     uint batch_start_index;

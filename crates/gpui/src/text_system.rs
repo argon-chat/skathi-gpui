@@ -1,4 +1,5 @@
 mod composed_family;
+mod experiment;
 mod font_fallbacks;
 mod font_features;
 mod line;
@@ -6,6 +7,8 @@ mod line_layout;
 mod line_wrapper;
 
 pub use composed_family::*;
+pub(crate) use experiment::{GlyphTransform, glyph_transform, quantize_glyph_origin};
+pub use experiment::{TextExperiment, subpixel_variant_offset, text_experiment};
 pub use font_fallbacks::*;
 pub use font_features::*;
 pub use line::*;
