@@ -697,6 +697,11 @@ struct MacWindowState {
     /// vue-native: notification observers on a `native_window` gpui did not
     /// create, which this state retains while the view is in it.
     host_observers: Vec<Retained<AnyObject>>,
+    /// vue-native: the page asked to close while its view is in a window gpui
+    /// did not create; the next close of `own_window` ends the page.
+    page_close: bool,
+    /// vue-native: the view taken out of such a window as the page closed.
+    kept_view: Option<Retained<AnyObject>>,
     /// vue-native: where frames get their drawables.
     frame_setting: MetalFrameSetting,
     /// vue-native: the next display link frame redraws in full.
@@ -1297,6 +1302,8 @@ impl MacWindow {
                 native_view: NonNull::new_unchecked(native_view),
                 own_window: native_window,
                 host_observers: Vec::new(),
+                page_close: false,
+                kept_view: None,
                 frame_setting,
                 force_next_frame: false,
                 blurred_view: None,
@@ -1649,10 +1656,13 @@ impl Drop for MacWindow {
         drop(this.accesskit_adapter.take());
         this.renderer.destroy();
         let window = this.own_window;
-        if this.native_window != window {
+        let hosted_view = (this.native_window != window).then(|| {
             let host = mem::replace(&mut this.native_window, window);
             forget_foreign_host(host, mem::take(&mut this.host_observers));
-        }
+            // SAFETY: the view is live; it is kept until it is back in `window`.
+            unsafe { Retained::retain(this.native_view.as_ptr()) }
+        });
+        let kept_view = this.kept_view.take();
         let sheet_parent = this.sheet_parent.take();
         let parked = this.player_chrome.parked.take();
         match &mut this.frame_source {
@@ -1673,12 +1683,16 @@ impl Drop for MacWindow {
                     if let Some(parent) = sheet_parent {
                         let _: () = msg_send![parent, endSheet: window];
                     }
+                    if let Some(view) = hosted_view.flatten() {
+                        return_view(window, Retained::as_ptr(&view).cast_mut());
+                    }
                     let _: () = msg_send![window, close];
                     let _: *mut AnyObject = msg_send![window, autorelease];
                     if let Some(parked) = parked {
                         parked.close();
                     }
                 }
+                drop(kept_view);
             })
             .detach();
     }
@@ -2144,25 +2158,29 @@ impl PlatformWindow for MacWindow {
         let opaque = background_appearance == WindowBackgroundAppearance::Opaque;
         this.renderer.update_transparency(!opaque);
 
+        // vue-native: a window gpui did not create keeps its own background.
+        let window = this.own_window;
+        let content_view: *mut AnyObject = unsafe { msg_send![window, contentView] };
         let became_blurred = background_appearance == WindowBackgroundAppearance::Blurred
-            && this.blurred_view.is_none();
+            && this.blurred_view.is_none()
+            && !content_view.is_null();
         unsafe {
-            let _: () = msg_send![this.native_window, setOpaque: opaque.to_objc()];
+            let _: () = msg_send![window, setOpaque: opaque.to_objc()];
             let background_color = window_background_color(background_appearance);
-            let _: () = msg_send![this.native_window, setBackgroundColor: &*background_color];
+            let _: () = msg_send![window, setBackgroundColor: &*background_color];
 
             if background_appearance != WindowBackgroundAppearance::Blurred {
                 if let Some(blur_view) = this.blurred_view {
                     let _: () = msg_send![blur_view, removeFromSuperview];
                     this.blurred_view = None;
                 }
-            } else if this.blurred_view.is_none() {
-                let content_view: *mut AnyObject = msg_send![this.native_window, contentView];
+            } else if became_blurred {
                 let frame: NSRect = msg_send![content_view, bounds];
                 let blur_view: *mut AnyObject = msg_send![BLURRED_VIEW_CLASS, alloc];
                 let blur_view: *mut AnyObject = msg_send![blur_view, initWithFrame: frame];
                 let _: () = msg_send![blur_view, setAutoresizingMask: NSAutoresizingMaskOptions::ViewWidthSizable
                         | NSAutoresizingMaskOptions::ViewHeightSizable];
+                let _: () = msg_send![blur_view, setHidden: Bool::new(!this.owns_host())];
 
                 let _: () = msg_send![
                     content_view,
@@ -2668,9 +2686,19 @@ impl PlatformWindow for MacWindow {
         let closed = this.closed.clone();
         this.foreground_executor
             .spawn(async move {
-                let window = state.lock().own_window;
+                let (window, owns_host) = {
+                    let lock = state.lock();
+                    (lock.own_window, lock.owns_host())
+                };
                 if_window_not_closed(closed, || unsafe {
-                    let _: () = msg_send![window, performClose: ptr::null_mut::<AnyObject>()];
+                    if owns_host {
+                        let _: () = msg_send![window, performClose: ptr::null_mut::<AnyObject>()];
+                    } else if ask_should_close(&state) {
+                        // The embedding program's window is left alone: the page
+                        // ends with the empty window gpui created.
+                        state.lock().page_close = true;
+                        let _: () = msg_send![window, close];
+                    }
                 })
             })
             .detach();
@@ -4397,27 +4425,37 @@ fn key_status_changed(window_state: Rc<Mutex<MacWindowState>>, became_key: bool)
 }
 
 extern "C" fn window_should_close(this: &AnyObject, _: Sel, _: *mut AnyObject) -> Bool {
-    let Some(window_state) = hosted(this) else {
-        return Bool::YES;
-    };
-    let mut lock = window_state.as_ref().lock();
+    match hosted(this) {
+        Some(window_state) => ask_should_close(&window_state).to_objc(),
+        None => Bool::YES,
+    }
+}
+
+fn ask_should_close(window_state: &Rc<Mutex<MacWindowState>>) -> bool {
+    let mut lock = window_state.lock();
     if let Some(mut callback) = lock.should_close_callback.take() {
         drop(lock);
         let should_close = callback();
         window_state.lock().should_close_callback = Some(callback);
-        should_close.to_objc()
+        should_close
     } else {
-        Bool::YES
+        true
     }
 }
 
 extern "C" fn close_window(this: &AnyObject, _: Sel) {
     if hosted(this).is_none() {
-        // The view lives on in a window of the embedding program's.
-        unsafe {
-            let _: () = msg_send![super(this, class!(NSWindow)), close];
+        // SAFETY: registered only on GPUI window classes, whose ivar holds the state.
+        let window_state = unsafe { get_window_state(this) };
+        let page_close = mem::take(&mut window_state.lock().page_close);
+        if !page_close {
+            // The view lives on in a window of the embedding program's.
+            unsafe {
+                let _: () = msg_send![super(this, class!(NSWindow)), close];
+            }
+            return;
         }
-        return;
+        take_view_from_host(&window_state);
     }
     unsafe {
         let (close_callback, simple_fullscreen_state, document_drag) = {
@@ -4649,7 +4687,7 @@ fn forget_foreign_host(window: *mut AnyObject, observers: Vec<Retained<AnyObject
 fn retarget(window_state: &Rc<Mutex<MacWindowState>>, window: *mut AnyObject) -> bool {
     let mut lock = window_state.lock();
     let old = lock.native_window;
-    if old == window {
+    if old == window || lock.closed.load(Ordering::Acquire) {
         return false;
     }
     let own = lock.own_window;
@@ -4667,11 +4705,57 @@ fn retarget(window_state: &Rc<Mutex<MacWindowState>>, window: *mut AnyObject) ->
                 .insert(window as usize, Rc::downgrade(window_state))
         });
     }
+    let blurred_view = lock.blurred_view;
     drop(lock);
+    if let Some(blur_view) = blurred_view {
+        // It rides along when the content view holding the GPUI view is moved;
+        // the backdrop is shown in the window gpui created only.
+        unsafe {
+            let _: () = msg_send![blur_view, setHidden: Bool::new(window != own)];
+        }
+    }
     if old != own {
         forget_foreign_host(old, old_observers);
     }
     true
+}
+
+/// vue-native: the page closes while its view is in a window gpui did not
+/// create: that window is let go of and the view goes back into the window gpui
+/// created, to close with it.
+fn take_view_from_host(window_state: &Rc<Mutex<MacWindowState>>) {
+    let (own, view) = {
+        let mut lock = window_state.lock();
+        let view = lock.native_view.as_ptr();
+        // SAFETY: the view is live; kept until the GPUI window is dropped, so
+        // its display link never outlives it.
+        lock.kept_view = unsafe { Retained::retain(view) };
+        (lock.own_window, view)
+    };
+    retarget(window_state, own);
+    // SAFETY: main thread; the state keeps both alive.
+    unsafe { return_view(own, view) };
+}
+
+/// Takes `view` out of the embedding program's window, into `own`'s content
+/// view unless the program moved that content view away too.
+///
+/// # Safety
+/// Main thread; `own` and `view` are live.
+unsafe fn return_view(own: *mut AnyObject, view: *mut AnyObject) {
+    unsafe {
+        let content: *mut AnyObject = msg_send![own, contentView];
+        let in_own = !content.is_null() && {
+            let content_window: *mut AnyObject = msg_send![content, window];
+            content_window == own
+        };
+        let _: *mut AnyObject = msg_send![view, retain];
+        let _: () = msg_send![view, removeFromSuperview];
+        if in_own {
+            let _: () = msg_send![content, addSubview: view];
+        }
+        let _: *mut AnyObject = msg_send![view, autorelease];
+    }
 }
 
 /// vue-native: a view moved into another `NSWindow` follows it: window calls go
