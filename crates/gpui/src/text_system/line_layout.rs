@@ -1,6 +1,6 @@
 use crate::{
-    FontId, GlyphId, Hyphens, Pixels, PlatformTextSystem, Point, SharedString, Size, TextWrap,
-    WordBreak, point, px,
+    FontId, GlyphId, Hyphens, Pixels, PlatformTextSystem, Point, SharedString, Size, TabSize,
+    TextWrap, WordBreak, point, px,
 };
 use collections::{FxHashMap, FxHashSet};
 use icu_segmenter::{
@@ -1090,6 +1090,83 @@ impl LineLayoutCache {
         px(advance.width / units_per_em * font_size.0)
     }
 
+    /// vue-native fork: CSS `tab-size`. Each tab advances to the next stop, measured from the
+    /// start of the line; a stop closer than half a space is skipped (CSS Text 3 §4.2). A
+    /// `Spaces` stop is in the tab's own font, size and spacing.
+    fn apply_tab_stops(&self, layout: &mut LineLayout, text: &str, runs: &[FontRun], tab: TabSize) {
+        let run_at = |offset: usize| {
+            let mut start = 0;
+            for run in runs {
+                if offset < start + run.len {
+                    return Some(*run);
+                }
+                start += run.len;
+            }
+            runs.last().copied()
+        };
+        let space = |font_id: FontId, size: Pixels, offset: usize| {
+            let run = run_at(offset);
+            let shaped = self.platform_text_system.layout_line(
+                " ",
+                size,
+                &[FontRun {
+                    len: 1,
+                    font_id,
+                    tracking: px(0.),
+                    word_spacing: px(0.),
+                }],
+            );
+            shaped.width + run.map_or(px(0.), |r| r.tracking + r.word_spacing)
+        };
+
+        let starts: Vec<(usize, usize, Pixels)> = layout
+            .runs
+            .iter()
+            .enumerate()
+            .flat_map(|(r, run)| {
+                run.glyphs
+                    .iter()
+                    .enumerate()
+                    .map(move |(g, glyph)| (r, g, glyph.position.x))
+            })
+            .collect();
+        let width = layout.width;
+        let mut shift = px(0.);
+        let mut previous_index = None;
+        for (k, &(r, g, x)) in starts.iter().enumerate() {
+            let index = layout.runs[r].glyphs[g].index;
+            layout.runs[r].glyphs[g].position.x += shift;
+            if previous_index == Some(index) || !text[index..].starts_with('\t') {
+                previous_index = Some(index);
+                continue;
+            }
+            previous_index = Some(index);
+            let next_x = starts[k + 1..]
+                .iter()
+                .find(|&&(nr, ng, _)| layout.runs[nr].glyphs[ng].index != index)
+                .map_or(width, |&(_, _, nx)| nx);
+            let natural = next_x - x;
+            let run = &layout.runs[r];
+            let space_width = space(run.font_id, run.font_size.max(px(1.)), index);
+            let interval = match tab {
+                TabSize::Spaces(n) => space_width * n,
+                TabSize::Length(l) => l,
+            };
+            let start = x + shift;
+            let advance = if interval <= px(0.) {
+                px(0.)
+            } else {
+                let mut stop = interval * ((start / interval).floor() + 1.);
+                if stop - start < space_width * 0.5 {
+                    stop += interval;
+                }
+                stop - start
+            };
+            shift += advance - natural;
+        }
+        layout.width += shift;
+    }
+
     pub fn layout_wrapped_line<Text>(
         &self,
         text: Text,
@@ -1133,8 +1210,14 @@ impl LineLayoutCache {
         } else {
             drop(state);
             let text = SharedString::from(text);
-            let unwrapped_layout =
-                self.layout_line::<&SharedString>(&text, font_size, runs, spans, None);
+            let unwrapped_layout = self.layout_line_with::<&SharedString>(
+                &text,
+                font_size,
+                runs,
+                spans,
+                None,
+                rules.tab_size,
+            );
             let wrapping = if let Some(wrap_width) = wrap_width {
                 let hyphen_width = self.hyphen_width(&text, font_size, runs, rules);
                 unwrapped_layout.wrap(
@@ -1188,7 +1271,28 @@ impl LineLayoutCache {
         Text: AsRef<str>,
         SharedString: From<Text>,
     {
+        self.layout_line_with(text, font_size, runs, spans, force_width, TabSize::INITIAL)
+    }
+
+    /// vue-native fork: [`Self::layout_line`] with tabs advancing to stops `tab_size` apart.
+    pub fn layout_line_with<Text>(
+        &self,
+        text: Text,
+        font_size: Pixels,
+        runs: &[FontRun],
+        spans: &[LayoutSpan],
+        force_width: Option<Pixels>,
+        tab_size: TabSize,
+    ) -> Arc<LineLayout>
+    where
+        Text: AsRef<str>,
+        SharedString: From<Text>,
+    {
         let _font_generation = self.clear_if_font_generation_changed();
+        let wrap = TextWrap {
+            tab_size,
+            ..TextWrap::default()
+        };
         let key = &CacheKeyRef {
             text: text.as_ref(),
             font_size,
@@ -1196,7 +1300,7 @@ impl LineLayoutCache {
             spans,
             wrap_width: None,
             force_width,
-            wrap: TextWrap::default(),
+            wrap,
         } as &dyn AsCacheKeyRef;
 
         count_lookup();
@@ -1237,6 +1341,9 @@ impl LineLayoutCache {
             // cell, so it has to see the positions it is going to overwrite,
             // not ones already widened by tracking.
             apply_spacing_to_layout(&mut layout, &text, runs);
+            if text.contains('\t') {
+                self.apply_tab_stops(&mut layout, &text, runs, tab_size);
+            }
             if let Some(force_width) = force_width {
                 apply_force_width_to_layout(&mut layout, force_width);
             }
@@ -1248,7 +1355,7 @@ impl LineLayoutCache {
                 spans: SmallVec::from(spans),
                 wrap_width: None,
                 force_width,
-                wrap: TextWrap::default(),
+                wrap,
             });
             let layout = Arc::new(layout);
             current_frame.lines.insert(key.clone(), layout.clone());
@@ -1693,6 +1800,37 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn a_tab_advances_to_the_next_stop_and_skips_one_closer_than_half_a_space() {
+        let text_system = proportional();
+        let shape = |text: &str, tab_size: TabSize| {
+            let runs = sized_runs(&[(text.len(), None, None)]);
+            let rules = TextWrap {
+                tab_size,
+                ..TextWrap::default()
+            };
+            let lines = text_system
+                .shape_text_with(text.to_owned().into(), px(10.), &runs, None, None, rules)
+                .unwrap();
+            let layout = &lines[0].layout.unwrapped_layout;
+            (glyph_xs(layout), layout.width)
+        };
+
+        let (xs, width) = shape("a\tb", TabSize::Spaces(4.));
+        assert_eq!(xs, vec![(0, 0.), (1, 5.), (2, 20.)]);
+        assert_eq!(width, px(25.));
+
+        let (xs, _) = shape("abc\td", TabSize::Length(px(8.)));
+        assert_eq!(
+            xs[4],
+            (4, 24.),
+            "16 is 1px past the tab, under half a space"
+        );
+
+        let (xs, _) = shape("\t\tx", TabSize::INITIAL);
+        assert_eq!(xs, vec![(0, 0.), (1, 40.), (2, 80.)]);
+    }
+
+    #[test]
     fn runs_at_their_own_size_are_shaped_at_it_on_one_baseline() {
         let text_system = proportional();
         let runs = sized_runs(&[(2, None, None), (2, Some(32.), None), (2, None, None)]);
@@ -2134,6 +2272,7 @@ pub(super) mod tests {
             overflow_wrap,
             word_break,
             hyphens,
+            tab_size: crate::TabSize::INITIAL,
         }
     }
 
@@ -2141,6 +2280,7 @@ pub(super) mod tests {
         overflow_wrap: OverflowWrap::Normal,
         word_break: WordBreak::Normal,
         hyphens: Hyphens::Manual,
+        tab_size: crate::TabSize::INITIAL,
     };
 
     /// Where `text` breaks at `width`, and how wide its widest overflowing line is.

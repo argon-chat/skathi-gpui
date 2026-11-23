@@ -1021,6 +1021,38 @@ pub enum Hyphens {
     Manual,
 }
 
+/// vue-native fork: CSS `tab-size`, the distance between tab stops.
+#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(JsonSchema))]
+pub enum TabSize {
+    /// This many advances of a space in the tab's font, letter and word spacing included.
+    Spaces(f32),
+    /// A fixed distance.
+    Length(Pixels),
+}
+
+impl TabSize {
+    /// The CSS initial value, 8.
+    pub const INITIAL: Self = Self::Spaces(8.);
+}
+
+impl Default for TabSize {
+    fn default() -> Self {
+        Self::INITIAL
+    }
+}
+
+impl Eq for TabSize {}
+
+impl std::hash::Hash for TabSize {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            Self::Spaces(n) => (0u8, n.to_bits()).hash(state),
+            Self::Length(l) => (1u8, f32::from(*l).to_bits()).hash(state),
+        }
+    }
+}
+
 /// vue-native fork: the rules a text breaks its lines under, from its style
 /// ([`TextStyle::wrap`]). Part of the line layout cache's key.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
@@ -1031,6 +1063,8 @@ pub struct TextWrap {
     pub word_break: WordBreak,
     /// CSS `hyphens`.
     pub hyphens: Hyphens,
+    /// CSS `tab-size`. Not a breaking rule, but it moves what follows a tab, and so the breaks.
+    pub tab_size: TabSize,
 }
 
 impl TextWrap {
@@ -1042,6 +1076,7 @@ impl TextWrap {
         overflow_wrap: OverflowWrap::BreakWord,
         word_break: WordBreak::Normal,
         hyphens: Hyphens::Manual,
+        tab_size: TabSize::INITIAL,
     };
 
     /// May a word that does not fit be broken where it overflows?
@@ -1232,6 +1267,9 @@ pub struct TextStyle {
 
     /// vue-native fork: CSS `text-shadow`, first on top.
     pub text_shadow: Vec<TextShadow>,
+
+    /// vue-native fork: CSS `tab-size`.
+    pub tab_size: TabSize,
 }
 
 impl Default for TextStyle {
@@ -1260,6 +1298,7 @@ impl Default for TextStyle {
             word_break: WordBreak::default(),
             hyphens: Hyphens::default(),
             text_shadow: Vec::new(),
+            tab_size: TabSize::INITIAL,
         }
     }
 }
@@ -1271,6 +1310,7 @@ impl TextStyle {
             overflow_wrap: self.overflow_wrap,
             word_break: self.word_break,
             hyphens: self.hyphens,
+            tab_size: self.tab_size,
         }
     }
 
