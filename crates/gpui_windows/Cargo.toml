@@ -5,7 +5,7 @@ description = "Windows platform for skathi-gpui: Win32 and Direct3D"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-include = ["src/**/*", "build.rs", "build/**/*", "effects/**/*", "LICENSE-APACHE"]
+include = ["src/**/*", "build.rs", "build/**/*", "effects/**/*", "LICENSE-APACHE", "NOTICE"]
 edition.workspace = true
 
 [lints]

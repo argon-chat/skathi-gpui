@@ -5,7 +5,7 @@ description = "macOS platform for skathi-gpui: AppKit"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-include = ["src/**/*", "LICENSE-APACHE"]
+include = ["src/**/*", "LICENSE-APACHE", "NOTICE"]
 edition.workspace = true
 
 [lints]

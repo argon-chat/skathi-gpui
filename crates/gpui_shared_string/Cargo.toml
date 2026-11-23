@@ -5,7 +5,7 @@ description = "SharedString, the cheaply cloned string type of skathi-gpui"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-include = ["gpui_shared_string.rs", "LICENSE-APACHE"]
+include = ["gpui_shared_string.rs", "LICENSE-APACHE", "NOTICE"]
 edition.workspace = true
 
 [lib]

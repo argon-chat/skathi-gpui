@@ -5,7 +5,7 @@ description = "Picks the skathi-gpui platform crate for the target"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-include = ["src/**/*", "LICENSE-APACHE"]
+include = ["src/**/*", "LICENSE-APACHE", "NOTICE"]
 edition.workspace = true
 
 [lints]

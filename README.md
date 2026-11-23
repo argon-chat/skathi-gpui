@@ -42,7 +42,8 @@ these paths upstream is in this history, with the same author and date.
 
 ## What Skathi adds
 
-These changes come on top of upstream gpui. Each one is marked `vue-native fork` in the source:
+These changes come on top of upstream gpui. They are copyright Argon Inc. LLC, under the same Apache
+License 2.0 as gpui (see `NOTICE`). Each one is marked `vue-native fork` in the source:
 
 - isolated layers: opacity groups, `clip-path`, CSS masks, blend modes;
 - shader effects on elements, with per-element state, textures and animated parameters;

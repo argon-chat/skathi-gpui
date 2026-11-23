@@ -5,7 +5,7 @@ description = "Tracing for skathi-gpui, with optional Tracy support"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-include = ["src/**/*", "build.rs", "LICENSE-APACHE"]
+include = ["src/**/*", "build.rs", "LICENSE-APACHE", "NOTICE"]
 edition.workspace = true
 
 [lints]

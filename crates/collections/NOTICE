@@ -1,0 +1,12 @@
+skathi-gpui
+
+This product is gpui and the crates it needs, taken from Zed
+(https://github.com/zed-industries/zed).
+Copyright 2022 - 2025 Zed Industries, Inc.
+
+Modifications for Skathi (https://github.com/argon-chat/skathi)
+Copyright 2026 Argon Inc. LLC
+
+The original work and the modifications are licensed under the Apache
+License, Version 2.0. Modified code is marked `vue-native fork` in the
+source, and the history of this repository records every change.

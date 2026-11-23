@@ -5,7 +5,7 @@ description = "wgpu renderer and cosmic-text text system for skathi-gpui"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-include = ["src/**/*", "build.rs", "effects/**/*", "LICENSE-APACHE"]
+include = ["src/**/*", "build.rs", "effects/**/*", "LICENSE-APACHE", "NOTICE"]
 edition.workspace = true
 
 [lints]

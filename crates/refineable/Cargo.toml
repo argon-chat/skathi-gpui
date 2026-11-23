@@ -5,7 +5,7 @@ description = "Refinement types that partially initialize or mutate a complex st
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-include = ["src/**/*", "LICENSE-APACHE"]
+include = ["src/**/*", "LICENSE-APACHE", "NOTICE"]
 edition.workspace = true
 
 [lints]
