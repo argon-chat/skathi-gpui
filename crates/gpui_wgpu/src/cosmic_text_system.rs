@@ -59,7 +59,15 @@ struct CosmicTextSystemState {
     font_ids_by_family_cache: HashMap<FontKey, SmallVec<[FontId; 4]>>,
     system_font_fallback: String,
     missing_glyph_sink: Option<Arc<dyn MissingGlyphSink>>,
+    /// Lines laid out since cosmic-text's shape-run cache was last trimmed.
+    shaped_lines: u32,
 }
+
+/// cosmic-text shapes a word whose glyph no font has once with every installed face, so without
+/// its run cache each CJK character or emoji that no face covers costs a shape per face, every time.
+const SHAPE_RUN_TRIM_EVERY: u32 = 1024;
+/// Trims after which an unused run is dropped.
+const SHAPE_RUN_KEEP: u64 = 4;
 
 struct LoadedFont {
     font: Arc<CosmicTextFont>,
@@ -141,6 +149,7 @@ impl CosmicTextSystem {
             font_ids_by_family_cache: HashMap::default(),
             system_font_fallback: system_font_fallback.to_string(),
             missing_glyph_sink: None,
+            shaped_lines: 0,
         }))
     }
 
@@ -160,6 +169,7 @@ impl CosmicTextSystem {
             font_ids_by_family_cache: HashMap::default(),
             system_font_fallback: system_font_fallback.to_string(),
             missing_glyph_sink: None,
+            shaped_lines: 0,
         }))
     }
 }
@@ -332,6 +342,8 @@ impl CosmicTextSystemState {
     #[profiling::function]
     fn add_fonts(&mut self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
         self.font_ids_by_family_cache.clear();
+        // A new face may cover what a cached run fell back for.
+        self.font_system.shape_run_cache = cosmic_text::ShapeRunCache::default();
         let db = self.font_system.db_mut();
         for bytes in fonts {
             db.load_font_source(cosmic_text::fontdb::Source::Binary(Arc::new(bytes)));
@@ -633,6 +645,11 @@ impl CosmicTextSystemState {
 
     #[profiling::function]
     fn layout_line(&mut self, text: &str, font_size: Pixels, font_runs: &[FontRun]) -> LineLayout {
+        self.shaped_lines += 1;
+        if self.shaped_lines >= SHAPE_RUN_TRIM_EVERY {
+            self.shaped_lines = 0;
+            self.font_system.shape_run_cache.trim(SHAPE_RUN_KEEP);
+        }
         if contains_paragraph_separator(text) {
             self.layout_line_with_separators(text, font_size, font_runs)
         } else {
