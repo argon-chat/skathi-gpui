@@ -53,6 +53,9 @@ fn draw_ready(window: &Rc<Mutex<MacWindowState>>, pacing: Pacing) {
         }
         return;
     }
+    if state.leave_to_display_link(false) {
+        return;
+    }
     let Some(mut callback) = state.request_frame_callback.take() else {
         return;
     };

@@ -215,6 +215,7 @@ pub(super) fn sync_panel(state: &Rc<Mutex<MacWindowState>>) {
             && level == NSFloatingWindowLevel;
         if s.player_chrome.fullscreen
             || s.player_chrome.switching_panel
+            || !s.owns_host()
             || w.attachedSheet().is_some()
             || is_workspace_panel(unsafe { &*s.native_window }) == enter
         {
@@ -239,6 +240,7 @@ pub(super) fn sync_panel(state: &Rc<Mutex<MacWindowState>>) {
         let mut s = state.lock();
         s.restore_traffic_light();
         s.native_window = target_ptr;
+        s.own_window = target_ptr;
         s.traffic_light_frames = None;
     }
     source.setContentView(None);

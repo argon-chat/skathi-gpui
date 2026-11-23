@@ -27,6 +27,7 @@ use core_foundation_sys::number::{CFBooleanGetValue, CFBooleanRef};
 use core_graphics::display::CGDirectDisplayID;
 use ctor::ctor;
 use futures::channel::oneshot;
+use gpui::metal_frame_source::{FrameOccasion, FramePath, MetalFrameSource as MetalFrameSetting};
 use gpui_apple::display_link::MetalFrameSource;
 use gpui_util::ResultExt;
 use objc2::{
@@ -60,7 +61,8 @@ use parking_lot::Mutex;
 use raw_window_handle as rwh;
 use smallvec::SmallVec;
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
+    collections::HashMap,
     ffi::{CStr, CString, c_void},
     mem,
     ops::Range,
@@ -412,11 +414,13 @@ pub(crate) unsafe fn set_active_window_cursor_style(style: CursorStyle) {
             None
         };
 
-        let Some(active_window) = active_window else {
-            return;
+        let window_state = match active_window {
+            Some(window) => get_window_state(&*window),
+            None => match foreign_host_state(key_window) {
+                Some(state) => state,
+                None => return,
+            },
         };
-
-        let window_state = get_window_state(&*active_window);
         let mut window_state = window_state.lock();
         if window_state.cursor_style != style {
             window_state.cursor_style = style;
@@ -683,11 +687,20 @@ struct MacWindowState {
     handle: AnyWindowHandle,
     foreground_executor: ForegroundExecutor,
     background_executor: BackgroundExecutor,
+    /// The window the view is in. vue-native: an embedding program may move the
+    /// view into a window of its own; window calls then go there.
     native_window: *mut AnyObject,
     native_view: NonNull<AnyObject>,
-    /// vue-native: the `NSWindow` the view was last in; a host may move the
-    /// view into a window of its own.
-    vn_host_window: *mut AnyObject,
+    /// vue-native: the window gpui created, which keeps its delegate, tabs,
+    /// restorable state and chrome when the view is elsewhere.
+    own_window: *mut AnyObject,
+    /// vue-native: notification observers on a `native_window` gpui did not
+    /// create, which this state retains while the view is in it.
+    host_observers: Vec<Retained<AnyObject>>,
+    /// vue-native: where frames get their drawables.
+    frame_setting: MetalFrameSetting,
+    /// vue-native: the next display link frame redraws in full.
+    force_next_frame: bool,
     blurred_view: Option<*mut AnyObject>,
     background_appearance: WindowBackgroundAppearance,
     // The desktop picture under `blurred_view` while a blurred window is in
@@ -758,7 +771,36 @@ struct MacWindowState {
 }
 
 impl MacWindowState {
+    /// vue-native: the view is in the window gpui created. Its chrome (titlebar
+    /// buttons and transparency, the fullscreen backdrop) is left alone on a
+    /// window it did not create.
+    fn owns_host(&self) -> bool {
+        self.native_window == self.own_window
+    }
+
+    fn frame_path(&self, occasion: FrameOccasion) -> FramePath {
+        self.frame_setting
+            .path(occasion, matches!(self.frame_source, FrameSource::Metal(_)))
+    }
+
+    /// vue-native: under `MetalFrameSource::DisplayLink` a frame wanted at once
+    /// is left to the display link's next update, which is woken; returns
+    /// whether it was.
+    fn leave_to_display_link(&mut self, force_render: bool) -> bool {
+        if self.frame_path(FrameOccasion::Immediate) != FramePath::WakeDisplayLink {
+            return false;
+        }
+        self.force_next_frame |= force_render;
+        if let FrameSource::Metal(frames) = &self.frame_source {
+            frames.wake();
+        }
+        true
+    }
+
     fn move_traffic_light(&mut self) {
+        if !self.owns_host() {
+            return;
+        }
         if self.player_chrome.button_opacity.is_some() {
             player_chrome::show_buttons(self, !self.player_chrome.buttons_hidden);
         }
@@ -826,6 +868,9 @@ impl MacWindowState {
     }
 
     fn update_native_titlebar_visibility(&self) {
+        if !self.owns_host() {
+            return;
+        }
         let Some(close_button) = self
             .native_window()
             .standardWindowButton(NSWindowButton::CloseButton)
@@ -844,7 +889,7 @@ impl MacWindowState {
             patchVersion: 0,
         };
 
-        if is_macos_version_at_least(min_version) {
+        if is_macos_version_at_least(min_version) && self.owns_host() {
             unsafe {
                 let _: () = msg_send![self.native_window, setTitlebarAppearsTransparent: Bool::NO];
             }
@@ -858,7 +903,7 @@ impl MacWindowState {
             patchVersion: 0,
         };
 
-        if is_macos_version_at_least(min_version) && self.transparent_titlebar {
+        if is_macos_version_at_least(min_version) && self.transparent_titlebar && self.owns_host() {
             unsafe {
                 let _: () = msg_send![self.native_window, setTitlebarAppearsTransparent: Bool::YES];
             }
@@ -902,6 +947,9 @@ impl MacWindowState {
     }
 
     fn restore_traffic_light(&mut self) {
+        if !self.owns_host() {
+            return;
+        }
         if let Some(frames) = self.traffic_light_frames.take() {
             let Some(buttons) = self.traffic_light_buttons() else {
                 return;
@@ -950,7 +998,8 @@ impl MacWindowState {
             self.renderer
                 .set_refresh_interval(Duration::from_secs_f64(1.0 / fps as f64));
         }
-        let covered = !self.on_screen();
+        let covered =
+            !self.on_screen() && self.frame_path(FrameOccasion::Covered) == FramePath::NextDrawable;
         match &mut self.frame_source {
             FrameSource::Metal(_) if covered => {
                 let screen: *mut AnyObject = unsafe { msg_send![self.native_window, screen] };
@@ -1233,7 +1282,11 @@ impl MacWindow {
             let native_view: *mut AnyObject = msg_send![native_view, initWithFrame: content_bounds];
             assert!(!native_view.is_null());
 
-            let metal_frames = MetalFrameSource::is_available().then(Rc::<MetalFrames>::default);
+            let frame_setting = gpui::metal_frame_source::metal_frame_source();
+            let link_available = MetalFrameSource::is_available();
+            let metal_frames = (frame_setting.path(FrameOccasion::Paced, link_available)
+                == FramePath::DisplayLink)
+                .then(Rc::<MetalFrames>::default);
             let (foreground, background) =
                 (foreground_executor.clone(), background_executor.clone());
             let state = Rc::new(Mutex::new(MacWindowState {
@@ -1242,7 +1295,10 @@ impl MacWindow {
                 background_executor,
                 native_window,
                 native_view: NonNull::new_unchecked(native_view),
-                vn_host_window: native_window,
+                own_window: native_window,
+                host_observers: Vec::new(),
+                frame_setting,
+                force_next_frame: false,
                 blurred_view: None,
                 background_appearance: WindowBackgroundAppearance::Opaque,
                 fullscreen_backdrop: FullscreenBackdrop::new(),
@@ -1510,6 +1566,9 @@ impl MacWindow {
             if !key_window.is_null() && player_chrome::is_workspace_panel(&*key_window) {
                 return Some(get_window_state(&*key_window).lock().handle);
             }
+            if let Some(state) = foreign_host_state(key_window) {
+                return Some(state.lock().handle);
+            }
             if !main_window.is_null() && msg_send![main_window, isKindOfClass: WINDOW_CLASS] {
                 let handle = get_window_state(&*main_window).lock().handle;
                 Some(handle)
@@ -1536,8 +1595,11 @@ impl MacWindow {
                     {
                         continue;
                     }
-                    let handle = get_window_state(&*window).lock().handle;
-                    window_handles.push(handle);
+                    if let Some(state) = hosted(&*window) {
+                        window_handles.push(state.lock().handle);
+                    }
+                } else if let Some(state) = foreign_host_state(window) {
+                    window_handles.push(state.lock().handle);
                 }
             }
 
@@ -1586,7 +1648,11 @@ impl Drop for MacWindow {
         // renderer's command queue are actually released with the window.
         drop(this.accesskit_adapter.take());
         this.renderer.destroy();
-        let window = this.native_window;
+        let window = this.own_window;
+        if this.native_window != window {
+            let host = mem::replace(&mut this.native_window, window);
+            forget_foreign_host(host, mem::take(&mut this.host_observers));
+        }
         let sheet_parent = this.sheet_parent.take();
         let parked = this.player_chrome.parked.take();
         match &mut this.frame_source {
@@ -1595,7 +1661,7 @@ impl Drop for MacWindow {
         }
         drop(this.occluded_frames.take());
         unsafe {
-            let _: () = msg_send![this.native_window, setDelegate: ptr::null_mut::<AnyObject>()];
+            let _: () = msg_send![window, setDelegate: ptr::null_mut::<AnyObject>()];
         }
         this.input_handler.take();
         // A delivery task queued by `report_visibility` may still run after the
@@ -1676,7 +1742,7 @@ impl PlatformWindow for MacWindow {
     }
 
     fn merge_all_windows(&self) {
-        let native_window = self.0.lock().native_window;
+        let native_window = self.0.lock().own_window;
         extern "C" fn merge_windows_async(context: *mut std::ffi::c_void) {
             unsafe {
                 let native_window = context as *mut AnyObject;
@@ -1691,7 +1757,7 @@ impl PlatformWindow for MacWindow {
     }
 
     fn move_tab_to_new_window(&self) {
-        let native_window = self.0.lock().native_window;
+        let native_window = self.0.lock().own_window;
         extern "C" fn move_tab_async(context: *mut std::ffi::c_void) {
             unsafe {
                 let native_window = context as *mut AnyObject;
@@ -1709,14 +1775,14 @@ impl PlatformWindow for MacWindow {
     }
 
     fn toggle_window_tab_overview(&self) {
-        let native_window = self.0.lock().native_window;
+        let native_window = self.0.lock().own_window;
         unsafe {
             let _: () = msg_send![native_window, toggleTabOverview:ptr::null_mut::<AnyObject>()];
         }
     }
 
     fn set_tabbing_identifier(&self, tabbing_identifier: Option<String>) {
-        let native_window = self.0.lock().native_window;
+        let native_window = self.0.lock().own_window;
         unsafe {
             let allows_automatic_window_tabbing = tabbing_identifier.is_some();
             if allows_automatic_window_tabbing {
@@ -1741,7 +1807,7 @@ impl PlatformWindow for MacWindow {
             if state.is_fullscreen() || state.simple_fullscreen_state.is_some() {
                 return None;
             }
-            state.native_window
+            state.own_window
         };
         // SAFETY: `native_window` is a live `NSWindow` retained by this window's state, and the
         // selectors below are AppKit/Foundation methods sent with their documented signatures. The
@@ -1787,7 +1853,7 @@ impl PlatformWindow for MacWindow {
         if state.is_empty() {
             return;
         }
-        let native_window = self.0.lock().native_window;
+        let native_window = self.0.lock().own_window;
         // SAFETY: `native_window` is a live `NSWindow` retained by this window's state. The NSData,
         // NSKeyedUnarchiver and `restoreStateWithCoder:` selectors are sent with their documented
         // signatures, and the `NSData` only borrows `state` for the duration of this synchronous
@@ -2602,7 +2668,7 @@ impl PlatformWindow for MacWindow {
         let closed = this.closed.clone();
         this.foreground_executor
             .spawn(async move {
-                let window = state.lock().native_window;
+                let window = state.lock().own_window;
                 if_window_not_closed(closed, || unsafe {
                     let _: () = msg_send![window, performClose: ptr::null_mut::<AnyObject>()];
                 })
@@ -2659,7 +2725,7 @@ impl PlatformWindow for MacWindow {
 
     fn tabbed_windows(&self) -> Option<Vec<SystemWindowTab>> {
         unsafe {
-            let windows: *mut AnyObject = msg_send![self.0.lock().native_window, tabbedWindows];
+            let windows: *mut AnyObject = msg_send![self.0.lock().own_window, tabbedWindows];
             if windows.is_null() {
                 return None;
             }
@@ -2683,7 +2749,7 @@ impl PlatformWindow for MacWindow {
 
     fn tab_bar_visible(&self) -> bool {
         unsafe {
-            let tab_group: *mut AnyObject = msg_send![self.0.lock().native_window, tabGroup];
+            let tab_group: *mut AnyObject = msg_send![self.0.lock().own_window, tabGroup];
             if tab_group.is_null() {
                 false
             } else {
@@ -3858,36 +3924,51 @@ fn report_visibility(window_state: &Rc<Mutex<MacWindowState>>) {
 }
 
 extern "C" fn window_did_change_occlusion_state(this: &AnyObject, _: Sel, _: *mut AnyObject) {
-    let window_state = unsafe { get_window_state(this) };
+    if let Some(window_state) = hosted(this) {
+        occlusion_changed(&window_state);
+    }
+}
+
+fn occlusion_changed(window_state: &Rc<Mutex<MacWindowState>>) {
     let mut lock = window_state.lock();
     if lock.draws() {
         lock.move_traffic_light();
-        lock.start_display_link(&window_state);
+        lock.start_display_link(window_state);
     } else {
         lock.stop_display_link();
     }
     drop(lock);
     // The only visibility source: AppKit posts this for covering, minimizing,
     // hiding, Space switches, and display sleep alike.
-    report_visibility(&window_state);
+    report_visibility(window_state);
 }
 
 extern "C" fn window_did_resize(this: &AnyObject, _: Sel, _: *mut AnyObject) {
+    if hosted(this).is_none() {
+        return;
+    }
     let window_state = unsafe { get_window_state(this) };
     window_state.as_ref().lock().move_traffic_light();
 }
 
 fn report_fullscreen_transition(this: &AnyObject, event: gpui::WindowFullscreenTransition) {
-    let callback = unsafe { get_window_state(this) }
-        .lock()
-        .fullscreen_changed
-        .clone();
+    report_fullscreen_to(&unsafe { get_window_state(this) }, event);
+}
+
+fn report_fullscreen_to(
+    window_state: &Rc<Mutex<MacWindowState>>,
+    event: gpui::WindowFullscreenTransition,
+) {
+    let callback = window_state.lock().fullscreen_changed.clone();
     if let Some(callback) = callback {
         callback(event);
     }
 }
 
 extern "C" fn window_will_enter_fullscreen(this: &AnyObject, _: Sel, _: *mut AnyObject) {
+    if hosted(this).is_none() {
+        return;
+    }
     unsafe { get_window_state(this) }
         .lock()
         .player_chrome
@@ -3912,6 +3993,9 @@ extern "C" fn window_will_enter_fullscreen(this: &AnyObject, _: Sel, _: *mut Any
 }
 
 extern "C" fn window_did_enter_fullscreen(this: &AnyObject, _: Sel, _: *mut AnyObject) {
+    if hosted(this).is_none() {
+        return;
+    }
     player_chrome::finish_fullscreen(&unsafe { get_window_state(this) }, true);
     report_fullscreen_transition(this, gpui::WindowFullscreenTransition::Did(true));
     // SAFETY: registered only on GPUI window classes, whose WINDOW_STATE_IVAR
@@ -3930,6 +4014,9 @@ extern "C" fn window_did_enter_fullscreen(this: &AnyObject, _: Sel, _: *mut AnyO
 }
 
 extern "C" fn window_did_fail_to_enter_fullscreen(this: &AnyObject, _: Sel, _: *mut AnyObject) {
+    if hosted(this).is_none() {
+        return;
+    }
     player_chrome::finish_fullscreen(&unsafe { get_window_state(this) }, false);
     report_fullscreen_transition(this, gpui::WindowFullscreenTransition::Cancelled(true));
     // SAFETY: registered only on GPUI window classes, whose WINDOW_STATE_IVAR
@@ -3968,6 +4055,9 @@ fn sync_fullscreen_backdrop(
     entering: bool,
 ) {
     let mut lock = window_state.lock();
+    if !lock.owns_host() {
+        return;
+    }
     let fullscreen = fullscreen.unwrap_or_else(|| lock.is_fullscreen());
     let native_window = lock.native_window;
     let blur_view = lock
@@ -4038,6 +4128,7 @@ fn prefetch_desktop_picture(window_state: &Rc<Mutex<MacWindowState>>) {
         || lock.blurred_view.is_none()
         || lock.fullscreen_backdrop.is_active()
         || lock.closed.load(Ordering::Acquire)
+        || !lock.owns_host()
     {
         return;
     }
@@ -4064,6 +4155,9 @@ fn desktop_picture_screen_changed(window_state: &Rc<Mutex<MacWindowState>>) {
 }
 
 extern "C" fn window_will_exit_fullscreen(this: &AnyObject, _: Sel, _: *mut AnyObject) {
+    if hosted(this).is_none() {
+        return;
+    }
     unsafe { get_window_state(this) }
         .lock()
         .player_chrome
@@ -4077,6 +4171,9 @@ extern "C" fn window_will_exit_fullscreen(this: &AnyObject, _: Sel, _: *mut AnyO
 }
 
 extern "C" fn window_did_fail_to_exit_fullscreen(this: &AnyObject, _: Sel, _: *mut AnyObject) {
+    if hosted(this).is_none() {
+        return;
+    }
     player_chrome::finish_fullscreen(&unsafe { get_window_state(this) }, true);
     report_fullscreen_transition(this, gpui::WindowFullscreenTransition::Cancelled(false));
     let window_state = unsafe { get_window_state(this) };
@@ -4089,6 +4186,9 @@ extern "C" fn window_did_fail_to_exit_fullscreen(this: &AnyObject, _: Sel, _: *m
 }
 
 extern "C" fn window_did_exit_fullscreen(this: &AnyObject, _: Sel, _: *mut AnyObject) {
+    if hosted(this).is_none() {
+        return;
+    }
     player_chrome::finish_fullscreen(&unsafe { get_window_state(this) }, false);
     report_fullscreen_transition(this, gpui::WindowFullscreenTransition::Did(false));
     // SAFETY: This method is registered only on GPUI window classes, which initialize
@@ -4125,7 +4225,12 @@ fn ns_error_description(error: *mut AnyObject) -> String {
 }
 
 extern "C" fn window_did_move(this: &AnyObject, _: Sel, _: *mut AnyObject) {
-    let window_state = unsafe { get_window_state(this) };
+    if let Some(window_state) = hosted(this) {
+        moved(&window_state);
+    }
+}
+
+fn moved(window_state: &Rc<Mutex<MacWindowState>>) {
     let mut lock = window_state.as_ref().lock();
     if let Some(mut callback) = lock.moved_callback.take() {
         drop(lock);
@@ -4162,14 +4267,19 @@ fn update_window_scale_factor(window_state: &Rc<Mutex<MacWindowState>>) {
 }
 
 extern "C" fn window_did_change_screen(this: &AnyObject, _: Sel, _: *mut AnyObject) {
-    let window_state = unsafe { get_window_state(this) };
+    if let Some(window_state) = hosted(this) {
+        screen_changed(&window_state);
+    }
+}
+
+fn screen_changed(window_state: &Rc<Mutex<MacWindowState>>) {
     let mut lock = window_state.as_ref().lock();
-    lock.start_display_link(&window_state);
+    lock.start_display_link(window_state);
     drop(lock);
     // Another screen, another picture: shown in fullscreen, decoded ahead windowed.
-    desktop_picture_screen_changed(&window_state);
-    update_window_scale_factor(&window_state);
-    report_display_change(&window_state);
+    desktop_picture_screen_changed(window_state);
+    update_window_scale_factor(window_state);
+    report_display_change(window_state);
 }
 
 fn report_display_change(window_state: &Rc<Mutex<MacWindowState>>) {
@@ -4191,8 +4301,13 @@ fn report_display_change(window_state: &Rc<Mutex<MacWindowState>>) {
 }
 
 extern "C" fn window_did_change_key_status(this: &AnyObject, selector: Sel, _: *mut AnyObject) {
+    if let Some(window_state) = hosted(this) {
+        key_status_changed(window_state, selector == sel!(windowDidBecomeKey:));
+    }
+}
+
+fn key_status_changed(window_state: Rc<Mutex<MacWindowState>>, became_key: bool) {
     let signal_at = PlatformFrameSignal::capture(scheduler::Instant::now);
-    let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.lock();
     let is_active = lock.native_window().isKeyWindow();
     if !is_active {
@@ -4211,7 +4326,7 @@ extern "C" fn window_did_change_key_status(this: &AnyObject, selector: Sel, _: *
     // The following code detects the spurious event and invokes `resignKeyWindow`:
     // in theory, we're not supposed to invoke this method manually but it balances out
     // the spurious `becomeKeyWindow` event and helps us work around that bug.
-    if selector == sel!(windowDidBecomeKey:) && !is_active {
+    if became_key && !is_active {
         let native_window = lock.native_window;
         drop(lock);
         unsafe {
@@ -4239,12 +4354,13 @@ extern "C" fn window_did_change_key_status(this: &AnyObject, selector: Sel, _: *
     // This is only done on subsequent activations (not the first) to ensure the initial focus
     // path is properly established. Without this guard, the focus state would remain unset until
     // the first mouse click, causing keybindings to be non-functional.
-    if selector == sel!(windowDidBecomeKey:) && is_active {
-        let window_state = unsafe { get_window_state(this) };
+    if became_key && is_active {
         let mut lock = window_state.lock();
 
         if lock.activated_least_once {
-            if let Some(mut callback) = lock.request_frame_callback.take() {
+            if !lock.leave_to_display_link(false)
+                && let Some(mut callback) = lock.request_frame_callback.take()
+            {
                 lock.renderer.set_presents_with_transaction(true);
                 lock.stop_display_link();
                 drop(lock);
@@ -4281,7 +4397,9 @@ extern "C" fn window_did_change_key_status(this: &AnyObject, selector: Sel, _: *
 }
 
 extern "C" fn window_should_close(this: &AnyObject, _: Sel, _: *mut AnyObject) -> Bool {
-    let window_state = unsafe { get_window_state(this) };
+    let Some(window_state) = hosted(this) else {
+        return Bool::YES;
+    };
     let mut lock = window_state.as_ref().lock();
     if let Some(mut callback) = lock.should_close_callback.take() {
         drop(lock);
@@ -4294,6 +4412,13 @@ extern "C" fn window_should_close(this: &AnyObject, _: Sel, _: *mut AnyObject) -
 }
 
 extern "C" fn close_window(this: &AnyObject, _: Sel) {
+    if hosted(this).is_none() {
+        // The view lives on in a window of the embedding program's.
+        unsafe {
+            let _: () = msg_send![super(this, class!(NSWindow)), close];
+        }
+        return;
+    }
     unsafe {
         let (close_callback, simple_fullscreen_state, document_drag) = {
             let window_state = get_window_state(this);
@@ -4377,6 +4502,9 @@ extern "C" fn display_layer(this: &AnyObject, _: Sel, _: *mut AnyObject) {
     let signal_at = PlatformFrameSignal::capture(scheduler::Instant::now);
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.lock();
+    if lock.leave_to_display_link(false) {
+        return;
+    }
     if let Some(mut callback) = lock.request_frame_callback.take() {
         lock.renderer.set_presents_with_transaction(true);
         lock.stop_display_link();
@@ -4394,8 +4522,161 @@ extern "C" fn display_layer(this: &AnyObject, _: Sel, _: *mut AnyObject) {
     }
 }
 
-/// vue-native: a view moved into another `NSWindow` by the host redraws in full
-/// there, so what paints follows it (an embedder's layer under the page).
+thread_local! {
+    /// vue-native: windows an embedding program moved a GPUI view into, by pointer.
+    static FOREIGN_HOSTS: RefCell<HashMap<usize, Weak<Mutex<MacWindowState>>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// vue-native: the state of the GPUI window `this` while its view is in it;
+/// `None` once an embedding program moved the view into another window, so the
+/// delegate of the window left behind no longer drives the GPUI window.
+fn hosted(this: &AnyObject) -> Option<Rc<Mutex<MacWindowState>>> {
+    // SAFETY: registered only on GPUI window classes, whose ivar holds the state.
+    let state = unsafe { get_window_state(this) };
+    let hosting = state.lock().native_window == ptr::from_ref(this).cast_mut();
+    hosting.then_some(state)
+}
+
+/// vue-native: the state whose view an embedding program moved into `window`.
+fn foreign_host_state(window: *mut AnyObject) -> Option<Rc<Mutex<MacWindowState>>> {
+    FOREIGN_HOSTS.with(|hosts| hosts.borrow().get(&(window as usize))?.upgrade())
+}
+
+/// vue-native: what a window gpui did not create tells the GPUI window, by
+/// notification, so the embedding program's delegate stays its own.
+const FOREIGN_HOST_EVENTS: [(&str, fn(&Rc<Mutex<MacWindowState>>)); 9] = [
+    ("NSWindowDidMoveNotification", moved),
+    ("NSWindowDidChangeScreenNotification", screen_changed),
+    (
+        "NSWindowDidChangeOcclusionStateNotification",
+        occlusion_changed,
+    ),
+    ("NSWindowDidBecomeKeyNotification", host_became_key),
+    ("NSWindowDidResignKeyNotification", host_resigned_key),
+    (
+        "NSWindowWillEnterFullScreenNotification",
+        host_will_enter_fullscreen,
+    ),
+    (
+        "NSWindowDidEnterFullScreenNotification",
+        host_did_enter_fullscreen,
+    ),
+    (
+        "NSWindowWillExitFullScreenNotification",
+        host_will_exit_fullscreen,
+    ),
+    (
+        "NSWindowDidExitFullScreenNotification",
+        host_did_exit_fullscreen,
+    ),
+];
+
+fn host_became_key(state: &Rc<Mutex<MacWindowState>>) {
+    key_status_changed(state.clone(), true);
+}
+
+fn host_resigned_key(state: &Rc<Mutex<MacWindowState>>) {
+    key_status_changed(state.clone(), false);
+}
+
+fn host_will_enter_fullscreen(state: &Rc<Mutex<MacWindowState>>) {
+    report_fullscreen_to(state, gpui::WindowFullscreenTransition::Will(true));
+}
+
+fn host_did_enter_fullscreen(state: &Rc<Mutex<MacWindowState>>) {
+    report_fullscreen_to(state, gpui::WindowFullscreenTransition::Did(true));
+}
+
+fn host_will_exit_fullscreen(state: &Rc<Mutex<MacWindowState>>) {
+    report_fullscreen_to(state, gpui::WindowFullscreenTransition::Will(false));
+}
+
+fn host_did_exit_fullscreen(state: &Rc<Mutex<MacWindowState>>) {
+    report_fullscreen_to(state, gpui::WindowFullscreenTransition::Did(false));
+}
+
+fn observe_foreign_host(
+    window: *mut AnyObject,
+    window_state: &Rc<Mutex<MacWindowState>>,
+) -> Vec<Retained<AnyObject>> {
+    // SAFETY: main thread; `window` is a live window the view was just moved into.
+    let center: *mut AnyObject = unsafe { msg_send![class!(NSNotificationCenter), defaultCenter] };
+    FOREIGN_HOST_EVENTS
+        .iter()
+        .filter_map(|&(name, handle)| {
+            let weak = Rc::downgrade(window_state);
+            let block = RcBlock::new(move |_: NonNull<AnyObject>| {
+                let Some(state) = weak.upgrade() else {
+                    return;
+                };
+                if state.lock().native_window == window {
+                    handle(&state);
+                }
+            });
+            // SAFETY: the centre copies the block; the token it returns is
+            // retained until `forget_foreign_host` removes it.
+            unsafe {
+                let token: *mut AnyObject = msg_send![
+                    center,
+                    addObserverForName: ns_string(name),
+                    object: window,
+                    queue: ptr::null_mut::<AnyObject>(),
+                    usingBlock: &*block
+                ];
+                Retained::retain(token)
+            }
+        })
+        .collect()
+}
+
+/// Stops observing a window gpui did not create and lets go of it.
+fn forget_foreign_host(window: *mut AnyObject, observers: Vec<Retained<AnyObject>>) {
+    // SAFETY: main thread; the observers came from this centre and `window`
+    // was retained when the view moved into it.
+    unsafe {
+        let center: *mut AnyObject = msg_send![class!(NSNotificationCenter), defaultCenter];
+        for observer in observers {
+            let _: () = msg_send![center, removeObserver: &*observer];
+        }
+        let _: () = msg_send![window, release];
+    }
+    FOREIGN_HOSTS.with(|hosts| hosts.borrow_mut().remove(&(window as usize)));
+}
+
+/// vue-native: points the GPUI window at the `NSWindow` its view is in now;
+/// returns whether that changed.
+fn retarget(window_state: &Rc<Mutex<MacWindowState>>, window: *mut AnyObject) -> bool {
+    let mut lock = window_state.lock();
+    let old = lock.native_window;
+    if old == window {
+        return false;
+    }
+    let own = lock.own_window;
+    let old_observers = std::mem::take(&mut lock.host_observers);
+    lock.native_window = window;
+    if window != own {
+        // SAFETY: main thread; the window outlives the view's stay only if retained.
+        unsafe {
+            let _: *mut AnyObject = msg_send![window, retain];
+        }
+        lock.host_observers = observe_foreign_host(window, window_state);
+        FOREIGN_HOSTS.with(|hosts| {
+            hosts
+                .borrow_mut()
+                .insert(window as usize, Rc::downgrade(window_state))
+        });
+    }
+    drop(lock);
+    if old != own {
+        forget_foreign_host(old, old_observers);
+    }
+    true
+}
+
+/// vue-native: a view moved into another `NSWindow` follows it: window calls go
+/// there, its screen, occlusion and key status drive the GPUI window, and the
+/// page redraws in full there (an embedder's layer under the page is re-attached).
 extern "C" fn view_did_move_to_window(this: &AnyObject, _: Sel) {
     unsafe {
         let _: () = msg_send![super(this, class!(NSView)), viewDidMoveToWindow];
@@ -4405,39 +4686,70 @@ extern "C" fn view_did_move_to_window(this: &AnyObject, _: Sel) {
         return;
     }
     let window_state = unsafe { get_window_state(this) };
-    let Some(mut lock) = window_state.try_lock() else {
-        return;
+    let executor = {
+        let Some(lock) = window_state.try_lock() else {
+            // Moved while the window state is in use: follow on the next turn.
+            type Moved = (Weak<Mutex<MacWindowState>>, *mut AnyObject);
+            extern "C" fn follow_later(context: *mut c_void) {
+                // SAFETY: boxed below and handed over once.
+                let (weak, window) = *unsafe { Box::from_raw(context.cast::<Moved>()) };
+                if let Some(state) = weak.upgrade()
+                    && retarget(&state, window)
+                {
+                    follow_moved_view(&state);
+                }
+            }
+            let moved: Box<Moved> = Box::new((Rc::downgrade(&window_state), window));
+            // SAFETY: the main queue runs `follow_later` once with the box.
+            unsafe {
+                DispatchQueue::main().exec_async_f(Box::into_raw(moved).cast(), follow_later);
+            }
+            return;
+        };
+        lock.foreground_executor.clone()
     };
-    if lock.vn_host_window == window {
+    if !retarget(&window_state, window) {
         return;
     }
-    lock.vn_host_window = window;
-    let executor = lock.foreground_executor.clone();
-    drop(lock);
-    let window_state = Rc::downgrade(&window_state);
+    let weak = Rc::downgrade(&window_state);
     executor
         .spawn(async move {
-            let Some(window_state) = window_state.upgrade() else {
-                return;
-            };
-            let mut lock = window_state.lock();
-            let Some(mut callback) = lock.request_frame_callback.take() else {
-                return;
-            };
-            lock.renderer.set_presents_with_transaction(true);
-            lock.stop_display_link();
-            drop(lock);
-            callback(RequestFrameOptions {
-                force_render: true,
-                signal_source: FrameRequestSource::NativeCallback,
-                ..Default::default()
-            });
-            let mut lock = window_state.lock();
-            lock.request_frame_callback = Some(callback);
-            lock.renderer.set_presents_with_transaction(false);
-            lock.start_display_link(&window_state);
+            if let Some(state) = weak.upgrade() {
+                follow_moved_view(&state);
+            }
         })
         .detach();
+}
+
+/// The view's window changed: its screen, occlusion and key status may differ,
+/// and the page redraws in full.
+fn follow_moved_view(window_state: &Rc<Mutex<MacWindowState>>) {
+    if window_state.lock().closed.load(Ordering::Acquire) {
+        return;
+    }
+    screen_changed(window_state);
+    occlusion_changed(window_state);
+    let is_key = window_state.lock().native_window().isKeyWindow();
+    key_status_changed(window_state.clone(), is_key);
+    let mut lock = window_state.lock();
+    if lock.leave_to_display_link(true) {
+        return;
+    }
+    let Some(mut callback) = lock.request_frame_callback.take() else {
+        return;
+    };
+    lock.renderer.set_presents_with_transaction(true);
+    lock.stop_display_link();
+    drop(lock);
+    callback(RequestFrameOptions {
+        force_render: true,
+        signal_source: FrameRequestSource::NativeCallback,
+        ..Default::default()
+    });
+    let mut lock = window_state.lock();
+    lock.request_frame_callback = Some(callback);
+    lock.renderer.set_presents_with_transaction(false);
+    lock.start_display_link(window_state);
 }
 
 extern "C" fn step(view: *mut c_void) {
@@ -4474,6 +4786,14 @@ fn leave_stalled_metal_link(window_state: &Rc<Mutex<MacWindowState>>, updates: u
     if !metal_frames.stalled_since(updates) {
         return;
     }
+    if lock.frame_path(FrameOccasion::Stalled) == FramePath::DisplayLink {
+        log::warn!(
+            "CAMetalDisplayLink delivered no frame {METAL_LINK_STALL:?} after a wake; the window's \
+             frame source is pinned to it, so the link is created again"
+        );
+        lock.start_display_link(window_state);
+        return;
+    }
     log::warn!(
         "CAMetalDisplayLink delivered no frame {METAL_LINK_STALL:?} after a wake; this window now \
          takes its frames from CVDisplayLink"
@@ -4505,9 +4825,11 @@ fn metal_frame(
     lock.renderer.set_frame_drawable(Some(update.drawable()));
     lock.renderer
         .set_frame_target(update.targetPresentationTimestamp());
+    let force_render = std::mem::take(&mut lock.force_next_frame);
     drop(lock);
     metal_frames.begin_frame();
     callback(RequestFrameOptions {
+        force_render,
         signal_at,
         signal_source: FrameRequestSource::NativeCallback,
         ..Default::default()

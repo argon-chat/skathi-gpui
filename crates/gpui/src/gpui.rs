@@ -21,7 +21,7 @@ pub extern crate subsecond;
 extern crate self as gpui;
 
 pub mod colors;
-pub mod drawables;
+pub mod metal_frame_source;
 pub mod prelude;
 pub mod present_feedback;
 pub mod profiler;
