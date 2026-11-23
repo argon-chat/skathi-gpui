@@ -993,7 +993,7 @@ impl WgpuRendererCore {
                 &[Some(wgpu::ColorTargetState {
                     format: surface_format,
                     blend: Some(subpixel_blend),
-                    write_mask: wgpu::ColorWrites::COLOR,
+                    write_mask: wgpu::ColorWrites::ALL,
                 })],
                 1,
                 subpixel_module,

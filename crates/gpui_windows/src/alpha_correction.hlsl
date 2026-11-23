@@ -15,9 +15,6 @@ float text_luminance_level(float3 color) {
 }
 
 float light_on_dark_contrast(float enhancedContrast, float3 color) {
-    if (text_experiment_contrast == 1u) {
-        return enhancedContrast;
-    }
     if (text_experiment_contrast == 2u) {
         return enhancedContrast * (0.0058f + 0.01f * text_luminance_level(color)) / 0.0058f;
     }

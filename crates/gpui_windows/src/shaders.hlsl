@@ -1996,8 +1996,9 @@ SubpixelSpriteFragmentOutput subpixel_sprite_fragment(MonochromeSpriteFragmentIn
     float mask = sprite_mask_coverage(input.position.xy, input.mask_bounds, input.mask_radii, input.mask_shapes);
 
     SubpixelSpriteFragmentOutput output;
-    output.foreground = float4(input.color.rgb, 1.0f);
-    output.alpha = float4(input.color.a * alpha_corrected * mask, 1.0f);
+    float3 coverage = input.color.a * alpha_corrected * mask;
+    output.foreground = float4(input.color.rgb, max(coverage.r, max(coverage.g, coverage.b)));
+    output.alpha = float4(coverage, 1.0f);
     return output;
 }
 

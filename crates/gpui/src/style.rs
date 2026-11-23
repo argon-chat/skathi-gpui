@@ -10,8 +10,8 @@ use crate::{
     CornerShapes, Corners, CornersRefinement, CursorStyle, DefiniteLength, DevicePixels, Edges,
     EdgesRefinement, EffectCrossFade, EffectSpec, Font, FontFallbacks, FontFeatures, FontStyle,
     FontWeight, GridLocation, Hsla, Length, Pixels, Point, PointRefinement, Rgba, SharedString,
-    Size, SizeRefinement, Styled, TextRun, TransformSpec, TransformationMatrix, VnClipOutline,
-    VnFillRule, VnPathVerb, Window, black, phi, point, px, quad, rems, size,
+    Size, SizeRefinement, Styled, TextRun, TransformLength, TransformSpec, TransformationMatrix,
+    VnClipOutline, VnFillRule, VnPathVerb, Window, black, phi, point, px, quad, rems, size,
 };
 use collections::HashSet;
 use refineable::Refineable;
@@ -751,6 +751,9 @@ pub struct Style {
     /// when it was inserted and the pointer is mapped back through the inverse,
     /// so a rotated button is clickable where it is *drawn*.
     pub vn_transform: Option<TransformSpec>,
+    /// A declared `transform-origin`. Cascades on its own, so it outranks the origin carried by a
+    /// `vn_transform` from a rule that did not declare one.
+    pub vn_transform_origin: Option<(TransformLength, TransformLength)>,
     /// Independent CSS translation applied outside the transform list.
     pub vn_translate: Option<TransformSpec>,
     /// Independent CSS rotation applied outside the transform list.
@@ -1039,6 +1042,20 @@ impl TabSize {
     pub const INITIAL: Self = Self::Spaces(8.);
 }
 
+/// vue-native fork: CSS `font-smoothing`, how glyph coverage is antialiased.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(JsonSchema))]
+pub enum FontSmoothing {
+    /// The platform's choice for the window: subpixel where the system has it on and the window
+    /// is opaque.
+    #[default]
+    Auto,
+    /// Grayscale coverage always.
+    Antialiased,
+    /// Subpixel coverage where the system has it on, whatever the window's backdrop.
+    SubpixelAntialiased,
+}
+
 impl Default for TabSize {
     fn default() -> Self {
         Self::INITIAL
@@ -1273,6 +1290,9 @@ pub struct TextStyle {
 
     /// vue-native fork: CSS `tab-size`.
     pub tab_size: TabSize,
+
+    /// vue-native fork: CSS `font-smoothing`.
+    pub font_smoothing: FontSmoothing,
 }
 
 impl Default for TextStyle {
@@ -1302,6 +1322,7 @@ impl Default for TextStyle {
             hyphens: Hyphens::default(),
             text_shadow: Vec::new(),
             tab_size: TabSize::INITIAL,
+            font_smoothing: FontSmoothing::Auto,
         }
     }
 }
@@ -1913,6 +1934,13 @@ impl Style {
         (rect, corner_radii)
     }
 
+    /// The computed `transform-origin`, relative to the border box.
+    pub fn transform_origin(&self) -> (TransformLength, TransformLength) {
+        self.vn_transform_origin
+            .or(self.vn_transform.map(|t| t.origin))
+            .unwrap_or(TransformSpec::CENTRE_ORIGIN)
+    }
+
     /// The device-space matrix this style's CSS `transform` produces for an
     /// element laid out at `bounds`, or the identity when there is none.
     ///
@@ -1924,9 +1952,7 @@ impl Style {
         bounds: Bounds<Pixels>,
         scale_factor: f32,
     ) -> TransformationMatrix {
-        let origin = self
-            .vn_transform
-            .map_or(TransformSpec::CENTRE_ORIGIN, |t| t.origin);
+        let origin = self.transform_origin();
         [self.vn_translate, self.vn_rotate, self.vn_transform]
             .into_iter()
             .flatten()
@@ -2525,6 +2551,7 @@ impl Default for Style {
             vn_effect_quality: crate::EffectQuality::Auto,
             vn_effect_fade: None,
             vn_transform: None,
+            vn_transform_origin: None,
             vn_translate: None,
             vn_rotate: None,
             vn_content_hidden: None,

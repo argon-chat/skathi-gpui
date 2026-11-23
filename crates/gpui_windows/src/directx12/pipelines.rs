@@ -746,17 +746,12 @@ fn blend_description(blend: Blend) -> D3D12_BLEND_DESC {
         D3D12_BLEND_ONE
     };
     target.DestBlendAlpha = match blend {
-        Blend::Subpixel => D3D12_BLEND_ZERO,
         Blend::PlusLighter => D3D12_BLEND_ONE,
         _ => D3D12_BLEND_INV_SRC_ALPHA,
     };
     target.BlendOpAlpha = D3D12_BLEND_OP_ADD;
     target.LogicOp = D3D12_LOGIC_OP_NOOP;
-    target.RenderTargetWriteMask = if matches!(blend, Blend::Subpixel) {
-        (D3D12_COLOR_WRITE_ENABLE_ALL.0 & !D3D12_COLOR_WRITE_ENABLE_ALPHA.0) as u8
-    } else {
-        D3D12_COLOR_WRITE_ENABLE_ALL.0 as u8
-    };
+    target.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL.0 as u8;
     description
 }
 

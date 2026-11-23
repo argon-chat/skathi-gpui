@@ -1903,6 +1903,8 @@ pub struct Window {
     touch_prediction_enabled: bool,
     long_press_timer: Option<Task<()>>,
     long_press_capture: Option<EntityId>,
+    vn_text_settle: crate::text_system::TextSettle,
+    vn_text_settle_timer: Option<Task<()>>,
     pub(crate) refreshing: bool,
     pub(crate) activation_observers: SingleSubscriberSet<AnyObserver>,
     pub(crate) focus: Option<FocusId>,
@@ -3165,6 +3167,8 @@ impl Window {
             touch_prediction_enabled: true,
             long_press_timer: None,
             long_press_capture: None,
+            vn_text_settle: Default::default(),
+            vn_text_settle_timer: None,
             refreshing: false,
             activation_observers: SingleSubscriberSet::new(),
             focus: None,
@@ -5197,6 +5201,8 @@ impl Window {
         self.reset_cursor_style(cx);
         self.refreshing = false;
         self.invalidator.set_phase(DrawPhase::None);
+        self.vn_text_settle.end_frame();
+        self.vn_arm_text_settle(cx);
         // Focus listeners may move focus (e.g. a dock forwarding focus to its active
         // panel). `Window::focus` suppresses `refresh` while a draw is in progress, so
         // schedule another frame here to render the new focus state and dispatch the
@@ -8108,25 +8114,53 @@ impl Window {
         )
     }
 
-    /// vue-native fork: [`Self::glyph_placement`] as `SK_TEXT_EXPERIMENT` changes it, with the
-    /// scale factor to rasterize at.
+    /// vue-native fork: once text painted under a moving transform has held still for
+    /// 200 ms, one frame repaints everything, cached views included, so
+    /// it is rasterized at its device size. One timer, and none while nothing waits to settle.
+    fn vn_arm_text_settle(&mut self, cx: &mut App) {
+        if !self.vn_text_settle.arm_timer() {
+            return;
+        }
+        self.vn_text_settle_timer = Some(self.spawn(cx, async move |cx| {
+            loop {
+                let wait = cx
+                    .update(|window, _| window.vn_text_settle.remaining(std::time::Instant::now()));
+                match wait {
+                    Ok(Some(wait)) if !wait.is_zero() => {
+                        cx.background_executor.timer(wait).await;
+                    }
+                    Ok(Some(_)) => {
+                        cx.update(|window, _| {
+                            window.vn_text_settle.begin_settle_frame();
+                            window.refresh();
+                        })
+                        .ok();
+                        return;
+                    }
+                    _ => {
+                        cx.update(|window, _| window.vn_text_settle.disarm()).ok();
+                        return;
+                    }
+                }
+            }
+        }));
+    }
+
+    /// vue-native fork: [`Self::glyph_placement`] for transformed text that may have settled,
+    /// with the scale factor to rasterize at.
     fn text_glyph_placement(
-        &self,
+        &mut self,
         origin: Point<Pixels>,
     ) -> (Point<ScaledPixels>, TransformationMatrix, f32) {
         use crate::text_system::GlyphTransform;
         let scale_factor = self.scale_factor();
         let transform = self.element_transform;
-        match crate::text_system::glyph_transform(&transform) {
+        match self.vn_text_settle.placement(&transform) {
             GlyphTransform::Default => {
                 let (origin, transform) = self.glyph_placement(origin);
                 (origin, transform, scale_factor)
             }
-            GlyphTransform::Resample => (origin.scale(scale_factor), transform, scale_factor),
-            GlyphTransform::Pending => {
-                self.request_animation_frame();
-                (origin.scale(scale_factor), transform, scale_factor)
-            }
+            GlyphTransform::Pending => (origin.scale(scale_factor), transform, scale_factor),
             GlyphTransform::Fold { scale } => {
                 let origin = origin.scale(scale_factor);
                 let [x, y] = transform.translation;
@@ -8236,8 +8270,24 @@ impl Window {
             return false;
         }
 
-        if self.platform_window.background_appearance() != WindowBackgroundAppearance::Opaque {
-            return false;
+        let smoothing = self
+            .text_style_stack
+            .iter()
+            .rev()
+            .find_map(|style| style.font_smoothing)
+            .unwrap_or_default();
+        match smoothing {
+            crate::FontSmoothing::Antialiased => return false,
+            // Right over opaque content; over a see-through backdrop the subpixel coverage
+            // shows as colour fringes.
+            crate::FontSmoothing::SubpixelAntialiased => {}
+            crate::FontSmoothing::Auto => {
+                if self.platform_window.background_appearance()
+                    != WindowBackgroundAppearance::Opaque
+                {
+                    return false;
+                }
+            }
         }
 
         let mode = match self.text_rendering_mode.get() {

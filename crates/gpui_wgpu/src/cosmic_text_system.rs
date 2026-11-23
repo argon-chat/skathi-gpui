@@ -7,8 +7,8 @@ use cosmic_text::{
 use gpui::{
     Bounds, DevicePixels, FallbackFontClass, Font, FontFallbacks, FontFeatures, FontId,
     FontMetrics, FontRun, GlyphId, IsZero as _, LineLayout, MissingGlyph, MissingGlyphSink, Pixels,
-    PlatformTextSystem, RenderGlyphParams, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ShapedGlyph,
-    ShapedRun, SharedString, Size, TextRenderingMode, point, size,
+    PlatformTextSystem, RenderGlyphParams, ShapedGlyph, ShapedRun, SharedString, Size,
+    TextRenderingMode, point, size,
 };
 
 use itertools::Itertools;
@@ -567,10 +567,9 @@ impl CosmicTextSystemState {
         let font_ref = loaded_font.font.as_swash();
         let pixel_size = f32::from(params.font_size);
 
-        let subpixel_offset = Vector::new(
-            params.subpixel_variant.x as f32 / SUBPIXEL_VARIANTS_X as f32 / params.scale_factor,
-            params.subpixel_variant.y as f32 / SUBPIXEL_VARIANTS_Y as f32 / params.scale_factor,
-        );
+        let shift = gpui::subpixel_variant_offset(params.subpixel_variant);
+        let subpixel_offset =
+            Vector::new(shift.x / params.scale_factor, shift.y / params.scale_factor);
 
         let mut scaler = self
             .swash_scale_context

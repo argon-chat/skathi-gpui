@@ -3388,11 +3388,11 @@ fn create_blend_state_for_subpixel_rendering(device: &ID3D11Device) -> Result<ID
     desc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
     desc.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC1_COLOR;
     desc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC1_COLOR;
-    // It does not make sense to draw transparent subpixel-rendered text, since it cannot be meaningfully alpha-blended onto anything else.
+    // vue-native fork: alpha is the strongest channel's coverage, source-over, so subpixel text
+    // over a see-through backdrop leaves a valid premultiplied pixel; an opaque one stays opaque.
     desc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
-    desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
-    desc.RenderTarget[0].RenderTargetWriteMask =
-        D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8 & !D3D11_COLOR_WRITE_ENABLE_ALPHA.0 as u8;
+    desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+    desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8;
 
     unsafe {
         let mut state = None;

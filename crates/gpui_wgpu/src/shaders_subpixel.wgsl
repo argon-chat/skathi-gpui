@@ -66,7 +66,8 @@ fn fs_subpixel_sprite(input: SubpixelSpriteOutput) -> SubpixelSpriteFragmentOutp
 
     let mask = sprite_mask_coverage(input.position.xy, input.mask_bounds, input.mask_radii, input.mask_shapes);
     var out = SubpixelSpriteFragmentOutput();
-    out.foreground = vec4<f32>(input.color.rgb, 1.0);
-    out.alpha = vec4<f32>(input.color.a * alpha_corrected * mask, 1.0);
+    let coverage = input.color.a * alpha_corrected * mask;
+    out.foreground = vec4<f32>(input.color.rgb, max(coverage.r, max(coverage.g, coverage.b)));
+    out.alpha = vec4<f32>(coverage, 1.0);
     return out;
 }

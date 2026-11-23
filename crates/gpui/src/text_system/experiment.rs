@@ -1,17 +1,13 @@
-//! vue-native fork: `SK_TEXT_EXPERIMENT`, a comma-separated list of switches that try text
-//! rendering practices against today's behaviour, read once. Unset, everything is as before.
+//! vue-native fork: how glyphs are positioned and when transformed text is rasterized again.
 //!
-//! - `phases`: horizontal subpixel phases by size, `ceil(1 / (0.03 ppem))` clamped to 1..=5.
-//! - `floor`: a phase is `floor((x + 0.001) q) / q` instead of the nearest of the `q` phases.
-//! - `contrast=flat|mac|half`: the enhanced contrast as a function of the text colour's linear
+//! `SK_TEXT_EXPERIMENT`, a comma-separated list read once, turns the defaults off for bisecting
+//! (`no-phases`, `no-settle`) and selects the options still being judged:
+//!
+//! - `contrast=half|mac`: the enhanced contrast as a function of the text colour's linear
 //!   luminance (Windows shader).
-//! - `rigid`: a translated run keeps its transform and is resampled, as a scaled one is.
-//! - `rerast`: a uniformly scaled run is rasterized at its device size on every frame.
-//! - `settle`: transformed text is resampled while its transform changes and rasterized at its
-//!   device size once the transform has held still for `SETTLE`.
+//! - `rigid`: a translated run keeps its transform while it moves, as a scaled one does.
 //! - `log`: the platform logs what it rasterizes with.
 
-use std::cell::RefCell;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -20,39 +16,45 @@ use collections::FxHashMap;
 use crate::{Point, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, TransformationMatrix};
 
 const PHASE_DENOMINATOR: u8 = 60;
-const SETTLE: Duration = Duration::from_millis(200);
+/// How long a transform holds still before its text is rasterized at its device size.
+pub(crate) const SETTLE: Duration = Duration::from_millis(200);
+/// A transform not painted for this long is in motion again when it comes back.
+const GAP: Duration = Duration::from_millis(100);
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 #[allow(missing_docs)]
 pub struct TextExperiment {
     pub phases: bool,
-    pub floor: bool,
-    /// 0 off, 1 `flat`, 2 `mac`, 3 `half`.
+    pub settle: bool,
+    /// 0 off, 2 `mac`, 3 `half`.
     pub contrast: u32,
     pub rigid: bool,
-    pub rerast: bool,
-    pub settle: bool,
     pub log: bool,
 }
 
-/// The switches `SK_TEXT_EXPERIMENT` turns on.
+/// The switches in force: the defaults, changed by `SK_TEXT_EXPERIMENT`.
 pub fn text_experiment() -> &'static TextExperiment {
     static EXPERIMENT: OnceLock<TextExperiment> = OnceLock::new();
     EXPERIMENT.get_or_init(|| {
-        let mut experiment = TextExperiment::default();
+        // CoreGraphics is asked for the shift itself (#104); the web build rasterizes elsewhere.
+        let phases = cfg!(not(any(target_os = "macos", target_family = "wasm")));
+        let mut experiment = TextExperiment {
+            phases,
+            settle: true,
+            contrast: 0,
+            rigid: false,
+            log: false,
+        };
         let Ok(value) = std::env::var("SK_TEXT_EXPERIMENT") else {
             return experiment;
         };
         for switch in value.split(',').map(str::trim) {
             match switch {
-                "phases" => experiment.phases = true,
-                "floor" => experiment.floor = true,
-                "contrast=flat" => experiment.contrast = 1,
+                "no-phases" => experiment.phases = false,
+                "no-settle" => experiment.settle = false,
                 "contrast" | "contrast=mac" => experiment.contrast = 2,
                 "contrast=half" => experiment.contrast = 3,
                 "rigid" => experiment.rigid = true,
-                "rerast" => experiment.rerast = true,
-                "settle" => experiment.settle = true,
                 "log" => experiment.log = true,
                 "" => {}
                 other => log::warn!("SK_TEXT_EXPERIMENT: unknown switch {other:?}"),
@@ -63,38 +65,9 @@ pub fn text_experiment() -> &'static TextExperiment {
     })
 }
 
+/// Horizontal phases for a size: a step never coarser than 3 % of the em.
 fn phases_for(ppem: f32) -> u8 {
     (1.0 / (0.03 * ppem)).ceil().clamp(1.0, 5.0) as u8
-}
-
-/// Under `log`, how many glyph origins lie within 0.0005 px of where rounding to the nearest of
-/// four phases flips, or where `floor((x + 0.001) q)` does, and how often the two rules disagree.
-fn record_phase_stats(x: f32) {
-    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-    static COUNTS: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
-    let q = SUBPIXEL_VARIANTS_X as f32;
-    let scaled = x * q;
-    let near_round = (scaled - scaled.floor() - 0.5).abs() < 0.0005 * q;
-    let near_floor = ((x + 0.001) * q - ((x + 0.001) * q).round()).abs() < 0.0005 * q;
-    let on_grid = (scaled - scaled.round()).abs() < 0.0001 * q;
-    let round = crate::util::round_half_toward_zero(scaled);
-    let floor = ((x + 0.001) * q).floor();
-    let counts = [true, near_round, near_floor, round != floor, on_grid];
-    for (count, hit) in COUNTS.iter().zip(counts) {
-        if hit {
-            count.fetch_add(1, Relaxed);
-        }
-    }
-    let total = COUNTS[0].load(Relaxed);
-    if total % 2000 == 0 {
-        log::info!(
-            "SK_TEXT_EXPERIMENT: phase stats after {total} glyphs: near a rounding flip {}, near a floor flip {}, round != floor {}, on a quarter pixel {}",
-            COUNTS[1].load(Relaxed),
-            COUNTS[2].load(Relaxed),
-            COUNTS[3].load(Relaxed),
-            COUNTS[4].load(Relaxed)
-        );
-    }
 }
 
 /// A glyph's whole-pixel origin and its subpixel variant, for an origin in device pixels.
@@ -102,11 +75,7 @@ pub(crate) fn quantize_glyph_origin(
     origin: Point<ScaledPixels>,
     ppem: f32,
 ) -> (Point<ScaledPixels>, Point<u8>) {
-    let experiment = text_experiment();
-    if experiment.log {
-        record_phase_stats(origin.x.0);
-    }
-    if !experiment.phases && !experiment.floor {
+    if !text_experiment().phases {
         let quantized = Point::new(
             crate::util::round_half_toward_zero(origin.x.0 * SUBPIXEL_VARIANTS_X as f32)
                 / SUBPIXEL_VARIANTS_X as f32,
@@ -119,32 +88,19 @@ pub(crate) fn quantize_glyph_origin(
         );
         return (quantized.map(|c| ScaledPixels(c.trunc())), variant);
     }
-    let q = if experiment.phases {
-        phases_for(ppem)
-    } else {
-        SUBPIXEL_VARIANTS_X
-    };
     let step = |value: f32, q: u8| -> (f32, u8) {
-        let steps = if experiment.floor {
-            ((value + 0.001) * q as f32).floor()
-        } else {
-            crate::util::round_half_toward_zero(value * q as f32)
-        } as i64;
+        let steps = crate::util::round_half_toward_zero(value * q as f32) as i64;
         (
             steps.div_euclid(q as i64) as f32,
             steps.rem_euclid(q as i64) as u8,
         )
     };
+    let q = phases_for(ppem);
     let (x, phase_x) = step(origin.x.0, q);
     let (y, phase_y) = step(origin.y.0, SUBPIXEL_VARIANTS_Y);
-    let variant_x = if experiment.phases {
-        phase_x * (PHASE_DENOMINATOR / q)
-    } else {
-        phase_x
-    };
     (
         Point::new(ScaledPixels(x), ScaledPixels(y)),
-        Point::new(variant_x, phase_y),
+        Point::new(phase_x * (PHASE_DENOMINATOR / q), phase_y),
     )
 }
 
@@ -161,8 +117,30 @@ pub fn subpixel_variant_offset(variant: Point<u8>) -> Point<f32> {
     )
 }
 
-thread_local! {
-    static SEEN: RefCell<FxHashMap<[u32; 6], (Instant, Instant)>> = RefCell::default();
+/// How a glyph under a transform is placed.
+pub(crate) enum GlyphTransform {
+    /// Moved by its transform's translation, untransformed, or resampled under the transform
+    /// when it scales or rotates.
+    Default,
+    /// Resampled under the transform while it moves.
+    Pending,
+    /// Rasterized `scale` times larger at the transformed origin, untransformed.
+    Fold { scale: f32 },
+}
+
+struct Seen {
+    first: Instant,
+    last: Instant,
+    settled: bool,
+}
+
+/// Per window: which transforms text has been painted under, and since when.
+#[derive(Default)]
+pub(crate) struct TextSettle {
+    seen: FxHashMap<[u32; 6], Seen>,
+    last_pending: Option<Instant>,
+    timer_armed: bool,
+    settle_frame: bool,
 }
 
 fn transform_bits(transform: &TransformationMatrix) -> [u32; 6] {
@@ -171,60 +149,151 @@ fn transform_bits(transform: &TransformationMatrix) -> [u32; 6] {
     [a, b, c, d, x, y].map(f32::to_bits)
 }
 
-/// Has `transform` been painted with continuously for `SETTLE`? A transform last painted more
-/// than a few frames ago starts over.
-fn settled(transform: &TransformationMatrix) -> bool {
-    let now = Instant::now();
-    SEEN.with(|seen| {
-        let mut seen = seen.borrow_mut();
-        if seen.len() > 4096 {
-            seen.retain(|_, (_, last)| now - *last < SETTLE);
-        }
-        let entry = seen.entry(transform_bits(transform)).or_insert((now, now));
-        if now - entry.1 > Duration::from_millis(100) {
-            entry.0 = now;
-        }
-        entry.1 = now;
-        now - entry.0 >= SETTLE
-    })
-}
-
-/// How a glyph under `transform` is placed.
-pub(crate) enum GlyphTransform {
-    /// Today's placement.
-    Default,
-    /// Draw at `origin` (local device pixels) under `transform`, resampled.
-    Resample,
-    /// Rasterize `scale` times larger at the transformed origin, untransformed.
-    Fold { scale: f32 },
-    /// Resample for now and paint again until the transform settles.
-    Pending,
-}
-
-/// The placement the switches choose for a glyph under `transform`.
-pub(crate) fn glyph_transform(transform: &TransformationMatrix) -> GlyphTransform {
-    let experiment = text_experiment();
-    if !(experiment.rigid || experiment.rerast || experiment.settle) || transform.is_unit() {
-        return GlyphTransform::Default;
-    }
-    let [[a, b], [c, d]] = transform.rotation_scale;
-    let uniform = b == 0.0 && c == 0.0 && a == d && a > 0.0;
-    let translate_only = uniform && a == 1.0;
-    if experiment.settle {
-        if !uniform {
+impl TextSettle {
+    /// The placement for a glyph under `transform`.
+    pub(crate) fn placement(&mut self, transform: &TransformationMatrix) -> GlyphTransform {
+        let experiment = text_experiment();
+        if !experiment.settle || transform.is_unit() {
             return GlyphTransform::Default;
         }
-        return if settled(transform) {
+        let [[a, b], [c, d]] = transform.rotation_scale;
+        if !(b == 0.0 && c == 0.0 && a == d && a > 0.0) || (a == 1.0 && !experiment.rigid) {
+            return GlyphTransform::Default;
+        }
+        let now = Instant::now();
+        let settle_frame = self.settle_frame;
+        let seen = self.seen.entry(transform_bits(transform)).or_insert(Seen {
+            first: now,
+            last: now,
+            settled: false,
+        });
+        if !seen.settled {
+            // A cached subtree is not painted while it holds still, so the frame the settle
+            // timer asks for sees a gap that is no motion.
+            if !settle_frame && now - seen.last > GAP {
+                seen.first = now;
+            }
+            seen.settled = now - seen.first >= SETTLE;
+        }
+        seen.last = now;
+        if seen.settled {
             GlyphTransform::Fold { scale: a }
         } else {
+            self.last_pending = Some(now);
             GlyphTransform::Pending
-        };
+        }
     }
-    if experiment.rerast && uniform && !translate_only {
-        return GlyphTransform::Fold { scale: a };
+
+    /// Whether a timer must be started to repaint once the pending transforms settle.
+    pub(crate) fn arm_timer(&mut self) -> bool {
+        let arm = self.last_pending.is_some() && !self.timer_armed;
+        self.timer_armed |= arm;
+        arm
     }
-    if experiment.rigid && translate_only {
-        return GlyphTransform::Resample;
+
+    /// How long the timer still waits, or `None` when it has nothing left to wait for.
+    pub(crate) fn remaining(&self, now: Instant) -> Option<Duration> {
+        let last = self.last_pending?;
+        Some(SETTLE.saturating_sub(now.saturating_duration_since(last)))
     }
-    GlyphTransform::Default
+
+    /// The timer fired with nothing painted in motion for `SETTLE`: the next frame repaints
+    /// everything, cached subtrees included, and rasterizes what held still.
+    pub(crate) fn begin_settle_frame(&mut self) {
+        self.timer_armed = false;
+        self.last_pending = None;
+        self.settle_frame = true;
+    }
+
+    pub(crate) fn disarm(&mut self) {
+        self.timer_armed = false;
+    }
+
+    pub(crate) fn end_frame(&mut self) {
+        self.settle_frame = false;
+        if self.seen.len() > 1024 {
+            let now = Instant::now();
+            self.seen
+                .retain(|_, seen| now - seen.last < Duration::from_secs(10));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn phases_follow_the_size() {
+        let counts: Vec<u8> = [11.0, 12.0, 16.0, 17.0, 33.0, 34.0, 48.0]
+            .iter()
+            .map(|&p| phases_for(p))
+            .collect();
+        assert_eq!(counts, [4, 3, 3, 2, 2, 1, 1]);
+    }
+
+    #[test]
+    fn a_variant_rasterizes_at_the_position_it_was_quantized_from() {
+        if !text_experiment().phases {
+            return;
+        }
+        for ppem in [11.0, 13.0, 20.0, 40.0] {
+            for x in [10.0, 10.1, 10.37, 10.5, 10.74, 10.9, -3.3] {
+                let (whole, variant) =
+                    quantize_glyph_origin(Point::new(ScaledPixels(x), ScaledPixels(4.6)), ppem);
+                let at = whole.x.0 + subpixel_variant_offset(variant).x;
+                let step = 1.0 / phases_for(ppem) as f32;
+                assert!(
+                    (at - x).abs() <= step / 2.0 + 1e-4,
+                    "{x} at {ppem} ppem lands at {at}"
+                );
+                assert_eq!(whole.y.0, 5.0);
+            }
+        }
+    }
+
+    fn scale(s: f32) -> TransformationMatrix {
+        TransformationMatrix {
+            rotation_scale: [[s, 0.0], [0.0, s]],
+            translation: [0.0, 0.0],
+        }
+    }
+
+    #[test]
+    fn a_changing_transform_never_settles_and_a_still_one_does() {
+        if !text_experiment().settle {
+            return;
+        }
+        let mut settle = TextSettle::default();
+        for i in 1..20 {
+            let moving = scale(1.0 + i as f32 / 100.0);
+            assert!(matches!(settle.placement(&moving), GlyphTransform::Pending));
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        let still = scale(1.14);
+        assert!(matches!(settle.placement(&still), GlyphTransform::Pending));
+        assert!(settle.arm_timer());
+        assert!(!settle.arm_timer());
+        std::thread::sleep(SETTLE + Duration::from_millis(20));
+        assert_eq!(settle.remaining(Instant::now()), Some(Duration::ZERO));
+        settle.begin_settle_frame();
+        assert!(matches!(
+            settle.placement(&still),
+            GlyphTransform::Fold { .. }
+        ));
+        settle.end_frame();
+        assert_eq!(settle.remaining(Instant::now()), None);
+    }
+
+    #[test]
+    fn a_transform_that_comes_back_after_a_gap_starts_over() {
+        if !text_experiment().settle {
+            return;
+        }
+        let mut settle = TextSettle::default();
+        let turn = scale(1.14);
+        settle.placement(&turn);
+        std::thread::sleep(SETTLE + Duration::from_millis(20));
+        assert!(matches!(settle.placement(&turn), GlyphTransform::Pending));
+    }
 }
