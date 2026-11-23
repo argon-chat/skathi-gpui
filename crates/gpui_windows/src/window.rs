@@ -103,6 +103,7 @@ pub struct WindowsWindowState {
 pub(crate) struct WindowsWindowInner {
     hwnd: HWND,
     pub(crate) document_drag: RefCell<Option<(PlatformDragData, Box<dyn FnOnce(DropOperation)>)>>,
+    pub(crate) window_move_pending: Cell<bool>,
     pub(crate) dialog_owner: Rc<crate::dialog::DialogOwner>,
     drop_target_helper: IDropTargetHelper,
     pub(crate) state: WindowsWindowState,
@@ -313,6 +314,7 @@ impl WindowsWindowInner {
             dialog_owner: crate::dialog::DialogOwner::new(hwnd),
             drop_target_helper: context.drop_target_helper.clone(),
             document_drag: RefCell::new(None),
+            window_move_pending: Cell::new(false),
             state,
             handle: context.handle,
             hide_title_bar: context.hide_title_bar,
@@ -746,6 +748,26 @@ impl PlatformWindow for WindowsWindow {
             return false;
         }
         true
+    }
+
+    fn start_window_move(&self) {
+        // The system move loop is modal. Entered from here it would run inside the caller's input
+        // dispatch or frame, and the window could not draw until the button came up.
+        if !self.is_movable || self.window_move_pending.replace(true) {
+            return;
+        }
+        if unsafe {
+            PostMessageW(
+                Some(self.hwnd),
+                crate::events::WM_GPUI_WINDOW_MOVE,
+                WPARAM(0),
+                LPARAM(0),
+            )
+        }
+        .is_err()
+        {
+            self.window_move_pending.set(false);
+        }
     }
 
     fn bounds(&self) -> Bounds<Pixels> {

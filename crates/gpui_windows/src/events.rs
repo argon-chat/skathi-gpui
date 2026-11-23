@@ -33,8 +33,49 @@ pub(crate) const WM_GPUI_GPU_DEVICE_REMOVED: u32 = WM_USER + 8;
 pub(crate) const WM_GPUI_GPU_DEVICE_FAILED: u32 = WM_USER + 9;
 pub(crate) const WM_GPUI_DISPLAYS_CHANGED: u32 = WM_USER + 10;
 pub(crate) const WM_GPUI_DOCUMENT_DRAG: u32 = WM_USER + 11;
+pub(crate) const WM_GPUI_WINDOW_MOVE: u32 = WM_USER + 12;
 
 const SIZE_MOVE_LOOP_TIMER_ID: usize = 1;
+
+/// `SK_WINDOW_MOVE=fake`, for a test host: a window move runs a one-second modal loop that pumps
+/// messages as the system's does, without the button held and without following the real cursor.
+fn fake_window_move() -> bool {
+    static FAKE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FAKE.get_or_init(|| {
+        std::env::var("SK_WINDOW_MOVE").is_ok_and(|v| v.trim().eq_ignore_ascii_case("fake"))
+    })
+}
+
+fn run_fake_move_loop(handle: HWND) {
+    let wall_ms = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis())
+    };
+    let began = wall_ms();
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    unsafe {
+        SendMessageW(handle, WM_ENTERSIZEMOVE, None, None);
+        let mut msg = MSG::default();
+        'pump: loop {
+            let left = end.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            MsgWaitForMultipleObjects(None, false, left.as_millis() as u32 + 1, QS_ALLINPUT);
+            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                if msg.message == WM_QUIT {
+                    PostQuitMessage(msg.wParam.0 as i32);
+                    break 'pump;
+                }
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+        SendMessageW(handle, WM_EXITSIZEMOVE, None, None);
+    }
+    eprintln!("[window-move] fake move loop {began}..{}", wall_ms());
+}
 
 /// Coordinates window draws on the UI thread. Owned by the platform and
 /// shared with every window (like `WindowsPlatformState::cursor_visible`),
@@ -191,6 +232,7 @@ impl WindowsWindowInner {
                 }
                 Some(0)
             }
+            WM_GPUI_WINDOW_MOVE => self.handle_window_move(handle),
             WM_GPUI_CURSOR_STYLE_CHANGED
             | WM_GPUI_FORCE_UPDATE_WINDOW
             | WM_GPUI_GPU_DEVICE_LOST
@@ -395,6 +437,37 @@ impl WindowsWindowInner {
         // content until something else changed. Force the next draw.
         self.state.force_render_pending.set(true);
         None
+    }
+
+    fn handle_window_move(&self, handle: HWND) -> Option<isize> {
+        self.window_move_pending.set(false);
+        if self.state.is_fullscreen() {
+            return Some(0);
+        }
+        if fake_window_move() {
+            unsafe { ReleaseCapture().log_err() };
+            run_fake_move_loop(handle);
+            return Some(0);
+        }
+        // The press can end between the request and this message: the loop starts only while the
+        // button is held, as it does from a caption press.
+        if unsafe { GetKeyState(VK_LBUTTON.0 as i32) } >= 0 {
+            return Some(0);
+        }
+        let mut cursor = POINT::default();
+        unsafe { GetCursorPos(&mut cursor) }.log_err()?;
+        let at = (cursor.x as u16 as u32) | ((cursor.y as u16 as u32) << 16);
+        unsafe {
+            ReleaseCapture().log_err();
+            // Not through the window procedure, where the press would reach gpui as a second mouse-down.
+            DefWindowProcW(
+                handle,
+                WM_NCLBUTTONDOWN,
+                WPARAM(HTCAPTION as usize),
+                LPARAM(at as isize),
+            );
+        }
+        Some(0)
     }
 
     fn handle_timer_msg(&self, handle: HWND, wparam: WPARAM) -> Option<isize> {
