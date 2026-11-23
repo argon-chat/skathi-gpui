@@ -45,11 +45,38 @@ these paths upstream is in this history, with the same author and date.
 These changes come on top of upstream gpui. They are copyright Argon Inc. LLC, under the same Apache
 License 2.0 as gpui (see `NOTICE`). Each one is marked `vue-native fork` in the source:
 
-- isolated layers: opacity groups, `clip-path`, CSS masks, blend modes;
-- shader effects on elements, with per-element state, textures and animated parameters;
-- deferred draws that stay inside their effect and clip scopes;
-- a DirectX 12 path and DWM materials on Windows;
-- text and input fixes found by Skathi's end-to-end tests.
+- **Compositing.** Isolated layers on every renderer: opacity groups, `clip-path`, CSS masks, blend
+  modes, backdrop blur per element, element captures and snapshot composites. Deferred draws stay
+  inside their effect and clip scopes.
+- **Shader effects.** Effect quads and effect layers that shade an element's content, with
+  per-element state, history, image textures, animated parameters and cross-fades. Apps supply their
+  own effects, and a running window reloads them.
+- **CSS painting.** Transforms on every primitive, content mask and hit test, with
+  `transform-origin`. The whole gradient grammar and background layers, Oklab interpolation,
+  per-side border colours, outlines, `corner-shape`, percentage and elliptical radii, rounded
+  overflow clips, `text-shadow`, `object-position`, SVG colour matrices.
+- **Layout.** Arbitrary grid tracks and `repeat(auto-fill | auto-fit)`, `calc()` and `calc-size()`
+  lengths, `order`, size containment, baselines and baseline shifts, inline boxes, the same pixel
+  snapping for cached and inline frames at fractional scales. It runs on Skathi's fork of taffy.
+- **Text.** A font size per run, families composed by `unicode-range`, optical sizes of variable
+  fonts, `line-height: normal` from the font's metrics, line breaking under `overflow-wrap`,
+  `word-break` and `hyphens`, `tab-size`, letter spacing. Glyph phases that depend on the size,
+  re-rasterizing when a transform settles, font smoothing per element, glyph contrast from the text
+  colour.
+- **Windows.** A DirectX 12 renderer beside DirectX 11, with recovery from a lost device. DWM
+  materials, frame pacing on the display's vblank, feedback on when a present reached the screen,
+  an idle window that waits for demand.
+- **macOS.** Metal parity for layers, effects and transforms. EDR output, display-link pacing with
+  a fallback, blur kept in fullscreen, native window controls, panels over fullscreen apps.
+- **Linux and the web.** The wgpu renderer draws the same layers, effects and transforms.
+- **HDR.** Windows draw HDR output on request, with half-float image tiles.
+- **Input.** Pen input with hardware timestamps, pointer lock, pinch gestures, device haptics,
+  native keyboard events, native drag and drop in both directions.
+- **Embedding.** Hooks for input and frames, hitboxes by tag, GPU textures written into atlas
+  tiles, a surface composited under the window, the renderer's device for the embedder, stats for
+  the atlas and caches.
+- **Build.** A default build without schemars, strum, derive_more, pin-project and rayon, and gpui
+  off the `windows` crate. Each crate is published on its own.
 
 The renderers embed Skathi's built-in effects from their own `effects/` directories, which Skathi's
 `bun run shaders` writes and `bun run shaders:check` keeps in step with the `.slang` sources.
