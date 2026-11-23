@@ -7314,17 +7314,20 @@ impl Window {
         let bottom_right = corner_inset(radii.bottom_right, widths.right, widths.bottom);
         let bottom_left = corner_inset(radii.bottom_left, widths.left, widths.bottom);
 
-        let antialias_inset = point(ScaledPixels(1.0), ScaledPixels(1.0));
+        // vue-native fork: whole device pixels, so the strips meet on pixel edges wherever the
+        // quad is; a fractional seam's coverage drifts with the float noise of the position.
+        let inset = |a: ScaledPixels, b: ScaledPixels| ScaledPixels((a.max(b).0 + 1.0).ceil());
         Bounds::from_corners(
             quad.bounds.origin
-                + point(top_left.x.max(bottom_left.x), top_left.y.max(top_right.y))
-                + antialias_inset,
+                + point(
+                    inset(top_left.x, bottom_left.x),
+                    inset(top_left.y, top_right.y),
+                ),
             quad.bounds.bottom_right()
                 - point(
-                    top_right.x.max(bottom_right.x),
-                    bottom_left.y.max(bottom_right.y),
-                )
-                - antialias_inset,
+                    inset(top_right.x, bottom_right.x),
+                    inset(bottom_left.y, bottom_right.y),
+                ),
         )
     }
 
@@ -8939,6 +8942,14 @@ impl Window {
         self.layout_engine.as_ref()?.vn_unrounded_origin(layout_id)
     }
 
+    /// vue-native fork: a laid-out node's border-box size before snapping to device pixels, which
+    /// [`crate::Style::vn_exact_size`] takes to reproduce it.
+    pub fn vn_unrounded_layout_size(&self, layout_id: LayoutId) -> Option<Size<Pixels>> {
+        self.layout_engine
+            .as_ref()?
+            .vn_unrounded_size(layout_id, self.scale_factor())
+    }
+
     /// vue-native fork: see [`TaffyLayoutEngine::vn_set_root_origin`].
     pub(crate) fn vn_set_layout_root_origin(&mut self, root: LayoutId, origin: Point<f32>) {
         if let Some(engine) = self.layout_engine.as_mut() {
@@ -8975,8 +8986,9 @@ impl Window {
             .unwrap()
             .layout_bounds(layout_id, scale_factor)
             .map(Into::into);
-        let snapped_offset = self.pixel_snap_point(self.element_offset());
-        bounds.origin += snapped_offset;
+        bounds.origin += self
+            .element_offset()
+            .map(|v| vn_snap_offset(v, scale_factor));
         bounds
     }
 
@@ -12314,6 +12326,63 @@ fn with_element_arena_erased(callback: &mut dyn FnMut(&mut Arena)) -> Result<(),
         Ok(())
     } else {
         ELEMENT_ARENA.try_with(|arena| callback(&mut arena.borrow_mut()))
+    }
+}
+
+/// vue-native fork: snaps an element offset to device pixels. The offset is a sum (a cached
+/// view's snapped origin plus a scroll offset, or the scroll offset alone, for the same content),
+/// so it snaps the same way whatever whole pixels are in it: half up, after dropping float noise.
+fn vn_snap_offset(value: Pixels, scale_factor: f32) -> Pixels {
+    let device = (value.0 * scale_factor * 1024.0).round() / 1024.0;
+    px((device + 0.5).floor() / scale_factor)
+}
+
+#[cfg(test)]
+mod vn_snap_tests {
+    use super::*;
+
+    #[test]
+    fn an_offset_snaps_the_same_with_or_without_whole_pixels_in_it() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            for origin in [31_i32, 39, 104, 517] {
+                for step in 0..40 {
+                    let scroll = -10.0 - step as f32 * 0.125;
+                    let whole = px(origin as f32 / scale);
+                    let alone = vn_snap_offset(px(scroll), scale).0 * scale;
+                    let summed = vn_snap_offset(whole + px(scroll), scale).0 * scale;
+                    assert_eq!(
+                        summed.round(),
+                        origin as f32 + alone.round(),
+                        "scroll {scroll} under origin {origin} at {scale}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_rounded_quad_splits_at_the_same_offsets_wherever_it_is() {
+        let quad_at = |y: f32| Quad {
+            bounds: Bounds::new(
+                point(ScaledPixels(45.), ScaledPixels(y)),
+                size(ScaledPixels(31.), ScaledPixels(31.)),
+            ),
+            corner_radii: Corners::all(ScaledPixels(15.5)),
+            ..Default::default()
+        };
+        let inset = |y: f32| {
+            let quad = quad_at(y);
+            let inner = Window::largest_border_interior(&quad);
+            (
+                inner.origin.y.0 - quad.bounds.origin.y.0,
+                quad.bounds.bottom().0 - inner.bottom().0,
+            )
+        };
+        let first = inset(103.);
+        assert_eq!(first.0.fract(), 0.0, "on a pixel edge");
+        for y in [166., 229., 292., 355., 418., 481., 1003., 4099.] {
+            assert_eq!(inset(y), first, "at {y}");
+        }
     }
 }
 

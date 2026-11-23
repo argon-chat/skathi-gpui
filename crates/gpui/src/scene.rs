@@ -3784,8 +3784,9 @@ mod vn_color_group_tests {
         );
         assert_eq!(scene.vn_groups.len(), 1);
         assert_eq!(scene.vn_groups[0].quads.len(), 2);
+        // Overlapping quads may share an order, drawn in paint order within it.
         assert!(
-            scene.vn_groups[0].quads[1].order > scene.vn_groups[0].quads[0].order,
+            scene.vn_groups[0].quads[1].order >= scene.vn_groups[0].quads[0].order,
             "deferred source blends over its earlier background"
         );
         let operations = 0..scene.len();

@@ -188,6 +188,20 @@ pub(crate) fn logical_point(x: f32, y: f32, scale_factor: f32) -> Point<Pixels> 
     }
 }
 
+/// vue-native fork: the scale factor for a DPI, or `GPUI_SCALE_FACTOR` in its place, which tests
+/// use to run at a fractional scale on any monitor.
+pub(crate) fn dpi_scale_factor(dpi: f32) -> f32 {
+    static FORCED: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    FORCED
+        .get_or_init(|| {
+            std::env::var("GPUI_SCALE_FACTOR")
+                .ok()
+                .and_then(|v| v.trim().parse::<f32>().ok())
+                .filter(|s| s.is_finite() && *s >= 0.5 && *s <= 4.0)
+        })
+        .unwrap_or(dpi / windows::Win32::UI::WindowsAndMessaging::USER_DEFAULT_SCREEN_DPI as f32)
+}
+
 // https://learn.microsoft.com/en-us/windows/apps/desktop/modernize/apply-windows-themes
 #[inline]
 pub(crate) fn system_appearance() -> Result<WindowAppearance> {

@@ -769,6 +769,19 @@ impl TaffyLayoutEngine {
             .map(|(origin, _)| *origin)
     }
 
+    /// vue-native fork: a laid-out node's border-box size before snapping, in logical pixels.
+    pub(crate) fn vn_unrounded_size(
+        &self,
+        id: LayoutId,
+        scale_factor: f32,
+    ) -> Option<Size<Pixels>> {
+        let size = self.taffy.layout(id.0).ok()?.size;
+        Some(crate::size(
+            Pixels(size.width / scale_factor),
+            Pixels(size.height / scale_factor),
+        ))
+    }
+
     /// vue-native fork: lays the next [`Self::compute_layout`] of `root` out as if its top-left
     /// sat at `origin` (unrounded device pixels) in an enclosing layout, so the edges inside it
     /// snap to the same device pixels as they would there.
@@ -992,7 +1005,13 @@ impl ToTaffy<taffy::style::Style> for Style {
             scrollbar_width: self.scrollbar_width.to_taffy(rem_size, scale_factor),
             position: self.position.into(),
             inset: self.inset.to_taffy(rem_size, scale_factor),
-            size: self.size.to_taffy(rem_size, scale_factor),
+            size: match self.vn_exact_size {
+                Some(exact) => taffy::geometry::Size {
+                    width: taffy::style::Dimension::length(exact.width.0 * scale_factor),
+                    height: taffy::style::Dimension::length(exact.height.0 * scale_factor),
+                },
+                None => self.size.to_taffy(rem_size, scale_factor),
+            },
             min_size: self.min_size.to_taffy(rem_size, scale_factor),
             max_size: self.max_size.to_taffy(rem_size, scale_factor),
             aspect_ratio: self

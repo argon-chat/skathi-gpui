@@ -1126,7 +1126,7 @@ impl WindowsWindowInner {
         let new_dpi = wparam.loword() as f32;
 
         let is_maximized = self.state.is_maximized();
-        let new_scale_factor = new_dpi / USER_DEFAULT_SCREEN_DPI as f32;
+        let new_scale_factor = crate::util::dpi_scale_factor(new_dpi);
         self.state.scale_factor.set(new_scale_factor);
         self.state.border_offset.update(handle).log_err();
 

@@ -343,6 +343,8 @@ struct ViewElementCacheKey {
     /// vue-native fork: how far the view's unrounded layout origin lies from its snapped one,
     /// in device pixels, which decides where the edges inside it snap.
     layout_fract: Point<f32>,
+    /// vue-native fork: the view's unrounded layout size, the space its subtree is laid out in.
+    layout_size: Size<Pixels>,
 }
 
 #[cfg(not(gpui_hot_reload))]
@@ -556,6 +558,9 @@ fn prepaint_view(
         let layout_fract = layout_origin
             .map(|origin| origin - origin.map(crate::util::round_half_toward_zero))
             .unwrap_or_default();
+        let layout_size = layout_id
+            .and_then(|id| window.vn_unrounded_layout_size(id))
+            .unwrap_or(bounds.size);
 
         window.with_element_state::<ViewElementState, _>(
             global_id.unwrap(),
@@ -577,6 +582,8 @@ fn prepaint_view(
                     && crate::VnClipNode::same(&element_state.cache_key.vn_clip, &vn_clip)
                     && element_state.cache_key.layout_fract.map(f32::to_bits)
                         == layout_fract.map(f32::to_bits)
+                    && element_state.cache_key.layout_size.map(|v| v.0.to_bits())
+                        == layout_size.map(|v| v.0.to_bits())
                     && !window.dirty_views.contains(&entity_id)
                     && !window.refreshing
                 {
@@ -601,7 +608,7 @@ fn prepaint_view(
                     if let Some(origin) = layout_origin {
                         window.vn_set_layout_root_origin(root, origin);
                     }
-                    element.layout_as_root(Size::<AvailableSpace>::from(bounds.size), window, cx);
+                    element.layout_as_root(Size::<AvailableSpace>::from(layout_size), window, cx);
                     element.prepaint_at(bounds.origin, window, cx);
                     element
                 });
@@ -623,6 +630,7 @@ fn prepaint_view(
                             transform,
                             vn_clip,
                             layout_fract,
+                            layout_size,
                         },
                     },
                 )

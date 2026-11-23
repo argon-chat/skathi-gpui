@@ -1650,9 +1650,21 @@ mod tests {
                         soft_shadow.bounds.size.width.0,
                         text.bounds.size.width.0 + 2. * padding
                     );
+                    // Primitives that do not overlap may share an order; the finished scene
+                    // lists sprites in the order they are drawn.
+                    let drawn = |s: &crate::MonochromeSprite| {
+                        sprites
+                            .iter()
+                            .position(|p| p.bounds == s.bounds && p.color == s.color)
+                            .unwrap()
+                    };
                     assert!(
-                        soft_shadow.order < hard_shadow.order && hard_shadow.order < text.order,
+                        drawn(&soft_shadow) < drawn(&hard_shadow)
+                            && drawn(&hard_shadow) < drawn(&text),
                         "the first shadow is on top, all under the text"
+                    );
+                    assert!(
+                        soft_shadow.order <= hard_shadow.order && hard_shadow.order <= text.order
                     );
                 }
             }))

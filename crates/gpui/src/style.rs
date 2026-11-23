@@ -635,6 +635,9 @@ pub struct Style {
     /// vue-native fork: CSS `vertical-align` of an item in a baseline-aligned flex row, as the
     /// baseline it aligns by; `None` is its own.
     pub vn_baseline_shift: Option<VnBaselineShift>,
+    /// vue-native fork: a border-box size laid out as given, not snapped to device pixels first,
+    /// for a box standing in for one whose layout produced that size. Overrides `size`.
+    pub vn_exact_size: Option<Size<Pixels>>,
     /// CSS `object-position` of an image painted in this box; `None` keeps
     /// [`ObjectFit::get_bounds`]'s placement.
     pub vn_object_position: Option<ObjectPosition>,
@@ -2506,6 +2509,7 @@ impl Default for Style {
             flex_shrink: 1.0,
             vn_order: 0,
             vn_baseline_shift: None,
+            vn_exact_size: None,
             vn_object_position: None,
             flex_basis: Length::Auto,
             background: None,
@@ -3459,11 +3463,24 @@ mod vn_mask_ring_tests {
         ] {
             assert_eq!(width.0, 3.0 * scale, "1px border + 2px padding");
         }
-        let border = quads
+        // A plain border paints as four strips of its color, one border width deep.
+        let strips: Vec<_> = quads
             .iter()
-            .find(|q| q.border_color == Hsla::white())
-            .expect("the border still paints");
-        assert_eq!(border.border_widths.top.0, 1.0 * scale);
+            .filter(|q| q.background.as_solid() == Some(Hsla::white()))
+            .collect();
+        assert_eq!(strips.len(), 4, "the border still paints");
+        let top = strips
+            .iter()
+            .min_by(|a, b| {
+                a.content_mask
+                    .bounds
+                    .origin
+                    .y
+                    .0
+                    .total_cmp(&b.content_mask.bounds.origin.y.0)
+            })
+            .unwrap();
+        assert_eq!(top.content_mask.bounds.size.height.0, 1.0 * scale);
         assert_eq!(shadows, 0, "the mask cuts the outer shadow");
     }
 }
