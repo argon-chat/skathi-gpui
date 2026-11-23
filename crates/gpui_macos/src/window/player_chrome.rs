@@ -65,6 +65,16 @@ pub(super) fn show_buttons(state: &MacWindowState, visible: bool) {
         let mut changed = false;
         for button in [buttons.close, buttons.minimize, buttons.zoom] {
             let opacity = f64::from(state.player_chrome.button_opacity.unwrap_or(1.));
+            // An inactive window's buttons are drawn by sublayers with a plus-darker compositing
+            // filter. With group opacity, any alpha below 1 flattens them into an offscreen group,
+            // where the filter blends with transparency and the buttons turn light grey. Apply the
+            // opacity to each sublayer instead. AppKit can recreate the buttons, so set it every time.
+            unsafe {
+                let layer: *mut AnyObject = msg_send![&*button, layer];
+                if !layer.is_null() {
+                    let _: () = msg_send![layer, setAllowsGroupOpacity: Bool::NO];
+                }
+            }
             if button.alphaValue() != opacity {
                 button.setAlphaValue(opacity);
             }
