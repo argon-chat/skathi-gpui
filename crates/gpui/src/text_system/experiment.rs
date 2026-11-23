@@ -28,8 +28,8 @@ pub struct TextExperiment {
 pub fn text_experiment() -> &'static TextExperiment {
     static EXPERIMENT: OnceLock<TextExperiment> = OnceLock::new();
     EXPERIMENT.get_or_init(|| {
-        // CoreGraphics is asked for the shift itself (#104); the web build rasterizes elsewhere.
-        let phases = cfg!(not(any(target_os = "macos", target_family = "wasm")));
+        // The web build rasterizes elsewhere.
+        let phases = cfg!(not(target_family = "wasm"));
         let mut experiment = TextExperiment {
             phases,
             settle: true,
@@ -58,7 +58,7 @@ fn phases_for(ppem: f32) -> u8 {
 }
 
 /// A glyph's whole-pixel origin and its subpixel variant, for an origin in device pixels.
-pub(crate) fn quantize_glyph_origin(
+pub fn quantize_glyph_origin(
     origin: Point<ScaledPixels>,
     ppem: f32,
 ) -> (Point<ScaledPixels>, Point<u8>) {
@@ -75,16 +75,26 @@ pub(crate) fn quantize_glyph_origin(
         );
         return (quantized.map(|c| ScaledPixels(c.trunc())), variant);
     }
-    let step = |value: f32, q: u8| -> (f32, u8) {
-        let steps = crate::util::round_half_toward_zero(value * q as f32) as i64;
+    let split = |steps: i64, q: u8| -> (f32, u8) {
         (
             steps.div_euclid(q as i64) as f32,
             steps.rem_euclid(q as i64) as u8,
         )
     };
+    let nearest = |value: f32, q: u8| crate::util::round_half_toward_zero(value * q as f32) as i64;
     let q = phases_for(ppem);
-    let (x, phase_x) = step(origin.x.0, q);
-    let (y, phase_y) = step(origin.y.0, SUBPIXEL_VARIANTS_Y);
+    // macOS floors to the phase grid, with an epsilon so a whole pixel up to float error is
+    // that pixel; the native mask for a pen position is the one its floor selects.
+    let x_steps = if cfg!(target_os = "macos") {
+        ((origin.x.0 + 0.001) * q as f32).floor() as i64
+    } else {
+        nearest(origin.x.0, q)
+    };
+    let (x, phase_x) = split(x_steps, q);
+    let (y, phase_y) = split(
+        nearest(origin.y.0, SUBPIXEL_VARIANTS_Y),
+        SUBPIXEL_VARIANTS_Y,
+    );
     (
         Point::new(ScaledPixels(x), ScaledPixels(y)),
         Point::new(phase_x * (PHASE_DENOMINATOR / q), phase_y),
@@ -234,10 +244,12 @@ mod tests {
                     quantize_glyph_origin(Point::new(ScaledPixels(x), ScaledPixels(4.6)), ppem);
                 let at = whole.x.0 + subpixel_variant_offset(variant).x;
                 let step = 1.0 / phases_for(ppem) as f32;
-                assert!(
-                    (at - x).abs() <= step / 2.0 + 1e-4,
-                    "{x} at {ppem} ppem lands at {at}"
-                );
+                let lands = if cfg!(target_os = "macos") {
+                    x - at > -0.0011 && x - at < step
+                } else {
+                    (at - x).abs() <= step / 2.0 + 1e-4
+                };
+                assert!(lands, "{x} at {ppem} ppem lands at {at}");
                 assert_eq!(whole.y.0, 5.0);
             }
         }

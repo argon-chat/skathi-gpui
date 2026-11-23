@@ -858,31 +858,12 @@ vertex MonochromeSpriteVertexOutput monochrome_sprite_vertex(
       sprite_id};
 }
 
-// Glyph contrast and gamma correction, as gpui_windows' alpha_correction.hlsl
-// and gpui_wgpu apply it. Adapted from
-// https://github.com/microsoft/terminal/blob/1283c0f5b99a2961673249fa77c6b986efb5086c/src/renderer/atlas/dwrite.hlsl
-// Copyright (c) Microsoft Corporation. Licensed under the MIT license.
-struct SpriteGammaParams {
-  float4 gamma_ratios;
-  float grayscale_enhanced_contrast;
-};
-
-float glyph_alpha_correction(float sample, float3 color,
-                             constant SpriteGammaParams *params) {
-  float brightness = dot(color, float3(0.30, 0.59, 0.11));
-  float k = params->grayscale_enhanced_contrast *
-            saturate(4.0 * (0.75 - brightness));
-  float a = sample * (k + 1.0) / (sample * k + 1.0);
-  float4 g = params->gamma_ratios;
-  float correction = (g.x * brightness + g.y) * a + (g.z * brightness + g.w);
-  return a + a * (1.0 - a) * correction;
-}
-
+// Coverage is blended as is, like macOS: CoreGraphics has already dilated the
+// glyph by its colour, and the target holds encoded sRGB (extended in EDR), so
+// no gamma or contrast curve belongs here.
 fragment float4 monochrome_sprite_fragment(
     MonochromeSpriteFragmentInput input [[stage_in]],
     constant MonochromeSprite *sprites [[buffer(SpriteInputIndex_Sprites)]],
-    constant SpriteGammaParams *gamma_params
-    [[buffer(SpriteInputIndex_GammaParams)]],
     texture2d<float> atlas_texture [[texture(SpriteInputIndex_AtlasTexture)]]) {
   if (any(input.clip_distance < float4(0.0))) {
     return float4(0.0);
@@ -896,10 +877,7 @@ fragment float4 monochrome_sprite_fragment(
       clamp_to_tile(input.tile_position, sprite.tile, atlas_texture));
   float4 color = input.color;
   // vue-native fork: the content mask's rounded corners, in screen space.
-  float coverage = sprite.raw_coverage
-                       ? sample.a
-                       : glyph_alpha_correction(sample.a, color.rgb, gamma_params);
-  color.a *= coverage *
+  color.a *= sample.a *
              content_mask_coverage(input.position.xy,
                                               sprite.content_mask.bounds,
                                               sprite.content_mask.corner_radii, sprite.content_mask.corner_shapes);

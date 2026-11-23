@@ -8041,7 +8041,7 @@ impl Window {
         let (integer_origin, subpixel_variant) =
             crate::text_system::quantize_glyph_origin(glyph_origin, font_size.0 * scale_factor);
         let subpixel_rendering = self.should_use_subpixel_rendering(font_id, font_size);
-        let dilation = self.text_system().glyph_dilation_for_color(color);
+        let dilation = self.glyph_dilation(color);
         let params = RenderGlyphParams {
             font_id,
             glyph_id,
@@ -8227,7 +8227,7 @@ impl Window {
             dilation: if is_emoji {
                 0
             } else {
-                self.text_system().glyph_dilation_for_color(color)
+                self.glyph_dilation(color)
             },
         };
         let raster_bounds = self.text_system().raster_bounds(&glyph)?;
@@ -8269,6 +8269,20 @@ impl Window {
             transformation,
         });
         Ok(())
+    }
+
+    /// vue-native fork: the platform's dilation level for a glyph in `color`. Under
+    /// `font-smoothing: antialiased` none, as WebKit draws it on macOS.
+    fn glyph_dilation(&self, color: Hsla) -> u8 {
+        let smoothing = self
+            .text_style_stack
+            .iter()
+            .rev()
+            .find_map(|style| style.font_smoothing);
+        if smoothing == Some(crate::FontSmoothing::Antialiased) {
+            return 0;
+        }
+        self.text_system().glyph_dilation_for_color(color)
     }
 
     fn should_use_subpixel_rendering(&self, font_id: FontId, font_size: Pixels) -> bool {

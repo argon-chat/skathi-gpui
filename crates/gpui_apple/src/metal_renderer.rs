@@ -154,7 +154,6 @@ pub struct MetalRenderer {
     instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
     sprite_atlas: Arc<MetalAtlas>,
     core_video_texture_cache: CFRetained<CVMetalTextureCache>,
-    sprite_gamma: SpriteGammaParams,
     /// Offscreen render target reused across `render_scene` calls when
     /// rendering headlessly without reading pixels back.
     #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
@@ -416,7 +415,6 @@ impl MetalRenderer {
             instance_buffer_pool,
             sprite_atlas,
             core_video_texture_cache,
-            sprite_gamma: SpriteGammaParams::from_env(),
             #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
             headless_render_target: None,
             presents: 0,
@@ -1359,11 +1357,6 @@ impl MetalRenderer {
                 instance_bindings.monochrome_sprites.offset,
                 SpriteInputIndex::Sprites as usize,
             );
-            command_encoder.setFragmentBytes_length_atIndex(
-                ptr::NonNull::from(&self.sprite_gamma).cast(),
-                mem::size_of::<SpriteGammaParams>(),
-                SpriteInputIndex::GammaParams as usize,
-            );
             command_encoder.setFragmentTexture_atIndex(
                 Some(&texture),
                 SpriteInputIndex::AtlasTexture as usize,
@@ -2126,31 +2119,6 @@ enum SpriteInputIndex {
     ViewportSize = 2,
     AtlasTextureSize = 3,
     AtlasTexture = 4,
-    GammaParams = 5,
-}
-
-/// `SpriteGammaParams` in shaders.metal: the glyph alpha correction the
-/// DirectX and wgpu renderers apply, with the same defaults and overrides.
-#[derive(Clone, Copy)]
-#[repr(C)]
-struct SpriteGammaParams {
-    gamma_ratios: [f32; 4],
-    grayscale_enhanced_contrast: f32,
-    _pad: [f32; 3],
-}
-
-impl SpriteGammaParams {
-    fn from_env() -> Self {
-        let var = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<f32>().ok());
-        let gamma = var("ZED_FONTS_GAMMA").unwrap_or(1.8).clamp(1.0, 2.2);
-        Self {
-            gamma_ratios: gpui::get_gamma_correction_ratios(gamma),
-            grayscale_enhanced_contrast: var("ZED_FONTS_GRAYSCALE_ENHANCED_CONTRAST")
-                .unwrap_or(1.0)
-                .max(0.0),
-            _pad: [0.0; 3],
-        }
-    }
 }
 
 #[repr(C)]
@@ -2524,33 +2492,46 @@ mod tests {
         Ok(())
     }
 
-    /// Half-covered glyph pixels must match what DirectWrite's default gamma
-    /// (1.8) and grayscale contrast (1.0) produce on the DirectX renderer.
+    /// CoreGraphics has dilated a glyph's outline already; macOS blends its coverage as is,
+    /// `a F + (1 - a) dst` on encoded sRGB (#102). The EDR target holds extended sRGB, so it
+    /// blends the same values.
     #[test]
-    fn glyph_edges_get_the_directx_gamma_and_contrast_correction() -> Result<()> {
+    fn glyph_coverage_is_blended_as_is_in_sdr_and_edr() -> Result<()> {
+        use gpui::hdr_test_scene::halves_to_pixels;
         use gpui::{AtlasKey, MonochromeSprite, PlatformAtlas as _, Quad, RenderSvgParams, rgb};
         let mut renderer = MetalRenderer::new_headless(Default::default())?;
-        renderer.sprite_gamma = SpriteGammaParams {
-            gamma_ratios: gpui::get_gamma_correction_ratios(1.8),
-            grayscale_enhanced_contrast: 1.0,
-            _pad: [0.0; 3],
-        };
-        let tile_size = size(DevicePixels(8), DevicePixels(8));
+        let tile_size = size(DevicePixels(256), DevicePixels(1));
+        let ramp: Vec<u8> = (0..=255).collect();
         let tile = renderer
             .sprite_atlas()
             .get_or_insert_with(
                 AtlasKey::Svg(RenderSvgParams {
-                    path: "half-coverage".into(),
+                    path: "coverage-ramp".into(),
                     size: tile_size,
                 }),
-                &mut || Ok(Some((tile_size, std::borrow::Cow::Owned(vec![128u8; 64])))),
+                &mut || {
+                    Ok(Some((
+                        tile_size,
+                        std::borrow::Cow::Borrowed(ramp.as_slice()),
+                    )))
+                },
             )?
             .context("coverage tile was not allocated")?;
+        let cases: [(u32, u32); 8] = [
+            (0x000000, 0xffffff),
+            (0xffffff, 0x000000),
+            (0x808080, 0xffffff),
+            (0xbfbfbf, 0x1e1e1e),
+            (0x404040, 0xf5f5f5),
+            (0xff0000, 0xffffff),
+            (0x0a84ff, 0x1e1e1e),
+            (0x34c759, 0x000000),
+        ];
         let mut scene = Scene::default();
-        for (x, foreground, background) in [(0.0, 0xffffff, 0x000000), (8.0, 0x000000, 0xffffff)] {
+        for (row, &(foreground, background)) in cases.iter().enumerate() {
             let bounds = Bounds::new(
-                point(ScaledPixels(x), ScaledPixels(0.0)),
-                size(ScaledPixels(8.0), ScaledPixels(8.0)),
+                point(ScaledPixels(0.0), ScaledPixels(row as f32)),
+                size(ScaledPixels(256.0), ScaledPixels(1.0)),
             );
             scene.insert_primitive(Quad {
                 bounds,
@@ -2571,17 +2552,48 @@ mod tests {
             });
         }
         scene.finish();
-        let image =
-            renderer.render_scene_to_image(&scene, size(DevicePixels(16), DevicePixels(8)))?;
-        let white_on_black = image.get_pixel(4, 4).0[0];
-        let black_on_white = image.get_pixel(12, 4).0[0];
+        let frame = size(DevicePixels(256), DevicePixels(cases.len() as i32));
+        let sdr = renderer.render_scene_to_image(&scene, frame)?;
+        assert!(renderer.set_hdr_output(Some(HdrOutput {
+            sdr_white: 1.0,
+            content_headroom: 4.0,
+        })));
+        let texture =
+            objc2::rc::autoreleasepool(|_| renderer.render_offscreen_texture(&scene, frame))?;
+        let edr = halves_to_pixels(&read_texture_halves(&texture));
+        assert!(renderer.set_hdr_output(None));
+
+        let mut worst = 0.0f32;
+        for (row, &(foreground, background)) in cases.iter().enumerate() {
+            let channel = |color: u32, c: usize| ((color >> (16 - 8 * c)) & 0xff) as f32 / 255.0;
+            let (mut sdr_max, mut sdr_sum, mut edr_max, mut edr_sum) = (0.0f32, 0.0, 0.0f32, 0.0);
+            for coverage in 0..256u32 {
+                let a = coverage as f32 / 255.0;
+                for c in 0..3 {
+                    let expected =
+                        255.0 * (a * channel(foreground, c) + (1.0 - a) * channel(background, c));
+                    let sdr_error =
+                        (sdr.get_pixel(coverage, row as u32).0[c] as f32 - expected).abs();
+                    let edr_error =
+                        (edr[row * 256 + coverage as usize][c] * 255.0 - expected).abs();
+                    sdr_max = sdr_max.max(sdr_error);
+                    edr_max = edr_max.max(edr_error);
+                    sdr_sum += sdr_error;
+                    edr_sum += edr_error;
+                }
+            }
+            eprintln!(
+                "#{foreground:06x} on #{background:06x}: SDR mean {:.2} max {:.1} | EDR mean {:.2} max {:.1} (codes)",
+                sdr_sum / 768.0,
+                sdr_max,
+                edr_sum / 768.0,
+                edr_max
+            );
+            worst = worst.max(sdr_max).max(edr_max);
+        }
         assert!(
-            white_on_black.abs_diff(177) <= 3,
-            "white on black: {white_on_black}"
-        );
-        assert!(
-            black_on_white.abs_diff(137) <= 3,
-            "black on white: {black_on_white}"
+            worst <= 1.0,
+            "coverage is blended {worst} codes off `a F + (1 - a) dst`"
         );
         Ok(())
     }
@@ -2591,11 +2603,6 @@ mod tests {
     fn a_blurred_text_shadow_composites_its_coverage_unaltered() -> Result<()> {
         use gpui::{AtlasKey, MonochromeSprite, PlatformAtlas as _, Quad, RenderSvgParams, rgb};
         let mut renderer = MetalRenderer::new_headless(Default::default())?;
-        renderer.sprite_gamma = SpriteGammaParams {
-            gamma_ratios: gpui::get_gamma_correction_ratios(1.8),
-            grayscale_enhanced_contrast: 1.0,
-            _pad: [0.0; 3],
-        };
         let glyph = size(DevicePixels(6), DevicePixels(6));
         let (tile_size, coverage) = gpui::blur_glyph_coverage(glyph, &[255; 36], 2.5);
         let tile = renderer

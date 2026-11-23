@@ -17,8 +17,8 @@ use core_text::{
     font::CTFont,
     font_collection::CTFontCollectionRef,
     font_descriptor::{
-        CTFontDescriptor, kCTFontSlantTrait, kCTFontSymbolicTrait, kCTFontWeightTrait,
-        kCTFontWidthTrait,
+        CTFontDescriptor, TraitAccessors as _, kCTFontDefaultOrientation, kCTFontSlantTrait,
+        kCTFontSymbolicTrait, kCTFontWeightTrait, kCTFontWidthTrait,
     },
     line::CTLine,
     string_attributes::kCTFontAttributeName,
@@ -26,7 +26,6 @@ use core_text::{
 use font_kit::{
     font::Font as FontKitFont,
     handle::Handle,
-    hinting::HintingOptions,
     metrics::Metrics,
     properties::{Style as FontkitStyle, Weight as FontkitWeight},
     source::SystemSource,
@@ -35,8 +34,8 @@ use font_kit::{
 use gpui::{
     Bounds, DevicePixels, Font, FontFallbacks, FontFeatures, FontId, FontMetrics, FontRun,
     FontStyle, FontWeight, GlyphId, LineLayout, Pixels, PlatformTextSystem, RenderGlyphParams,
-    Result, SUBPIXEL_VARIANTS_X, ShapedGlyph, ShapedRun, SharedString, Size, TextRenderingMode,
-    point, px, size, swap_rgba_pa_to_bgra,
+    Result, ShapedGlyph, ShapedRun, SharedString, Size, TextRenderingMode, point, px, size,
+    swap_rgba_pa_to_bgra,
 };
 use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 use pathfinder_geometry::{
@@ -161,7 +160,13 @@ impl PlatformTextSystem for AppleTextSystem {
 
             let candidate_properties = candidates
                 .iter()
-                .map(|font_id| lock.fonts[font_id.0].properties())
+                .map(|font_id| {
+                    let font = &lock.fonts[font_id.0];
+                    let mut properties = font.properties();
+                    properties.weight =
+                        css_weight_of_trait(font.native_font().all_traits().normalized_weight());
+                    properties
+                })
                 .collect::<SmallVec<[_; 4]>>();
 
             let ix = font_kit::matching::find_best_match(
@@ -221,18 +226,54 @@ impl PlatformTextSystem for AppleTextSystem {
         TextRenderingMode::Grayscale
     }
 
+    /// 0 draws without font smoothing; 1 to 5 are CoreGraphics' five dilation levels, chosen by
+    /// the colour's linear luminance to the nearest quarter, as it chooses them itself.
     #[cfg(target_os = "macos")]
     fn glyph_dilation_for_color(&self, color: Hsla) -> u8 {
-        // When font smoothing is enabled, CoreGraphics thickens glyph strokes by an amount that
-        // depends on the foreground color's luminance. We replicate the logic used by CoreGraphics
-        // to select between the different levels of dilation.
         if !font_smoothing_allowed_by_user() {
             return 0;
         }
         let rgba: Rgba = color.into();
-        let luminance = 0.2126 * rgba.r + 0.7152 * rgba.g + 0.0722 * rgba.b;
-        let level = ((4.0 * luminance) + 0.5).floor() as i32;
-        level.clamp(0, 4) as u8
+        let decode = |u: f32| {
+            if u <= 0.04045 {
+                u / 12.92
+            } else {
+                ((u + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let luminance = 0.2126 * decode(rgba.r) + 0.7152 * decode(rgba.g) + 0.0722 * decode(rgba.b);
+        1 + (4.0 * luminance).round().clamp(0.0, 4.0) as u8
+    }
+}
+
+/// The fill a glyph of a dilation level is drawn with: a grey whose linear luminance is the
+/// level's, so CoreGraphics dilates it as it would the text colour.
+#[cfg(target_os = "macos")]
+fn dilation_fill(dilation: u8) -> core_graphics::color::CGColor {
+    let linear = dilation.saturating_sub(1).min(4) as f64 / 4.0;
+    let encoded = if linear <= 0.0031308 {
+        linear * 12.92
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
+    };
+    srgb_color(encoded, encoded, encoded)
+}
+
+#[cfg(target_os = "macos")]
+fn srgb_color(red: f64, green: f64, blue: f64) -> core_graphics::color::CGColor {
+    unsafe extern "C" {
+        fn CGColorCreateSRGB(
+            red: CGFloat,
+            green: CGFloat,
+            blue: CGFloat,
+            alpha: CGFloat,
+        ) -> core_graphics::color::SysCGColorRef;
+    }
+    // SAFETY: CGColorCreateSRGB returns a new colour the wrapper takes ownership of.
+    unsafe {
+        core_graphics::color::CGColor::wrap_under_create_rule(CGColorCreateSRGB(
+            red, green, blue, 1.0,
+        ))
     }
 }
 
@@ -427,15 +468,24 @@ impl AppleTextSystemState {
     }
 
     fn raster_bounds(&self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
-        let font = &self.fonts[params.font_id.0];
+        // The font at the size it is drawn: a variable system font changes its design with the
+        // size (optical size), so bounds scaled from another size can miss a pixel column.
+        let font = self.fonts[params.font_id.0]
+            .native_font()
+            .clone_with_font_size(f32::from(params.font_size) as CGFloat);
+        let rect = font.get_bounding_rects_for_glyphs(
+            kCTFontDefaultOrientation,
+            &[params.glyph_id.0 as CGGlyph],
+        );
+        let rect = RectF::new(
+            Vector2F::new(
+                rect.origin.x as f32,
+                -(rect.origin.y + rect.size.height) as f32,
+            ),
+            Vector2F::new(rect.size.width as f32, rect.size.height as f32),
+        );
         let scale = Transform2F::from_scale(params.scale_factor);
-        let bounds: Bounds<DevicePixels> = bounds_from_rect_i(font.raster_bounds(
-            params.glyph_id.0,
-            params.font_size.into(),
-            scale,
-            HintingOptions::None,
-            font_kit::canvas::RasterizationOptions::GrayscaleAa,
-        )?);
+        let bounds = bounds_from_rect_i((scale * rect).round_out().to_i32());
 
         // Expand the bounds by 1 pixel on each side to give CG room for anti-aliasing.
         Ok(bounds.dilate(DevicePixels(1)))
@@ -496,24 +546,29 @@ impl AppleTextSystemState {
                 params.scale_factor as CGFloat,
             );
 
-            let subpixel_shift = params
-                .subpixel_variant
-                .map(|v| v as f32 / SUBPIXEL_VARIANTS_X as f32);
+            let subpixel_shift = gpui::subpixel_variant_offset(params.subpixel_variant);
+            // The window picks the phase by CoreGraphics' own rule, so with quantisation on the
+            // mask is the one a native label gets at that phase. Unquantised positions snap to
+            // a 1/128 grid of their own and miss thirds by a code or two.
+            let quantize = gpui::text_experiment().phases;
             cx.set_text_drawing_mode(CGTextDrawingMode::CGTextFill);
             cx.set_allows_antialiasing(true);
             cx.set_should_antialias(true);
             cx.set_allows_font_subpixel_positioning(true);
             cx.set_should_subpixel_position_fonts(true);
-            cx.set_allows_font_subpixel_quantization(false);
-            cx.set_should_subpixel_quantize_fonts(false);
+            cx.set_allows_font_subpixel_quantization(quantize);
+            cx.set_should_subpixel_quantize_fonts(quantize);
 
-            if cfg!(target_os = "macos") && params.dilation > 0 {
-                let luminance = params.dilation as f64 * 0.25;
-                cx.set_should_smooth_fonts(true);
-                cx.set_gray_fill_color(luminance, 1.0);
+            #[cfg(target_os = "macos")]
+            if !params.is_emoji {
+                cx.set_allows_font_smoothing(true);
+                cx.set_should_smooth_fonts(params.dilation > 0);
+                cx.set_fill_color(&dilation_fill(params.dilation));
             } else {
                 cx.set_gray_fill_color(0.0, 1.0);
             }
+            #[cfg(not(target_os = "macos"))]
+            cx.set_gray_fill_color(0.0, 1.0);
             self.fonts[params.font_id.0]
                 .native_font()
                 .clone_with_font_size(f32::from(params.font_size) as CGFloat)
@@ -726,6 +781,35 @@ fn size_from_vector2f(vec: Vector2F) -> Size<f32> {
     size(vec.x(), vec.y())
 }
 
+/// A CoreText weight trait on the CSS scale, through AppKit's `NSFontWeight` constants (thin
+/// -0.6 … medium 0.23, semibold 0.3, bold 0.4 … black 0.62). font-kit's own table puts medium
+/// above 500, so `font-weight: 500` matched regular.
+fn css_weight_of_trait(weight: f64) -> FontkitWeight {
+    const STOPS: [(f64, f32); 9] = [
+        (-0.8, 100.),
+        (-0.6, 200.),
+        (-0.4, 300.),
+        (0.0, 400.),
+        (0.23, 500.),
+        (0.3, 600.),
+        (0.4, 700.),
+        (0.56, 800.),
+        (0.62, 900.),
+    ];
+    let (first, last) = (STOPS[0], STOPS[STOPS.len() - 1]);
+    if weight <= first.0 {
+        return FontkitWeight(first.1);
+    }
+    for pair in STOPS.windows(2) {
+        let ((t0, w0), (t1, w1)) = (pair[0], pair[1]);
+        if weight <= t1 {
+            let t = ((weight - t0) / (t1 - t0)) as f32;
+            return FontkitWeight(w0 + t * (w1 - w0));
+        }
+    }
+    FontkitWeight(last.1)
+}
+
 fn fontkit_weight(value: FontWeight) -> FontkitWeight {
     FontkitWeight(value.0)
 }
@@ -778,6 +862,9 @@ mod lenient_font_attributes {
         }
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod coretext_oracle;
 
 #[cfg(test)]
 mod tests {
@@ -842,6 +929,8 @@ mod tests {
                 &[FontRun {
                     font_id,
                     len: text.len(),
+                    tracking: px(0.),
+                    word_spacing: px(0.),
                 }],
             );
             assert_eq!(f32::from(layout.width), width, "{size} px");
@@ -854,10 +943,14 @@ mod tests {
                     FontRun {
                         font_id,
                         len: bom.len(),
+                        tracking: px(0.),
+                        word_spacing: px(0.),
                     },
                     FontRun {
                         font_id,
                         len: text.len(),
+                        tracking: px(0.),
+                        word_spacing: px(0.),
                     },
                 ],
             );
@@ -878,7 +971,12 @@ mod tests {
         let glyphs = |text: &str, runs: &[(FontId, usize)]| -> Vec<GlyphId> {
             let runs = runs
                 .iter()
-                .map(|&(font_id, len)| FontRun { font_id, len })
+                .map(|&(font_id, len)| FontRun {
+                    font_id,
+                    len,
+                    tracking: px(0.),
+                    word_spacing: px(0.),
+                })
                 .collect::<Vec<_>>();
             fonts
                 .layout_line(text, px(16.), &runs)

@@ -1050,7 +1050,7 @@ pub enum FontSmoothing {
     /// is opaque.
     #[default]
     Auto,
-    /// Grayscale coverage always.
+    /// Grayscale coverage always; on macOS also without CoreGraphics' outline dilation.
     Antialiased,
     /// Subpixel coverage where the system has it on, whatever the window's backdrop.
     SubpixelAntialiased,
