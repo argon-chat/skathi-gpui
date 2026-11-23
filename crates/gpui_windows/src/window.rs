@@ -436,6 +436,7 @@ pub(crate) struct Callbacks {
     pub(crate) hit_test_window_control:
         Cell<Option<Box<dyn FnMut(Option<Point<Pixels>>) -> Option<WindowControlArea>>>>,
     pub(crate) appearance_changed: Cell<Option<Box<dyn FnMut()>>>,
+    pub(crate) vn_composition_committed: Cell<Option<Box<dyn FnMut()>>>,
 }
 
 struct WindowCreateContext {
@@ -463,6 +464,18 @@ struct WindowCreateContext {
 }
 
 impl WindowsWindow {
+    fn vn_composition_committed(&self) {
+        let callbacks = &self.state.callbacks.vn_composition_committed;
+        if let Some(mut callback) = callbacks.take() {
+            callback();
+            if let Some(newer) = callbacks.take() {
+                callbacks.set(Some(newer));
+            } else {
+                callbacks.set(Some(callback));
+            }
+        }
+    }
+
     pub(crate) fn new(
         handle: AnyWindowHandle,
         params: WindowParams,
@@ -1383,14 +1396,18 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn draw(&self, scene: &Scene) {
-        let presented = self
-            .state
-            .renderer
-            .borrow_mut()
-            .draw(scene, self.state.background_appearance.get())
-            .log_err();
+        let (presented, committed) = {
+            let mut renderer = self.state.renderer.borrow_mut();
+            let presented = renderer
+                .draw(scene, self.state.background_appearance.get())
+                .log_err();
+            (presented, renderer.vn_take_committed())
+        };
         if presented == Some(true) {
             self.state.haptics.borrow_mut().presented();
+        }
+        if committed {
+            self.vn_composition_committed();
         }
     }
 
@@ -1417,6 +1434,25 @@ impl PlatformWindow for WindowsWindow {
     #[cfg(feature = "native-dx12")]
     fn vn_composition_underlay(&self) -> Option<(usize, usize)> {
         self.state.renderer.borrow().vn_composition_underlay()
+    }
+
+    #[cfg(feature = "native-dx12")]
+    fn vn_composition_commit(&self, after_present: bool) {
+        let committed = {
+            let mut renderer = self.state.renderer.borrow_mut();
+            renderer.vn_composition_commit(after_present);
+            renderer.vn_take_committed()
+        };
+        if committed {
+            self.vn_composition_committed();
+        }
+    }
+
+    fn vn_on_composition_commit(&self, callback: Box<dyn FnMut()>) {
+        self.state
+            .callbacks
+            .vn_composition_committed
+            .set(Some(callback));
     }
 
     fn lock_pointer(&self, unadjusted: bool) -> std::result::Result<(), PointerLockError> {

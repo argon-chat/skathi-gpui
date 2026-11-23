@@ -320,6 +320,10 @@ impl DirectXRendererDevices {
 }
 
 impl DirectXRenderer {
+    pub(crate) fn vn_take_committed(&mut self) -> bool {
+        false
+    }
+
     pub(crate) fn new(
         hwnd: HWND,
         directx_devices: &DirectXDevices,

@@ -595,6 +595,15 @@ struct Renderer {
     hdr_wanted: Option<HdrOutput>,
     /// vue-native: an HDR window's scene, before it is linearised into the swap chain.
     hdr_scene: Option<Arc<Target>>,
+    vn_commit: VnCommit,
+}
+
+/// vue-native: a host's changes to the composition tree, committed with the
+/// next present so they reach the screen in the frame that carries them.
+#[derive(Default)]
+struct VnCommit {
+    after_present: bool,
+    done: bool,
 }
 
 /// vue-native: a capture's pixels, kept across frames until no frame has
@@ -631,6 +640,29 @@ impl Renderer {
             composition.device.clone().into_raw() as usize,
             composition.underlay.clone().into_raw() as usize,
         ))
+    }
+
+    pub(crate) fn vn_composition_commit(&mut self, after_present: bool) {
+        if after_present {
+            self.vn_commit.after_present = true;
+        } else {
+            self.vn_commit_now();
+        }
+    }
+
+    fn vn_commit_now(&mut self) {
+        self.vn_commit.after_present = false;
+        let Some(composition) = &self.composition else {
+            return;
+        };
+        match unsafe { composition.device.Commit() } {
+            Ok(()) => self.vn_commit.done = true,
+            Err(error) => log::error!("committing the composition device failed: {error}"),
+        }
+    }
+
+    pub(crate) fn vn_take_committed(&mut self) -> bool {
+        std::mem::take(&mut self.vn_commit.done)
     }
 
     pub(crate) fn new(
@@ -714,6 +746,7 @@ impl Renderer {
             hdr: None,
             hdr_wanted: None,
             hdr_scene: None,
+            vn_commit: VnCommit::default(),
         })
     }
     fn buffers(
@@ -1010,6 +1043,9 @@ impl Renderer {
             return Ok(false);
         }
         result.ok().context("Presenting native D3D12 swap chain")?;
+        if self.vn_commit.after_present {
+            self.vn_commit_now();
+        }
         if let Some(swap_chain) = &self.swap_chain {
             let (fence, _) = self.gpu.completion_point();
             crate::present_feedback::presented(self.hwnd, swap_chain, Some((&fence, completed)));
@@ -2850,6 +2886,16 @@ impl DirectXRenderer {
         self.live.as_ref()?.vn_composition_underlay()
     }
 
+    pub(crate) fn vn_composition_commit(&mut self, after_present: bool) {
+        if let Some(live) = self.live.as_mut() {
+            live.vn_composition_commit(after_present);
+        }
+    }
+
+    pub(crate) fn vn_take_committed(&mut self) -> bool {
+        self.live.as_mut().is_some_and(Renderer::vn_take_committed)
+    }
+
     pub(crate) fn set_hdr_output(&mut self, output: Option<HdrOutput>) -> bool {
         self.hdr_wanted = output;
         self.live
@@ -3095,6 +3141,7 @@ mod tests {
             hdr: None,
             hdr_wanted: None,
             hdr_scene: None,
+            vn_commit: VnCommit::default(),
         })
     }
 

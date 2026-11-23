@@ -1572,6 +1572,13 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
         None
     }
 
+    /// vue-native: commits the composition device right after the next
+    /// successful present (`after_present`), or now.
+    fn vn_composition_commit(&self, _after_present: bool) {}
+
+    /// vue-native: called after each commit made for [`Self::vn_composition_commit`].
+    fn vn_on_composition_commit(&self, _callback: Box<dyn FnMut()>) {}
+
     /// vue-native fork: maximizes or leaves the maximized state; unlike [`Self::zoom`], never toggles.
     fn vn_set_maximized(&self, maximized: bool) {
         if self.is_maximized() != maximized {

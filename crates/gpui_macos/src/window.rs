@@ -223,6 +223,10 @@ unsafe fn build_classes() {
                 sel!(displayLayer:),
                 display_layer as extern "C" fn(_, Sel, *mut AnyObject),
             );
+            decl.add_method(
+                sel!(viewDidMoveToWindow),
+                view_did_move_to_window as extern "C" fn(_, Sel),
+            );
 
             decl.add_protocol(AnyProtocol::get(c"NSTextInputClient").unwrap());
             decl.add_method(
@@ -681,6 +685,9 @@ struct MacWindowState {
     background_executor: BackgroundExecutor,
     native_window: *mut AnyObject,
     native_view: NonNull<AnyObject>,
+    /// vue-native: the `NSWindow` the view was last in; a host may move the
+    /// view into a window of its own.
+    vn_host_window: *mut AnyObject,
     blurred_view: Option<*mut AnyObject>,
     background_appearance: WindowBackgroundAppearance,
     // The desktop picture under `blurred_view` while a blurred window is in
@@ -1235,6 +1242,7 @@ impl MacWindow {
                 background_executor,
                 native_window,
                 native_view: NonNull::new_unchecked(native_view),
+                vn_host_window: native_window,
                 blurred_view: None,
                 background_appearance: WindowBackgroundAppearance::Opaque,
                 fullscreen_backdrop: FullscreenBackdrop::new(),
@@ -4384,6 +4392,52 @@ extern "C" fn display_layer(this: &AnyObject, _: Sel, _: *mut AnyObject) {
         lock.renderer.set_presents_with_transaction(false);
         lock.start_display_link(&window_state);
     }
+}
+
+/// vue-native: a view moved into another `NSWindow` by the host redraws in full
+/// there, so what paints follows it (an embedder's layer under the page).
+extern "C" fn view_did_move_to_window(this: &AnyObject, _: Sel) {
+    unsafe {
+        let _: () = msg_send![super(this, class!(NSView)), viewDidMoveToWindow];
+    }
+    let window: *mut AnyObject = unsafe { msg_send![this, window] };
+    if window.is_null() {
+        return;
+    }
+    let window_state = unsafe { get_window_state(this) };
+    let Some(mut lock) = window_state.try_lock() else {
+        return;
+    };
+    if lock.vn_host_window == window {
+        return;
+    }
+    lock.vn_host_window = window;
+    let executor = lock.foreground_executor.clone();
+    drop(lock);
+    let window_state = Rc::downgrade(&window_state);
+    executor
+        .spawn(async move {
+            let Some(window_state) = window_state.upgrade() else {
+                return;
+            };
+            let mut lock = window_state.lock();
+            let Some(mut callback) = lock.request_frame_callback.take() else {
+                return;
+            };
+            lock.renderer.set_presents_with_transaction(true);
+            lock.stop_display_link();
+            drop(lock);
+            callback(RequestFrameOptions {
+                force_render: true,
+                signal_source: FrameRequestSource::NativeCallback,
+                ..Default::default()
+            });
+            let mut lock = window_state.lock();
+            lock.request_frame_callback = Some(callback);
+            lock.renderer.set_presents_with_transaction(false);
+            lock.start_display_link(&window_state);
+        })
+        .detach();
 }
 
 extern "C" fn step(view: *mut c_void) {

@@ -3782,6 +3782,18 @@ impl Window {
         self.platform_window.vn_composition_underlay()
     }
 
+    /// vue-native: commits the composition device right after this window's
+    /// next successful present (`after_present`), or now. A host that changes
+    /// visuals under the window during paint commits them with the frame.
+    pub fn vn_composition_commit(&self, after_present: bool) {
+        self.platform_window.vn_composition_commit(after_present);
+    }
+
+    /// vue-native: called after each commit made for [`Self::vn_composition_commit`].
+    pub fn vn_on_composition_commit(&self, callback: Box<dyn FnMut()>) {
+        self.platform_window.vn_on_composition_commit(callback);
+    }
+
     /// vue-native: maximizes or leaves the maximized state without toggling.
     pub fn vn_set_maximized(&self, maximized: bool) {
         self.platform_window.vn_set_maximized(maximized)
