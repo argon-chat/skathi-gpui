@@ -1937,6 +1937,12 @@ pub trait PlatformTextSystem: Send + Sync {
     fn prewarm_fonts(&self, _font_ids: &[FontId]) {}
     /// Get metrics for a font.
     fn font_metrics(&self, font_id: FontId) -> FontMetrics;
+    /// vue-native fork: the ascent and descent, in font units and with [`FontMetrics`]'s signs,
+    /// of the OS/2 typographic values when the font sets USE_TYPO_METRICS and of `hhea`
+    /// otherwise, when they are not [`Self::font_metrics`]'s.
+    fn line_metrics(&self, _font_id: FontId) -> Option<(f32, f32)> {
+        None
+    }
     /// Get typographic bounds for a glyph.
     fn typographic_bounds(&self, font_id: FontId, glyph_id: GlyphId) -> Result<Bounds<f32>>;
     /// Get the advance width for a glyph.

@@ -1067,6 +1067,38 @@ pub enum TextContrast {
     Luminance,
 }
 
+/// vue-native fork: CSS `line-metrics`, what a font contributes to the height of a line.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(JsonSchema))]
+pub enum LineMetrics {
+    /// Ascent, descent and line gap as CSS takes them.
+    #[default]
+    Auto,
+    /// Ascent and descent rounded to whole pixels, no line gap, the descender never clipped.
+    Snapped,
+}
+
+/// vue-native fork: CSS `line-leading`, where the difference between the line height and the
+/// font's box goes.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(JsonSchema))]
+pub enum LineLeading {
+    /// Half above the box and half below.
+    #[default]
+    Split,
+    /// All of it above the box.
+    Above,
+}
+
+/// vue-native fork: how each line box of a text is built, from its style.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct LineBoxRules {
+    /// CSS `line-metrics`.
+    pub metrics: LineMetrics,
+    /// CSS `line-leading`.
+    pub leading: LineLeading,
+}
+
 impl Default for TabSize {
     fn default() -> Self {
         Self::INITIAL
@@ -1096,6 +1128,8 @@ pub struct TextWrap {
     pub hyphens: Hyphens,
     /// CSS `tab-size`. Not a breaking rule, but it moves what follows a tab, and so the breaks.
     pub tab_size: TabSize,
+    /// CSS `line-metrics` and `line-leading`. Not breaking rules either: they build each line's box.
+    pub line_box: LineBoxRules,
 }
 
 impl TextWrap {
@@ -1108,6 +1142,10 @@ impl TextWrap {
         word_break: WordBreak::Normal,
         hyphens: Hyphens::Manual,
         tab_size: TabSize::INITIAL,
+        line_box: LineBoxRules {
+            metrics: LineMetrics::Auto,
+            leading: LineLeading::Split,
+        },
     };
 
     /// May a word that does not fit be broken where it overflows?
@@ -1310,6 +1348,12 @@ pub struct TextStyle {
 
     /// vue-native fork: inside a `will-change: transform` box, whose text moves as a layer.
     pub will_change_transform: bool,
+
+    /// vue-native fork: CSS `line-metrics`.
+    pub line_metrics: LineMetrics,
+
+    /// vue-native fork: CSS `line-leading`.
+    pub line_leading: LineLeading,
 }
 
 impl Default for TextStyle {
@@ -1342,6 +1386,8 @@ impl Default for TextStyle {
             font_smoothing: FontSmoothing::Auto,
             text_contrast: TextContrast::Auto,
             will_change_transform: false,
+            line_metrics: LineMetrics::Auto,
+            line_leading: LineLeading::Split,
         }
     }
 }
@@ -1354,6 +1400,15 @@ impl TextStyle {
             word_break: self.word_break,
             hyphens: self.hyphens,
             tab_size: self.tab_size,
+            line_box: self.line_box(),
+        }
+    }
+
+    /// vue-native fork: how this style builds a line's box.
+    pub fn line_box(&self) -> LineBoxRules {
+        LineBoxRules {
+            metrics: self.line_metrics,
+            leading: self.line_leading,
         }
     }
 

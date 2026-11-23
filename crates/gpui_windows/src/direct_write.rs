@@ -208,6 +208,10 @@ impl PlatformTextSystem for DirectWriteTextSystem {
         self.state.read().font_metrics(font_id)
     }
 
+    fn line_metrics(&self, font_id: FontId) -> Option<(f32, f32)> {
+        self.state.read().line_metrics(font_id)
+    }
+
     fn typographic_bounds(&self, font_id: FontId, glyph_id: GlyphId) -> Result<Bounds<f32>> {
         self.state.read().get_typographic_bounds(font_id, glyph_id)
     }
@@ -1001,6 +1005,25 @@ impl DirectWriteState {
                 },
             }
         }
+    }
+
+    /// DirectWrite's design metrics are OS/2's Windows ascent and descent for a face without
+    /// USE_TYPO_METRICS; `hhea`'s, when they differ from those.
+    fn line_metrics(&self, font_id: FontId) -> Option<(f32, f32)> {
+        let face = &self.fonts[font_id.0].font_face;
+        let use_typo = font_table(face, *b"OS/2", |os2| {
+            os2.get(62..64)
+                .map(|b| u16::from_be_bytes([b[0], b[1]]) & 0x80 != 0)
+        })??;
+        if use_typo {
+            return None;
+        }
+        let (ascent, descent) = font_table(face, *b"hhea", |hhea| {
+            let at = |i: usize| hhea.get(i..i + 2).map(|b| i16::from_be_bytes([b[0], b[1]]));
+            Some((at(4)? as f32, at(6)? as f32))
+        })??;
+        let metrics = self.font_metrics(font_id);
+        (ascent != metrics.ascent || descent != metrics.descent).then_some((ascent, descent))
     }
 
     /// The face the LINE was measured with. `layout_line` instanced it at
@@ -2333,6 +2356,35 @@ fn is_line_separator(character: char) -> bool {
     matches!(character, '\u{2028}' | '\u{2029}')
 }
 
+/// Reads the face's OpenType table `tag` with `read`; `None` when the face has none.
+fn font_table<T>(
+    face: &IDWriteFontFace3,
+    tag: [u8; 4],
+    read: impl FnOnce(&[u8]) -> T,
+) -> Option<T> {
+    let mut data = std::ptr::null_mut();
+    let mut size = 0u32;
+    let mut context = std::ptr::null_mut();
+    let mut exists = BOOL(0);
+    // SAFETY: the table stays valid until `ReleaseFontTable`, which runs after `read` is done with it.
+    unsafe {
+        face.TryGetFontTable(
+            u32::from_le_bytes(tag),
+            &mut data,
+            &mut size,
+            &mut context,
+            &mut exists,
+        )
+        .ok()?;
+        if !exists.as_bool() || data.is_null() {
+            return None;
+        }
+        let value = read(std::slice::from_raw_parts(data as *const u8, size as usize));
+        face.ReleaseFontTable(context);
+        Some(value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::DirectWriteTextSystem;
@@ -2994,6 +3046,19 @@ mod composed_tests {
         // latin face though U+0301 is the cyrillic one's) — unless it has none.
         assert_eq!(split_by_face("e\u{0301}x", &faces), vec![(4, Some(1))]);
         assert_eq!(split_by_face("\u{0301}", &faces), vec![(2, Some(0))]);
+    }
+
+    /// Consolas has no USE_TYPO_METRICS and Windows ascent and descent (1884 / 514) that are not
+    /// its `hhea` ones (1521 / -527); Segoe UI's agree.
+    #[test]
+    fn line_metrics_are_hhea_where_directwrite_reports_the_windows_metrics() -> Result<()> {
+        let platform = DirectWriteTextSystem::new()?;
+        let consolas = platform.font_id(&font("Consolas"))?;
+        assert_eq!(platform.font_metrics(consolas).ascent, 1884.);
+        assert_eq!(platform.line_metrics(consolas), Some((1521., -527.)));
+        let segoe = platform.font_id(&font("Segoe UI"))?;
+        assert_eq!(platform.line_metrics(segoe), None);
+        Ok(())
     }
 
     #[test]

@@ -1,10 +1,10 @@
 use super::UNDERLINE_DESCENT_OFFSET_FACTOR;
-use super::line_layout::{LineBox, LineBoxes};
+use super::line_layout::LineBox;
 use crate::util::impl_deref;
 use crate::{
-    App, Bounds, DevicePixels, Half, Hsla, LineLayout, Pixels, Point, RenderGlyphParams, Result,
-    SharedString, StrikethroughStyle, TextAlign, TextShadow, UnderlineStyle, Window, WrapBoundary,
-    WrappedLineLayout, black, fill, point, px, size, underline_y_offset,
+    App, Bounds, DevicePixels, Half, Hsla, LineLayout, LineLeading, Pixels, Point,
+    RenderGlyphParams, Result, SharedString, StrikethroughStyle, TextAlign, TextShadow,
+    UnderlineStyle, Window, WrapBoundary, WrappedLineLayout, black, fill, point, px, size,
 };
 use smallvec::SmallVec;
 use std::{ops::Range, sync::Arc};
@@ -151,6 +151,7 @@ impl ShapedLine {
             origin,
             &self.layout,
             line_height,
+            LineLeading::Split,
             align,
             align_width,
             &self.decoration_runs,
@@ -179,6 +180,7 @@ impl ShapedLine {
             origin,
             &self.layout,
             line_height,
+            LineLeading::Split,
             align,
             align_width,
             &self.decoration_runs,
@@ -400,6 +402,7 @@ impl LineLayout {
             origin,
             self,
             line_height,
+            LineLeading::Split,
             align,
             align_width,
             decoration_runs,
@@ -433,6 +436,7 @@ impl LineLayout {
             origin,
             self,
             line_height,
+            LineLeading::Split,
             align,
             align_width,
             decoration_runs,
@@ -480,6 +484,7 @@ impl WrappedLine {
             origin,
             &self.layout.unwrapped_layout,
             line_height,
+            self.layout.leading,
             align,
             align_width,
             &self.decoration_runs,
@@ -515,6 +520,7 @@ impl WrappedLine {
             origin,
             &self.layout.unwrapped_layout,
             line_height,
+            self.layout.leading,
             align,
             align_width,
             &self.decoration_runs,
@@ -531,6 +537,7 @@ fn paint_line(
     origin: Point<Pixels>,
     layout: &LineLayout,
     line_height: Pixels,
+    leading: LineLeading,
     align: TextAlign,
     align_width: Option<Pixels>,
     decoration_runs: &[DecorationRun],
@@ -548,11 +555,9 @@ fn paint_line(
 ) -> Result<()> {
     // vue-native fork: each `text-shadow` is a pass of its own beneath the text, last first, in a
     // layer of its own so its sprites order below the glyphs they shadow.
-    let lines = layout.visual_lines(wrap_boundaries, line_height);
-    let line_underline_y = |line: LineBox| match lines {
-        LineBoxes::Uniform { .. } => underline_y_offset(line_height, layout.ascent, layout.descent),
-        LineBoxes::Mixed(_) => line.baseline + layout.descent * UNDERLINE_DESCENT_OFFSET_FACTOR,
-    };
+    let lines = layout.visual_lines(wrap_boundaries, line_height, leading);
+    let line_underline_y =
+        |line: LineBox| line.baseline + layout.descent * UNDERLINE_DESCENT_OFFSET_FACTOR;
     let mut paint_pass = |shadow_ix: Option<usize>, window: &mut Window| -> Result<()> {
         let mut line = lines.get(0);
         let mut baseline_offset = point(px(0.), line.baseline);
@@ -993,6 +998,7 @@ fn paint_line_background(
     origin: Point<Pixels>,
     layout: &LineLayout,
     line_height: Pixels,
+    leading: LineLeading,
     align: TextAlign,
     align_width: Option<Pixels>,
     decoration_runs: &[DecorationRun],
@@ -1000,7 +1006,7 @@ fn paint_line_background(
     window: &mut Window,
     cx: &mut App,
 ) -> Result<()> {
-    let lines = layout.visual_lines(wrap_boundaries, line_height);
+    let lines = layout.visual_lines(wrap_boundaries, line_height, leading);
     window.paint_layer(|window| {
         let mut wrap_ix = 0;
         let mut line = lines.get(0);
@@ -1164,7 +1170,7 @@ mod tests {
     use super::*;
     use crate::{
         AppContext as _, Context, FontId, GlyphId, IntoElement, Render, ShapedGlyph, ShapedRun,
-        Styled, TestAppContext, TextRun, Underline, canvas, font, hsla,
+        Styled, TestAppContext, TextRun, Underline, canvas, font, hsla, underline_y_offset,
     };
     use std::rc::Rc;
 
@@ -2039,6 +2045,7 @@ mod tests {
                     origin,
                     &wrapped.unwrapped_layout,
                     line_height,
+                    LineLeading::Split,
                     TextAlign::Left,
                     Some(px(16.)),
                     &wrapped.decoration_runs,

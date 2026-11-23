@@ -3710,7 +3710,11 @@ impl Window {
         if style.line_height == crate::line_height_normal() {
             let size = style.font_size.to_pixels(self.rem_size());
             if size > Pixels::ZERO {
-                let normal = self.text_system().normal_line_height(&style.font(), size);
+                let normal = self.text_system().normal_line_height_with(
+                    &style.font(),
+                    size,
+                    style.line_metrics,
+                );
                 style.line_height = crate::relative(f32::from(normal) / f32::from(size));
             } else {
                 style.line_height = crate::relative(0.0);

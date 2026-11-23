@@ -1,9 +1,10 @@
 use crate::{
     ActiveTooltip, AnyView, App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId,
     HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size, TextOverflow,
-    TextRun, TextStyle, TextWrap, TooltipId, TruncateFrom, WhiteSpace, Window, WrappedLine,
-    WrappedLineLayout, register_tooltip_mouse_handlers, set_tooltip_on_window,
+    LineBoxRules, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size,
+    TextOverflow, TextRun, TextStyle, TextWrap, TooltipId, TruncateFrom, WhiteSpace, Window,
+    WrappedLine, WrappedLineLayout, line_baseline, register_tooltip_mouse_handlers,
+    set_tooltip_on_window,
 };
 use anyhow::Context as _;
 use gpui_util::ResultExt;
@@ -658,6 +659,7 @@ fn first_baseline(
     runs: &[TextRun],
     font_size: Pixels,
     line_height: Pixels,
+    line_box: LineBoxRules,
     window: &Window,
 ) -> Option<Pixels> {
     let first = runs.first()?;
@@ -666,9 +668,13 @@ fn first_baseline(
     }
     let text_system = window.text_system();
     let font_id = text_system.resolve_font(&first.font);
-    let ascent = text_system.ascent(font_id, font_size).abs();
-    let descent = text_system.descent(font_id, font_size).abs();
-    Some((line_height - ascent - descent) / 2. + ascent)
+    let (ascent, descent) = text_system.line_extent(font_id, font_size, line_box.metrics);
+    Some(line_baseline(
+        line_height,
+        ascent,
+        descent,
+        line_box.leading,
+    ))
 }
 
 struct TextLayoutInner {
@@ -702,7 +708,7 @@ impl TextLayout {
         } else {
             vec![text_style.to_run(text.len())]
         };
-        let baseline = first_baseline(&runs, font_size, line_height, window);
+        let baseline = first_baseline(&runs, font_size, line_height, text_style.line_box(), window);
         window.request_measured_layout_with_baseline(Default::default(), baseline, {
             let element_state = self.clone();
 

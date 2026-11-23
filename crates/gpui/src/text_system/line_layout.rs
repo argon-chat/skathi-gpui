@@ -1,6 +1,6 @@
 use crate::{
-    FontId, GlyphId, Hyphens, Pixels, PlatformTextSystem, Point, SharedString, Size, TabSize,
-    TextWrap, WordBreak, point, px,
+    FontId, GlyphId, Hyphens, LineLeading, LineMetrics, Pixels, Point, SharedString, Size, TabSize,
+    TextSystem, TextWrap, WordBreak, point, px,
 };
 use collections::{FxHashMap, FxHashSet};
 use icu_segmenter::{
@@ -130,6 +130,50 @@ pub struct LineBox {
     pub height: Pixels,
     /// The baseline's distance from the line's top.
     pub baseline: Pixels,
+}
+
+/// vue-native fork: a font's box under `line-metrics: snapped`, from its unrounded ascent and
+/// descent: each rounded to a whole pixel, ties away from zero, and the descent rounded up instead
+/// when rounding would clip the descender.
+pub fn snapped_line_extent(ascent: Pixels, descent: Pixels) -> (Pixels, Pixels) {
+    let rounded = descent.0.round();
+    let descent = if descent.0 - rounded > 1e-4 {
+        descent.0.ceil()
+    } else {
+        rounded
+    };
+    (px(ascent.0.round()), px(descent))
+}
+
+/// vue-native fork: the baseline's distance from the top of a line `line_height` tall, for a
+/// font box reaching `ascent` above the baseline and `descent` below.
+pub fn line_baseline(
+    line_height: Pixels,
+    ascent: Pixels,
+    descent: Pixels,
+    leading: LineLeading,
+) -> Pixels {
+    match leading {
+        LineLeading::Split => (line_height - ascent - descent) / 2. + ascent,
+        LineLeading::Above => line_height - descent,
+    }
+}
+
+/// How far a line `line_height` tall reaches above and below the baseline of a box `ascent` and
+/// `descent` tall.
+fn line_extent(
+    line_height: Pixels,
+    ascent: Pixels,
+    descent: Pixels,
+    leading: LineLeading,
+) -> (Pixels, Pixels) {
+    match leading {
+        LineLeading::Split => {
+            let half_leading = (line_height - ascent - descent) / 2.;
+            (ascent + half_leading, descent + half_leading)
+        }
+        LineLeading::Above => (line_height - descent, descent),
+    }
 }
 
 /// The visual lines of a layout: all alike unless its runs differ in size or hold inline boxes.
@@ -279,8 +323,9 @@ impl LineLayout {
         &self,
         wrap_boundaries: &[WrapBoundary],
         line_height: Pixels,
+        leading: LineLeading,
     ) -> SmallVec<[LineBox; 1]> {
-        let lines = self.visual_lines(wrap_boundaries, line_height);
+        let lines = self.visual_lines(wrap_boundaries, line_height, leading);
         (0..=wrap_boundaries.len())
             .map(|ix| lines.get(ix))
             .collect()
@@ -290,22 +335,20 @@ impl LineLayout {
         &self,
         wrap_boundaries: &[WrapBoundary],
         line_height: Pixels,
+        leading: LineLeading,
     ) -> LineBoxes {
         if !self.has_mixed_runs() {
-            let padding_top = (line_height - self.ascent - self.descent) / 2.;
             return LineBoxes::Uniform {
                 height: line_height,
-                baseline: padding_top + self.ascent,
+                baseline: line_baseline(line_height, self.ascent, self.descent, leading),
             };
         }
         let mut boxes = SmallVec::new();
         let mut top = px(0.);
         let mut extent: Option<(Pixels, Pixels)> = None;
         let mut close = |extent: Option<(Pixels, Pixels)>| {
-            let (above, below) = extent.unwrap_or_else(|| {
-                let half_leading = (line_height - self.ascent - self.descent) / 2.;
-                (self.ascent + half_leading, self.descent + half_leading)
-            });
+            let (above, below) = extent
+                .unwrap_or_else(|| line_extent(line_height, self.ascent, self.descent, leading));
             boxes.push(LineBox {
                 top,
                 height: above + below,
@@ -315,7 +358,7 @@ impl LineLayout {
         };
         let mut wraps = wrap_boundaries.iter().peekable();
         for (run_ix, run) in self.runs.iter().enumerate() {
-            let (above, below) = self.run_extent(run, line_height);
+            let (above, below) = self.run_extent(run, line_height, leading);
             for glyph_ix in 0..run.glyphs.len() {
                 if wraps.peek() == Some(&&WrapBoundary { run_ix, glyph_ix }) {
                     wraps.next();
@@ -328,8 +371,13 @@ impl LineLayout {
         LineBoxes::Mixed(boxes)
     }
 
-    /// How far a run reaches above and below the baseline, its half-leading included.
-    fn run_extent(&self, run: &ShapedRun, line_height: Pixels) -> (Pixels, Pixels) {
+    /// How far a run reaches above and below the baseline, its leading included.
+    fn run_extent(
+        &self,
+        run: &ShapedRun,
+        line_height: Pixels,
+        leading: LineLeading,
+    ) -> (Pixels, Pixels) {
         if run.inline_box {
             return (run.ascent, run.descent);
         }
@@ -338,8 +386,7 @@ impl LineLayout {
         } else {
             line_height
         };
-        let half_leading = (run_line_height - run.ascent - run.descent) / 2.;
-        (run.ascent + half_leading, run.descent + half_leading)
+        line_extent(run_line_height, run.ascent, run.descent, leading)
     }
 
     /// Split this layout at a byte index, returning `(prefix, suffix)`.
@@ -758,6 +805,9 @@ pub struct WrappedLineLayout {
     /// vue-native fork: the widest line, when a word that may not break made
     /// it wider than the wrap width. Zero otherwise.
     pub(crate) overflow_width: Pixels,
+
+    /// vue-native fork: CSS `line-leading` of the text.
+    pub(crate) leading: LineLeading,
 }
 
 /// A boundary at which a line was wrapped
@@ -799,12 +849,12 @@ impl WrappedLineLayout {
     /// vue-native fork: where each visual line sits; see [`LineLayout::line_boxes`].
     pub fn line_boxes(&self, line_height: Pixels) -> SmallVec<[LineBox; 1]> {
         self.unwrapped_layout
-            .line_boxes(&self.wrap_boundaries, line_height)
+            .line_boxes(&self.wrap_boundaries, line_height, self.leading)
     }
 
     pub(crate) fn visual_lines(&self, line_height: Pixels) -> LineBoxes {
         self.unwrapped_layout
-            .visual_lines(&self.wrap_boundaries, line_height)
+            .visual_lines(&self.wrap_boundaries, line_height, self.leading)
     }
 
     /// The ascent of a line in this layout
@@ -949,7 +999,7 @@ impl WrappedLineLayout {
 pub(crate) struct LineLayoutCache {
     state: RefCell<LineLayoutCacheState>,
     wrap_scratch: RefCell<WrapScratch>,
-    platform_text_system: Arc<dyn PlatformTextSystem>,
+    text_system: Arc<TextSystem>,
     /// Advances when [`TextSystem::add_fonts`] successfully changes the font database.
     font_generation: Arc<AtomicUsize>,
     /// Records the generation represented by both frame caches.
@@ -984,15 +1034,12 @@ pub(crate) struct LineLayoutIndex {
 }
 
 impl LineLayoutCache {
-    pub fn new(
-        platform_text_system: Arc<dyn PlatformTextSystem>,
-        font_generation: Arc<AtomicUsize>,
-    ) -> Self {
+    pub fn new(text_system: Arc<TextSystem>, font_generation: Arc<AtomicUsize>) -> Self {
         let cached_font_generation = font_generation.load(Ordering::Acquire);
         Self {
             state: RefCell::default(),
             wrap_scratch: RefCell::default(),
-            platform_text_system,
+            text_system,
             font_generation,
             cached_font_generation: AtomicUsize::new(cached_font_generation),
         }
@@ -1080,13 +1127,25 @@ impl LineLayoutCache {
         let Some(font_id) = runs.first().map(|run| run.font_id) else {
             return px(0.);
         };
-        let Some(glyph) = self.platform_text_system.glyph_for_char(font_id, '-') else {
+        let Some(glyph) = self
+            .text_system
+            .platform_text_system
+            .glyph_for_char(font_id, '-')
+        else {
             return px(0.);
         };
-        let Ok(advance) = self.platform_text_system.advance(font_id, glyph) else {
+        let Ok(advance) = self
+            .text_system
+            .platform_text_system
+            .advance(font_id, glyph)
+        else {
             return px(0.);
         };
-        let units_per_em = self.platform_text_system.font_metrics(font_id).units_per_em as f32;
+        let units_per_em = self
+            .text_system
+            .platform_text_system
+            .font_metrics(font_id)
+            .units_per_em as f32;
         px(advance.width / units_per_em * font_size.0)
     }
 
@@ -1106,7 +1165,7 @@ impl LineLayoutCache {
         };
         let space = |font_id: FontId, size: Pixels, offset: usize| {
             let run = run_at(offset);
-            let shaped = self.platform_text_system.layout_line(
+            let shaped = self.text_system.platform_text_system.layout_line(
                 " ",
                 size,
                 &[FontRun {
@@ -1217,6 +1276,7 @@ impl LineLayoutCache {
                 spans,
                 None,
                 rules.tab_size,
+                rules.line_box.metrics,
             );
             let wrapping = if let Some(wrap_width) = wrap_width {
                 let hyphen_width = self.hyphen_width(&text, font_size, runs, rules);
@@ -1237,6 +1297,7 @@ impl LineLayoutCache {
                 wrap_width,
                 hyphen_breaks: wrapping.hyphens,
                 overflow_width: wrapping.overflow,
+                leading: rules.line_box.leading,
             });
             let key = Arc::new(CacheKey {
                 text,
@@ -1271,10 +1332,19 @@ impl LineLayoutCache {
         Text: AsRef<str>,
         SharedString: From<Text>,
     {
-        self.layout_line_with(text, font_size, runs, spans, force_width, TabSize::INITIAL)
+        self.layout_line_with(
+            text,
+            font_size,
+            runs,
+            spans,
+            force_width,
+            TabSize::INITIAL,
+            LineMetrics::Auto,
+        )
     }
 
-    /// vue-native fork: [`Self::layout_line`] with tabs advancing to stops `tab_size` apart.
+    /// vue-native fork: [`Self::layout_line`] with tabs advancing to stops `tab_size` apart, and
+    /// each run's box under `metrics`.
     pub fn layout_line_with<Text>(
         &self,
         text: Text,
@@ -1283,16 +1353,18 @@ impl LineLayoutCache {
         spans: &[LayoutSpan],
         force_width: Option<Pixels>,
         tab_size: TabSize,
+        metrics: LineMetrics,
     ) -> Arc<LineLayout>
     where
         Text: AsRef<str>,
         SharedString: From<Text>,
     {
         let _font_generation = self.clear_if_font_generation_changed();
-        let wrap = TextWrap {
+        let mut wrap = TextWrap {
             tab_size,
             ..TextWrap::default()
         };
+        wrap.line_box.metrics = metrics;
         let key = &CacheKeyRef {
             text: text.as_ref(),
             font_size,
@@ -1324,6 +1396,7 @@ impl LineLayoutCache {
             let shaping = std::time::Instant::now();
             let mut layout = if spans.is_empty() {
                 let mut layout = self
+                    .text_system
                     .platform_text_system
                     .layout_line(&text, font_size, runs);
                 for run in &mut layout.runs {
@@ -1346,6 +1419,9 @@ impl LineLayoutCache {
             }
             if let Some(force_width) = force_width {
                 apply_force_width_to_layout(&mut layout, force_width);
+            }
+            if metrics == LineMetrics::Snapped {
+                self.snap_extents(&mut layout, font_size, runs);
             }
 
             let key = Arc::new(CacheKey {
@@ -1420,7 +1496,7 @@ impl LineLayoutCache {
                 layout.ascent = layout.ascent.max(inline_box.ascent);
                 layout.descent = layout.descent.max(inline_box.descent);
             } else if end > start {
-                let segment = self.platform_text_system.layout_line(
+                let segment = self.text_system.platform_text_system.layout_line(
                     &text[start..end],
                     span.font_size,
                     &segment_runs,
@@ -1442,6 +1518,35 @@ impl LineLayoutCache {
             start = end;
         }
         layout
+    }
+
+    /// vue-native fork: each text run's box from its own font under `line-metrics: snapped`, and
+    /// the line's as the largest above and below the baseline. An empty line takes its first
+    /// run's font.
+    fn snap_extents(&self, layout: &mut LineLayout, font_size: Pixels, runs: &[FontRun]) {
+        let (mut ascent, mut descent) = (px(0.), px(0.));
+        let mut text_runs = 0;
+        for run in &mut layout.runs {
+            if !run.inline_box {
+                (run.ascent, run.descent) =
+                    self.text_system
+                        .line_extent(run.font_id, run.font_size, LineMetrics::Snapped);
+                text_runs += 1;
+            }
+            ascent = ascent.max(run.ascent);
+            descent = descent.max(run.descent);
+        }
+        if text_runs == 0
+            && let Some(run) = runs.first()
+        {
+            let (a, d) = self
+                .text_system
+                .line_extent(run.font_id, font_size, LineMetrics::Snapped);
+            ascent = ascent.max(a);
+            descent = descent.max(d);
+        }
+        layout.ascent = ascent;
+        layout.descent = descent;
     }
 
     fn clear_if_font_generation_changed(&self) -> usize {
@@ -1670,7 +1775,8 @@ pub(super) mod tests {
     use super::*;
     use crate::{
         Bounds, DevicePixels, Font, FontMetrics, GlyphId, NoopTextSystem, OverflowWrap,
-        RenderGlyphParams, Result, TextRun, TextSystem, WindowTextSystem, font, size,
+        PlatformTextSystem, RenderGlyphParams, Result, TextRun, TextSystem, WindowTextSystem, font,
+        size,
     };
     use parking_lot::Mutex;
 
@@ -1679,6 +1785,9 @@ pub(super) mod tests {
     #[derive(Default)]
     pub(crate) struct ProportionalTextSystem {
         pub(crate) rasterized_sizes: Mutex<Vec<Pixels>>,
+        /// Ascent, descent and units per em of the font, when not [`NoopTextSystem`]'s.
+        pub(crate) metrics: Option<(f32, f32, u32)>,
+        pub(crate) line_metrics: Option<(f32, f32)>,
     }
 
     impl PlatformTextSystem for ProportionalTextSystem {
@@ -1695,7 +1804,21 @@ pub(super) mod tests {
         }
 
         fn font_metrics(&self, font_id: FontId) -> FontMetrics {
-            NoopTextSystem.font_metrics(font_id)
+            let metrics = NoopTextSystem.font_metrics(font_id);
+            match self.metrics {
+                Some((ascent, descent, units_per_em)) => FontMetrics {
+                    ascent,
+                    descent,
+                    units_per_em,
+                    line_gap: 0.,
+                    ..metrics
+                },
+                None => metrics,
+            }
+        }
+
+        fn line_metrics(&self, _: FontId) -> Option<(f32, f32)> {
+            self.line_metrics
         }
 
         fn typographic_bounds(&self, font_id: FontId, glyph_id: GlyphId) -> Result<Bounds<f32>> {
@@ -1799,6 +1922,123 @@ pub(super) mod tests {
             .collect()
     }
 
+    /// The macOS system font's 1980 / -432 on a 2048-unit em.
+    fn system_font(line_metrics: Option<(f32, f32)>) -> WindowTextSystem {
+        WindowTextSystem::new(Arc::new(TextSystem::new(Arc::new(
+            ProportionalTextSystem {
+                metrics: Some((1980., -432., 2048)),
+                line_metrics,
+                ..Default::default()
+            },
+        ))))
+    }
+
+    fn snapped(size: f32, ascent_units: f32, descent_units: f32, em: f32) -> (f32, f32) {
+        let (a, d) =
+            snapped_line_extent(px(size * ascent_units / em), px(size * descent_units / em));
+        (a.0 + d.0, a.0)
+    }
+
+    #[test]
+    fn a_snapped_box_is_whole_pixels_and_never_clips_the_descender() {
+        // Height and baseline of the system font's string-drawing box. The descender rule holds
+        // for every size here, so 26 and 34 are a pixel taller than AppKit's 30 and 40, which
+        // apply it to the system font only up to 21 pt.
+        let table = [
+            (9., 11., 9.),
+            (10., 13., 10.),
+            (11., 14., 11.),
+            (12., 15., 12.),
+            (13., 16., 13.),
+            (15., 19., 15.),
+            (16., 19., 15.),
+            (17., 20., 16.),
+            (20., 24., 19.),
+            (26., 31., 25.),
+            (34., 41., 33.),
+        ];
+        for (size, height, baseline) in table {
+            assert_eq!(
+                snapped(size, 1980., 432., 2048.),
+                (height, baseline),
+                "{size} px"
+            );
+        }
+
+        // Other families at 13 px, from their ascent and descent there. Inter and Literata
+        // descend past a whole pixel (3.136, 4.004), so they are a pixel taller than AppKit's
+        // 16 and 19, which do not grow a non-system font's box.
+        for (family, ascent, descent, height, baseline) in [
+            ("Nunito", 13.143, 4.589, 18., 13.),
+            ("Inter", 12.594, 3.136, 17., 13.),
+            ("Literata", 15.301, 4.004, 20., 15.),
+            ("JetBrains Mono", 13.26, 3.9, 17., 13.),
+            ("Noto Sans", 13.897, 3.809, 18., 14.),
+        ] {
+            assert_eq!(
+                snapped(1., ascent, descent, 1.),
+                (height, baseline),
+                "{family}"
+            );
+        }
+    }
+
+    #[test]
+    fn leading_above_puts_the_whole_difference_over_the_box() {
+        let (a, d) = (px(13.), px(3.));
+        assert_eq!(line_baseline(px(24.), a, d, LineLeading::Above), px(21.));
+        assert_eq!(line_baseline(px(24.), a, d, LineLeading::Split), px(17.));
+        assert_eq!(line_baseline(px(14.), a, d, LineLeading::Above), px(11.));
+    }
+
+    #[test]
+    fn snapped_and_above_build_the_lines_of_a_text() {
+        let text_system = system_font(None);
+        let font = font(".ZedMono");
+        let rules = |metrics, leading| TextWrap {
+            line_box: crate::LineBoxRules { metrics, leading },
+            ..TextWrap::default()
+        };
+        let boxes = |text: &str, runs: &[TextRun], line_height: f32, rules: TextWrap| {
+            text_system
+                .shape_text_with(text.to_owned().into(), px(13.), runs, None, None, rules)
+                .unwrap()[0]
+                .line_boxes(px(line_height))
+        };
+        let runs = sized_runs(&[(5, None, None)]);
+
+        assert_eq!(
+            text_system.normal_line_height_with(&font, px(13.), LineMetrics::Snapped),
+            px(16.)
+        );
+        let snapped = rules(LineMetrics::Snapped, LineLeading::Split);
+        assert_box(boxes("Hello", &runs, 16., snapped)[0], 0., 16., 13.);
+        assert_box(boxes("Hello", &runs, 24., snapped)[0], 0., 24., 17.);
+        let above = rules(LineMetrics::Snapped, LineLeading::Above);
+        assert_box(boxes("Hello", &runs, 24., above)[0], 0., 24., 21.);
+
+        // The shaped line's own descent with all the leading above: 24 − 13 × 0.2.
+        let auto_above = rules(LineMetrics::Auto, LineLeading::Above);
+        assert_box(boxes("Hello", &runs, 24., auto_above)[0], 0., 24., 21.4);
+
+        // Each run's box from its own size, its line height scaled by it, the line as tall as
+        // they reach above and below the shared baseline: 13 px is 21 + 3 of a 24 px line,
+        // 26 px is 42 + 6 of a 48 px one.
+        let mixed = sized_runs(&[(2, None, None), (2, Some(26.), None)]);
+        assert_box(boxes("abCD", &mixed, 24., above)[0], 0., 48., 42.);
+        // Split: 13 px reaches 17 above and 7 below, 26 px (31 tall) 33.5 and 14.5.
+        assert_box(boxes("abCD", &mixed, 24., snapped)[0], 0., 48., 33.5);
+    }
+
+    #[test]
+    fn snapped_metrics_come_from_the_platforms_line_metrics() {
+        let text_system = system_font(Some((1521., -527.)));
+        let (ascent, descent) = text_system.line_extent(FontId(1), px(16.), LineMetrics::Snapped);
+        assert_eq!((ascent, descent), (px(12.), px(5.)));
+        let (ascent, _) = text_system.line_extent(FontId(1), px(16.), LineMetrics::Auto);
+        assert_close(ascent, 16. * 1980. / 2048., "ascent");
+    }
+
     #[test]
     fn a_tab_advances_to_the_next_stop_and_skips_one_closer_than_half_a_space() {
         let text_system = proportional();
@@ -1854,7 +2094,7 @@ pub(super) mod tests {
         assert!(layout.has_mixed_runs());
 
         // The 32 px run's line height scales with it: 40 px, 4 px of half-leading.
-        let boxes = layout.line_boxes(&[], px(20.));
+        let boxes = layout.line_boxes(&[], px(20.), LineLeading::Split);
         assert_eq!(boxes.len(), 1);
         assert_box(boxes[0], 0., 40., 29.6);
 
@@ -1872,7 +2112,9 @@ pub(super) mod tests {
         assert!(Arc::ptr_eq(&plain, &same));
         assert!(!plain.has_mixed_runs());
         assert_eq!(
-            plain.line_boxes(&[], px(20.)).as_slice(),
+            plain
+                .line_boxes(&[], px(20.), LineLeading::Split)
+                .as_slice(),
             &[LineBox {
                 top: px(0.),
                 height: px(20.),
@@ -1965,7 +2207,12 @@ pub(super) mod tests {
         );
         assert_close(layout.ascent, 24., "ascent");
         assert_close(layout.descent, 6., "descent");
-        assert_box(layout.line_boxes(&[], px(20.))[0], 0., 30., 24.);
+        assert_box(
+            layout.line_boxes(&[], px(20.), LineLeading::Split)[0],
+            0.,
+            30.,
+            24.,
+        );
 
         // A caret goes before or after the box, never into it.
         assert_eq!(layout.closest_index_for_x(px(18.)), 1);
@@ -2273,6 +2520,7 @@ pub(super) mod tests {
             word_break,
             hyphens,
             tab_size: crate::TabSize::INITIAL,
+            line_box: Default::default(),
         }
     }
 
@@ -2281,6 +2529,10 @@ pub(super) mod tests {
         word_break: WordBreak::Normal,
         hyphens: Hyphens::Manual,
         tab_size: crate::TabSize::INITIAL,
+        line_box: crate::LineBoxRules {
+            metrics: LineMetrics::Auto,
+            leading: LineLeading::Split,
+        },
     };
 
     /// Where `text` breaks at `width`, and how wide its widest overflowing line is.

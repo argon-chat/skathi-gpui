@@ -267,6 +267,8 @@ pub struct TextSystem {
     platform_text_system: Arc<dyn PlatformTextSystem>,
     font_ids_by_font: RwLock<FxHashMap<Font, CachedFont>>,
     font_metrics: RwLock<FxHashMap<FontId, FontMetrics>>,
+    /// vue-native fork: ascent, descent and units per em that `line-metrics: snapped` reads.
+    line_metrics: RwLock<FxHashMap<FontId, (f32, f32, f32)>>,
     raster_bounds: RwLock<FxHashMap<RenderGlyphParams, Bounds<DevicePixels>>>,
     wrapper_pool: Mutex<FxHashMap<FontIdWithSize, Vec<CharWidthCache>>>,
     fallback_font_stack: SmallVec<[Font; 2]>,
@@ -290,6 +292,7 @@ impl TextSystem {
         TextSystem {
             platform_text_system,
             font_metrics: RwLock::default(),
+            line_metrics: RwLock::default(),
             raster_bounds: RwLock::default(),
             font_ids_by_font: RwLock::default(),
             wrapper_pool: Mutex::default(),
@@ -571,17 +574,74 @@ impl TextSystem {
         })
     }
 
+    /// vue-native fork: [`Self::normal_line_height`] under CSS `line-metrics`; with `snapped` it is
+    /// the font's snapped box, without the line gap.
+    pub fn normal_line_height_with(
+        &self,
+        font: &Font,
+        font_size: Pixels,
+        metrics: crate::LineMetrics,
+    ) -> Pixels {
+        match metrics {
+            crate::LineMetrics::Auto => self.normal_line_height(font, font_size),
+            crate::LineMetrics::Snapped => {
+                let (ascent, descent) =
+                    self.line_extent(self.resolve_font(font), font_size, metrics);
+                ascent + descent
+            }
+        }
+    }
+
+    /// vue-native fork: how far `font_id`'s box at `font_size` reaches above and below the
+    /// baseline under CSS `line-metrics`.
+    pub fn line_extent(
+        &self,
+        font_id: FontId,
+        font_size: Pixels,
+        metrics: crate::LineMetrics,
+    ) -> (Pixels, Pixels) {
+        match metrics {
+            crate::LineMetrics::Auto => (
+                self.ascent(font_id, font_size).abs(),
+                self.descent(font_id, font_size).abs(),
+            ),
+            crate::LineMetrics::Snapped => {
+                let (ascent, descent, units_per_em) = self.read_line_metrics(font_id);
+                snapped_line_extent(
+                    px(ascent / units_per_em * font_size.0),
+                    px(descent / units_per_em * font_size.0),
+                )
+            }
+        }
+    }
+
+    fn read_line_metrics(&self, font_id: FontId) -> (f32, f32, f32) {
+        if let Some(metrics) = self.line_metrics.read().get(&font_id) {
+            return *metrics;
+        }
+        let (units_per_em, ascent, descent) =
+            self.read_metrics(font_id, |m| (m.units_per_em as f32, m.ascent, m.descent));
+        let (ascent, descent) = self
+            .platform_text_system
+            .line_metrics(font_id)
+            .unwrap_or((ascent, descent));
+        let metrics = (ascent.abs(), descent.abs(), units_per_em);
+        self.line_metrics.write().insert(font_id, metrics);
+        metrics
+    }
+
     /// vue-native fork: a text style's line height in pixels, [`crate::line_height_normal`]
-    /// resolved for `font`.
+    /// resolved for `font` under `metrics`.
     pub fn resolve_line_height(
         &self,
         line_height: crate::DefiniteLength,
         font: &Font,
         font_size: Pixels,
         rem_size: Pixels,
+        metrics: crate::LineMetrics,
     ) -> Pixels {
         if line_height == crate::line_height_normal() {
-            self.normal_line_height(font, font_size)
+            self.normal_line_height_with(font, font_size, metrics)
         } else {
             line_height.to_pixels(font_size.into(), rem_size)
         }
@@ -744,7 +804,7 @@ impl WindowTextSystem {
     pub fn new(text_system: Arc<TextSystem>) -> Self {
         Self {
             line_layout_cache: LineLayoutCache::new(
-                text_system.platform_text_system.clone(),
+                text_system.clone(),
                 text_system.font_generation.clone(),
             ),
             font_runs_buffer: Cell::default(),
