@@ -4001,6 +4001,12 @@ pub const fn phi() -> DefiniteLength {
     relative(std::f32::consts::GOLDEN_RATIO)
 }
 
+/// vue-native fork: CSS `line-height: normal`, which [`crate::Window::text_style`] resolves from
+/// the font's metrics. A negative fraction, since no line height is negative.
+pub const fn line_height_normal() -> DefiniteLength {
+    relative(-1.0)
+}
+
 /// Constructs a `Rems` value representing a length in rems.
 ///
 /// # Arguments

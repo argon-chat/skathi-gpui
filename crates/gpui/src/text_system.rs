@@ -546,6 +546,42 @@ impl TextSystem {
         padding_top + ascent
     }
 
+    /// vue-native fork: CSS `line-height: normal` of `font` at `font_size`: the face's ascent,
+    /// descent and line gap, each rounded to a pixel as Blink rounds them.
+    pub fn normal_line_height(&self, font: &Font, font_size: Pixels) -> Pixels {
+        let font_id = self.resolve_font(font);
+        self.read_metrics(font_id, |m| {
+            let em = font_size.0 / m.units_per_em as f32;
+            let mut ascent = (m.ascent.abs() * em).round();
+            let descent = (m.descent.abs() * em).round();
+            let gap = (m.line_gap.max(0.0) * em).round();
+            // WebKit and Blink on macOS grow these three families' ascent to match the metrics of
+            // their Windows counterparts.
+            if cfg!(target_os = "macos")
+                && matches!(font.family.as_ref(), "Times" | "Helvetica" | "Courier")
+            {
+                ascent += ((ascent + descent) * 0.15 + 0.5).floor();
+            }
+            Pixels(ascent + descent + gap)
+        })
+    }
+
+    /// vue-native fork: a text style's line height in pixels, [`crate::line_height_normal`]
+    /// resolved for `font`.
+    pub fn resolve_line_height(
+        &self,
+        line_height: crate::DefiniteLength,
+        font: &Font,
+        font_size: Pixels,
+        rem_size: Pixels,
+    ) -> Pixels {
+        if line_height == crate::line_height_normal() {
+            self.normal_line_height(font, font_size)
+        } else {
+            line_height.to_pixels(font_size.into(), rem_size)
+        }
+    }
+
     fn read_metrics<T>(&self, font_id: FontId, read: impl FnOnce(&FontMetrics) -> T) -> T {
         let lock = self.font_metrics.upgradable_read();
 

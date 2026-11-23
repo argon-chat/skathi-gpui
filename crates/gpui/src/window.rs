@@ -3702,6 +3702,22 @@ impl Window {
 
     /// The current text style. Which is composed of all the style refinements provided to `with_text_style`.
     pub fn text_style(&self) -> TextStyle {
+        let mut style = self.vn_text_style_unresolved();
+        if style.line_height == crate::line_height_normal() {
+            let size = style.font_size.to_pixels(self.rem_size());
+            if size > Pixels::ZERO {
+                let normal = self.text_system().normal_line_height(&style.font(), size);
+                style.line_height = crate::relative(f32::from(normal) / f32::from(size));
+            } else {
+                style.line_height = crate::relative(0.0);
+            }
+        }
+        style
+    }
+
+    /// vue-native fork: [`Self::text_style`] with `line-height: normal` left unresolved, for a
+    /// caller that does not read the line height and should not look up the font.
+    pub(crate) fn vn_text_style_unresolved(&self) -> TextStyle {
         let mut style = TextStyle::default();
         for refinement in &self.text_style_stack {
             style.refine(refinement);
