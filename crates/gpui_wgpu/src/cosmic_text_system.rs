@@ -213,13 +213,17 @@ impl PlatformTextSystem for CosmicTextSystem {
     }
 
     fn font_metrics(&self, font_id: FontId) -> FontMetrics {
-        let metrics = self
-            .0
-            .read()
-            .loaded_font(font_id)
-            .font
-            .as_swash()
-            .metrics(&[]);
+        let state = self.0.read();
+        let font = state.loaded_font(font_id).font.as_swash();
+        let mut metrics = font.metrics(&[]);
+        // An OS/2 table older than version 2 has no sxHeight or sCapHeight; measure the glyphs.
+        if metrics.x_height == 0.0 {
+            metrics.x_height = glyph_top(font, 'x', metrics.units_per_em);
+        }
+        if metrics.cap_height == 0.0 {
+            metrics.cap_height = glyph_top(font, 'H', metrics.units_per_em);
+        }
+        drop(state);
 
         FontMetrics {
             units_per_em: metrics.units_per_em as u32,
@@ -1174,6 +1178,20 @@ fn pick_covering_slot(
         .position(|(fb_id, _)| covers(*fb_id, ch))
 }
 
+/// The top of `ch`'s outline above the baseline, in font units; 0 without the glyph.
+fn glyph_top(font: swash::FontRef, ch: char, units_per_em: u16) -> f32 {
+    let glyph = font.charmap().map(ch);
+    if glyph == 0 {
+        return 0.0;
+    }
+    ScaleContext::new()
+        .builder(font)
+        .size(units_per_em as f32)
+        .build()
+        .scale_outline(glyph)
+        .map_or(0.0, |outline| outline.bounds().max.y.max(0.0))
+}
+
 fn charmap_covers(loaded_fonts: &[LoadedFont], id: FontId, ch: char) -> bool {
     loaded_fonts
         .get(id.0)
@@ -1980,5 +1998,39 @@ mod tests {
         let covers = |_: FontId, _: char| true;
         let spans = compute_run_spans("anything", 3, 0, primary, &fb, &covers);
         assert!(spans.is_empty());
+    }
+
+    #[test]
+    fn the_x_glyph_measures_what_the_os2_table_states() -> Result<()> {
+        let system = text_system()?;
+        let id = system.font_id(&gpui::font("IBM Plex Sans"))?;
+        let stated = system.font_metrics(id);
+        assert!(stated.x_height > 0.0 && stated.cap_height > 0.0);
+        let state = system.0.read();
+        let font = state.loaded_font(id).font.as_swash();
+        let x = glyph_top(font, 'x', stated.units_per_em as u16);
+        let h = glyph_top(font, 'H', stated.units_per_em as u16);
+        assert!((x - stated.x_height).abs() <= 0.02 * stated.x_height, "{x}");
+        assert!(
+            (h - stated.cap_height).abs() <= 0.02 * stated.cap_height,
+            "{h}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_font_without_os2_x_height_still_reports_one() -> Result<()> {
+        // DejaVu Sans, a common Linux default, has a version 1 OS/2 table.
+        let Some(dejavu) = std::fs::read("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf").ok()
+        else {
+            return Ok(());
+        };
+        let system = CosmicTextSystem::new_without_system_fonts("DejaVu Sans");
+        system.add_fonts(vec![Cow::Owned(dejavu)])?;
+        let id = system.font_id(&gpui::font("DejaVu Sans"))?;
+        let metrics = system.font_metrics(id);
+        let ratio = metrics.x_height / metrics.units_per_em as f32;
+        assert!((0.5..0.6).contains(&ratio), "{ratio}");
+        Ok(())
     }
 }
