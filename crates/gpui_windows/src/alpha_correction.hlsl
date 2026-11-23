@@ -14,11 +14,10 @@ float text_luminance_level(float3 color) {
     return floor(4.0f * dot(linear_color, float3(0.2126f, 0.7152f, 0.0722f)) + 0.5f) / 4.0f;
 }
 
-float light_on_dark_contrast(float enhancedContrast, float3 color) {
-    if (text_experiment_contrast == 2u) {
-        return enhancedContrast * (0.0058f + 0.01f * text_luminance_level(color)) / 0.0058f;
-    }
-    if (text_experiment_contrast == 3u) {
+// vue-native fork: `text-contrast: luminance` (`luminance` 1) gives light text more weight, in
+// steps of its luminance level, instead of fading the contrast out above brightness 0.5.
+float light_on_dark_contrast(float enhancedContrast, float3 color, uint luminance) {
+    if (luminance == 1u) {
         return enhancedContrast * (1.0f + 0.86f * text_luminance_level(color));
     }
     float brightness = color_brightness(color);
@@ -46,16 +45,16 @@ float3 apply_alpha_correction3(float3 a, float3 b, float4 g) {
     return a + a * (1.0f - a) * correction;
 }
 
-float apply_contrast_and_gamma_correction(float sample, float3 color, float enhanced_contrast_factor, float4 gamma_ratios) {
-    float enhanced_contrast = light_on_dark_contrast(enhanced_contrast_factor, color);
+float apply_contrast_and_gamma_correction(float sample, float3 color, float enhanced_contrast_factor, float4 gamma_ratios, uint luminance) {
+    float enhanced_contrast = light_on_dark_contrast(enhanced_contrast_factor, color, luminance);
     float brightness = color_brightness(color);
 
     float contrasted = enhance_contrast(sample, enhanced_contrast);
     return apply_alpha_correction(contrasted, brightness, gamma_ratios);
 }
 
-float3 apply_contrast_and_gamma_correction3(float3 sample, float3 color, float enhanced_contrast_factor, float4 gamma_ratios) {
-    float enhanced_contrast = light_on_dark_contrast(enhanced_contrast_factor, color);
+float3 apply_contrast_and_gamma_correction3(float3 sample, float3 color, float enhanced_contrast_factor, float4 gamma_ratios, uint luminance) {
+    float enhanced_contrast = light_on_dark_contrast(enhanced_contrast_factor, color, luminance);
 
     float3 contrasted = enhance_contrast3(sample, enhanced_contrast);
     return apply_alpha_correction3(contrasted, color, gamma_ratios);

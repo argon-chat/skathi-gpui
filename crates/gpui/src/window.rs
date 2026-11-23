@@ -8067,11 +8067,21 @@ impl Window {
                 size: tile.bounds.size.map(Into::into),
             };
             let content_mask = self.snapped_content_mask();
+            // The renderers read the sprite's spare word as its `text-contrast`.
+            let contrast = match self
+                .text_style_stack
+                .iter()
+                .rev()
+                .find_map(|style| style.text_contrast)
+            {
+                Some(crate::TextContrast::Luminance) => 1,
+                _ => 0,
+            };
 
             if subpixel_rendering {
                 self.next_frame.scene.insert_primitive(SubpixelSprite {
                     order: 0,
-                    pad: 0,
+                    pad: contrast,
                     bounds,
                     content_mask,
                     color: color.opacity(element_opacity),
@@ -8083,7 +8093,7 @@ impl Window {
                     order: 0,
                     raw_coverage: false.into(),
                     animation: SpriteAnimationId::NONE,
-                    pad: 0,
+                    pad: contrast,
                     bounds,
                     content_mask,
                     color: color.opacity(element_opacity),
@@ -8155,7 +8165,11 @@ impl Window {
         use crate::text_system::GlyphTransform;
         let scale_factor = self.scale_factor();
         let transform = self.element_transform;
-        match self.vn_text_settle.placement(&transform) {
+        let rigid = self
+            .text_style_stack
+            .iter()
+            .any(|style| style.will_change_transform == Some(true));
+        match self.vn_text_settle.placement(&transform, rigid) {
             GlyphTransform::Default => {
                 let (origin, transform) = self.glyph_placement(origin);
                 (origin, transform, scale_factor)

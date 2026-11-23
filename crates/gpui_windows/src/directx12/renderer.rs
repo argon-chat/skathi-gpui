@@ -1151,7 +1151,7 @@ impl Renderer {
                 grayscale_enhanced_contrast: font.grayscale_enhanced_contrast,
                 subpixel_enhanced_contrast: font.subpixel_enhanced_contrast,
                 is_bgr: font.is_bgr as u32,
-                padding: [gpui::text_experiment().contrast, 0, 0],
+                padding: [0; 3],
             }],
         )?;
         let effect_quads = if effects.quads.is_empty() {

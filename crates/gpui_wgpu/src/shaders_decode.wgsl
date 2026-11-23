@@ -254,19 +254,20 @@ fn load_underline(instance_id: u32) -> Underline {
 }
 
 fn load_mono_sprite(instance_id: u32) -> MonochromeSprite {
-    // 38 words: the last two are upstream's animation id and padding, unread.
+    // 38 words: the 37th is upstream's animation id, unread; the 38th the glyph's contrast.
     var cursor = instance_cursor(instance_id * 38u);
-    return MonochromeSprite(
-        read_word(&cursor),
-        read_word(&cursor),
-        read_atlas_tile(&cursor),
-        read_bounds(&cursor),
-        read_bounds(&cursor),
-        read_corners(&cursor),
-        read_corner_shapes(&cursor),
-        read_hsla(&cursor),
-        read_transformation(&cursor),
-    );
+    let order = read_word(&cursor);
+    let raw_coverage = read_word(&cursor);
+    let tile = read_atlas_tile(&cursor);
+    let bounds = read_bounds(&cursor);
+    let content_mask = read_bounds(&cursor);
+    let radii = read_corners(&cursor);
+    let shapes = read_corner_shapes(&cursor);
+    let color = read_hsla(&cursor);
+    let transformation = read_transformation(&cursor);
+    _ = read_word(&cursor);
+    let contrast = read_word(&cursor);
+    return MonochromeSprite(order, raw_coverage, tile, bounds, content_mask, radii, shapes, color, transformation, contrast);
 }
 
 fn load_poly_sprite(instance_id: u32) -> PolychromeSprite {

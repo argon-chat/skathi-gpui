@@ -3203,6 +3203,7 @@ pub struct MonochromeSprite {
     /// vue-native fork: upstream keeps this in the padding word that
     /// `raw_coverage` holds here. Renderers ignore it.
     pub animation: SpriteAnimationId,
+    /// vue-native fork: 1 for a glyph under `text-contrast: luminance`. Metal ignores it.
     pub pad: u32,
 }
 
@@ -3271,7 +3272,8 @@ impl From<MonochromeSprite> for Primitive {
 #[expect(missing_docs)]
 pub struct SubpixelSprite {
     pub order: DrawOrder,
-    pub pad: u32, // align to 8 bytes
+    /// vue-native fork: 1 for a glyph under `text-contrast: luminance`. Metal ignores it.
+    pub pad: u32,
     pub tile: AtlasTile,
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,

@@ -1056,6 +1056,17 @@ pub enum FontSmoothing {
     SubpixelAntialiased,
 }
 
+/// vue-native fork: CSS `text-contrast`, how much glyph coverage is darkened for the text colour.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(JsonSchema))]
+pub enum TextContrast {
+    /// The platform's correction, which leaves light text thinner than dark text.
+    #[default]
+    Auto,
+    /// More weight the lighter the text, in five steps of its luminance.
+    Luminance,
+}
+
 impl Default for TabSize {
     fn default() -> Self {
         Self::INITIAL
@@ -1293,6 +1304,12 @@ pub struct TextStyle {
 
     /// vue-native fork: CSS `font-smoothing`.
     pub font_smoothing: FontSmoothing,
+
+    /// vue-native fork: CSS `text-contrast`.
+    pub text_contrast: TextContrast,
+
+    /// vue-native fork: inside a `will-change: transform` box, whose text moves as a layer.
+    pub will_change_transform: bool,
 }
 
 impl Default for TextStyle {
@@ -1323,6 +1340,8 @@ impl Default for TextStyle {
             text_shadow: Vec::new(),
             tab_size: TabSize::INITIAL,
             font_smoothing: FontSmoothing::Auto,
+            text_contrast: TextContrast::Auto,
+            will_change_transform: false,
         }
     }
 }

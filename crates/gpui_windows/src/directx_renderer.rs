@@ -503,7 +503,7 @@ impl DirectXRenderer {
                 grayscale_enhanced_contrast: self.font_info.grayscale_enhanced_contrast,
                 subpixel_enhanced_contrast: self.font_info.subpixel_enhanced_contrast,
                 is_bgr: self.font_info.is_bgr as u32,
-                _pad: [gpui::text_experiment().contrast, 0, 0],
+                _pad: [0; 3],
             }],
         )?;
         unsafe {

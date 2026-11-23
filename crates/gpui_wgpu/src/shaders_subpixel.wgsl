@@ -24,6 +24,7 @@ struct SubpixelSpriteOutput {
     @location(4) @interpolate(flat) mask_bounds: vec4<f32>,
     @location(5) @interpolate(flat) mask_radii: vec4<f32>,
     @location(7) @interpolate(flat) mask_shapes: vec4<u32>,
+    @location(6) @interpolate(flat) contrast: u32,
 }
 
 struct SubpixelSpriteFragmentOutput {
@@ -47,6 +48,7 @@ fn vs_subpixel_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_i
                                sprite.content_mask_radii.bottom_right, sprite.content_mask_radii.bottom_left);
     out.mask_shapes = vec4<u32>(sprite.content_mask_shapes.top_left, sprite.content_mask_shapes.top_right,
                                 sprite.content_mask_shapes.bottom_right, sprite.content_mask_shapes.bottom_left);
+    out.contrast = sprite.pad;
     return out;
 }
 
@@ -57,7 +59,7 @@ fn fs_subpixel_sprite(input: SubpixelSpriteOutput) -> SubpixelSpriteFragmentOutp
     if (gamma_params.is_bgr != 0u) {
         sample = sample.bgr;
     }
-    let alpha_corrected = apply_contrast_and_gamma_correction3(sample, input.color.rgb, gamma_params.subpixel_enhanced_contrast, gamma_params.gamma_ratios);
+    let alpha_corrected = apply_contrast_and_gamma_correction3(sample, input.color.rgb, gamma_params.subpixel_enhanced_contrast, gamma_params.gamma_ratios, input.contrast);
 
     // Alpha clip after using the derivatives.
     if (any(input.clip_distances < vec4<f32>(0.0))) {

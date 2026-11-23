@@ -1,15 +1,13 @@
+#include "alpha_correction.hlsl"
+
 cbuffer GlobalParams: register(b0) {
     float4 gamma_ratios;
     float2 global_viewport_size;
     float grayscale_enhanced_contrast;
     float subpixel_enhanced_contrast;
     uint is_bgr;
-    // vue-native fork: `SK_TEXT_EXPERIMENT`'s contrast mode, 0 when unset.
-    uint text_experiment_contrast;
-    uint2 global_pad;
+    uint3 global_pad;
 };
-
-#include "alpha_correction.hlsl"
 
 cbuffer BatchParams: register(b1) {
     uint batch_start_index;
@@ -1932,7 +1930,8 @@ MonochromeSpriteVertexOutput monochrome_sprite_vertex(uint vertex_id: SV_VertexI
                                sprite.content_mask_radii.bottom_right, sprite.content_mask_radii.bottom_left);
     output.mask_shapes = uint4(sprite.content_mask_shapes.top_left, sprite.content_mask_shapes.top_right,
                                sprite.content_mask_shapes.bottom_right, sprite.content_mask_shapes.bottom_left);
-    output.raw_coverage = sprite.raw_coverage;
+    // vue-native fork: 1 raw coverage, 2 a glyph under `text-contrast: luminance`.
+    output.raw_coverage = sprite.raw_coverage != 0u ? 1u : (sprite.pad == 1u ? 2u : 0u);
     output.tile_clamp = to_tile_clamp(sprite.tile);
     output.clip_distance = clip_distance;
     return output;
@@ -1941,9 +1940,9 @@ MonochromeSpriteVertexOutput monochrome_sprite_vertex(uint vertex_id: SV_VertexI
 float4 monochrome_sprite_fragment(MonochromeSpriteFragmentInput input): SV_Target {
     float2 uv = clamp(input.tile_position, input.tile_clamp.xy, input.tile_clamp.zw);
     float sample = t_sprite.Sample(s_sprite, uv).r;
-    float alpha_corrected = input.raw_coverage != 0u
+    float alpha_corrected = input.raw_coverage == 1u
         ? sample
-        : apply_contrast_and_gamma_correction(sample, input.color.rgb, grayscale_enhanced_contrast, gamma_ratios);
+        : apply_contrast_and_gamma_correction(sample, input.color.rgb, grayscale_enhanced_contrast, gamma_ratios, input.raw_coverage == 2u ? 1u : 0u);
     float mask = sprite_mask_coverage(input.position.xy, input.mask_bounds, input.mask_radii, input.mask_shapes);
     return float4(input.color.rgb, input.color.a * alpha_corrected * mask);
 }
@@ -1978,7 +1977,7 @@ MonochromeSpriteVertexOutput subpixel_sprite_vertex(uint vertex_id: SV_VertexID,
                                sprite.content_mask_radii.bottom_right, sprite.content_mask_radii.bottom_left);
     output.mask_shapes = uint4(sprite.content_mask_shapes.top_left, sprite.content_mask_shapes.top_right,
                                sprite.content_mask_shapes.bottom_right, sprite.content_mask_shapes.bottom_left);
-    output.raw_coverage = 0u;
+    output.raw_coverage = sprite.pad == 1u ? 2u : 0u;
     output.tile_clamp = to_tile_clamp(sprite.tile);
     output.clip_distance = distance_from_clip_rect_transformed(
         unit_vertex, sprite.bounds, sprite.content_mask, sprite.transformation);
@@ -1991,7 +1990,7 @@ SubpixelSpriteFragmentOutput subpixel_sprite_fragment(MonochromeSpriteFragmentIn
     if (is_bgr) {
         sample = sample.bgr;
     }
-    float3 alpha_corrected = apply_contrast_and_gamma_correction3(sample, input.color.rgb, subpixel_enhanced_contrast, gamma_ratios);
+    float3 alpha_corrected = apply_contrast_and_gamma_correction3(sample, input.color.rgb, subpixel_enhanced_contrast, gamma_ratios, input.raw_coverage == 2u ? 1u : 0u);
 
     float mask = sprite_mask_coverage(input.position.xy, input.mask_bounds, input.mask_radii, input.mask_shapes);
 

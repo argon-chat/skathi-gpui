@@ -36,7 +36,19 @@ fn color_brightness(color: vec3<f32>) -> f32 {
     return dot(color, vec3<f32>(0.30, 0.59, 0.11));
 }
 
-fn light_on_dark_contrast(enhancedContrast: f32, color: vec3<f32>) -> f32 {
+// vue-native fork: the macOS luminance level of a text colour, `round(4 Y) / 4` of its linear
+// luminance.
+fn text_luminance_level(color: vec3<f32>) -> f32 {
+    let linear_color = select(pow((color + 0.055) / 1.055, vec3<f32>(2.4)), color / 12.92, color <= vec3<f32>(0.04045));
+    return floor(4.0 * dot(linear_color, vec3<f32>(0.2126, 0.7152, 0.0722)) + 0.5) / 4.0;
+}
+
+// vue-native fork: `text-contrast: luminance` (`luminance` 1) gives light text more weight, in
+// steps of its luminance level, instead of fading the contrast out above brightness 0.5.
+fn light_on_dark_contrast(enhancedContrast: f32, color: vec3<f32>, luminance: u32) -> f32 {
+    if (luminance == 1u) {
+        return enhancedContrast * (1.0 + 0.86 * text_luminance_level(color));
+    }
     let brightness = color_brightness(color);
     let multiplier = saturate(4.0 * (0.75 - brightness));
     return enhancedContrast * multiplier;
@@ -62,16 +74,16 @@ fn apply_alpha_correction3(a: vec3<f32>, b: vec3<f32>, g: vec4<f32>) -> vec3<f32
     return a + a * (1.0 - a) * correction;
 }
 
-fn apply_contrast_and_gamma_correction(sample: f32, color: vec3<f32>, enhanced_contrast_factor: f32, gamma_ratios: vec4<f32>) -> f32 {
-    let enhanced_contrast = light_on_dark_contrast(enhanced_contrast_factor, color);
+fn apply_contrast_and_gamma_correction(sample: f32, color: vec3<f32>, enhanced_contrast_factor: f32, gamma_ratios: vec4<f32>, luminance: u32) -> f32 {
+    let enhanced_contrast = light_on_dark_contrast(enhanced_contrast_factor, color, luminance);
     let brightness = color_brightness(color);
 
     let contrasted = enhance_contrast(sample, enhanced_contrast);
     return apply_alpha_correction(contrasted, brightness, gamma_ratios);
 }
 
-fn apply_contrast_and_gamma_correction3(sample: vec3<f32>, color: vec3<f32>, enhanced_contrast_factor: f32, gamma_ratios: vec4<f32>) -> vec3<f32> {
-    let enhanced_contrast = light_on_dark_contrast(enhanced_contrast_factor, color);
+fn apply_contrast_and_gamma_correction3(sample: vec3<f32>, color: vec3<f32>, enhanced_contrast_factor: f32, gamma_ratios: vec4<f32>, luminance: u32) -> vec3<f32> {
+    let enhanced_contrast = light_on_dark_contrast(enhanced_contrast_factor, color, luminance);
 
     let contrasted = enhance_contrast3(sample, enhanced_contrast);
     return apply_alpha_correction3(contrasted, color, gamma_ratios);
@@ -1798,6 +1810,8 @@ struct MonochromeSprite {
     content_mask_shapes: CornerShapes,
     color: Hsla,
     transformation: TransformationMatrix,
+    // vue-native fork: 1 under `text-contrast: luminance`.
+    contrast: u32,
 }
 
 
@@ -1841,7 +1855,8 @@ fn vs_mono_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index
                                sprite.content_mask_radii.bottom_right, sprite.content_mask_radii.bottom_left);
     out.mask_shapes = vec4<u32>(sprite.content_mask_shapes.top_left, sprite.content_mask_shapes.top_right,
                                 sprite.content_mask_shapes.bottom_right, sprite.content_mask_shapes.bottom_left);
-    out.raw_coverage = sprite.raw_coverage;
+    // vue-native fork: 1 raw coverage, 2 a glyph under `text-contrast: luminance`.
+    out.raw_coverage = select(select(0u, 2u, sprite.contrast == 1u), 1u, sprite.raw_coverage != 0u);
     out.tile_clamp = to_tile_clamp(sprite.tile);
     return out;
 }
@@ -1851,8 +1866,8 @@ fn fs_mono_sprite(input: MonoSpriteVarying) -> @location(0) vec4<f32> {
     let uv = clamp(input.tile_position, input.tile_clamp.xy, input.tile_clamp.zw);
     let sample = textureSample(t_sprite, s_sprite, uv).r;
     var alpha_corrected = sample;
-    if (input.raw_coverage == 0u) {
-        alpha_corrected = apply_contrast_and_gamma_correction(sample, input.color.rgb, gamma_params.grayscale_enhanced_contrast, gamma_params.gamma_ratios);
+    if (input.raw_coverage != 1u) {
+        alpha_corrected = apply_contrast_and_gamma_correction(sample, input.color.rgb, gamma_params.grayscale_enhanced_contrast, gamma_params.gamma_ratios, select(0u, 1u, input.raw_coverage == 2u));
     }
 
     // Alpha clip after using the derivatives.

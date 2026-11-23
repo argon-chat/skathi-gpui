@@ -1,12 +1,7 @@
 //! vue-native fork: how glyphs are positioned and when transformed text is rasterized again.
 //!
 //! `SK_TEXT_EXPERIMENT`, a comma-separated list read once, turns the defaults off for bisecting
-//! (`no-phases`, `no-settle`) and selects the options still being judged:
-//!
-//! - `contrast=half|mac`: the enhanced contrast as a function of the text colour's linear
-//!   luminance (Windows shader).
-//! - `rigid`: a translated run keeps its transform while it moves, as a scaled one does.
-//! - `log`: the platform logs what it rasterizes with.
+//! (`no-phases`, `no-settle`); `log` makes the platform log what it rasterizes with.
 
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -26,9 +21,6 @@ const GAP: Duration = Duration::from_millis(100);
 pub struct TextExperiment {
     pub phases: bool,
     pub settle: bool,
-    /// 0 off, 2 `mac`, 3 `half`.
-    pub contrast: u32,
-    pub rigid: bool,
     pub log: bool,
 }
 
@@ -41,8 +33,6 @@ pub fn text_experiment() -> &'static TextExperiment {
         let mut experiment = TextExperiment {
             phases,
             settle: true,
-            contrast: 0,
-            rigid: false,
             log: false,
         };
         let Ok(value) = std::env::var("SK_TEXT_EXPERIMENT") else {
@@ -52,9 +42,6 @@ pub fn text_experiment() -> &'static TextExperiment {
             match switch {
                 "no-phases" => experiment.phases = false,
                 "no-settle" => experiment.settle = false,
-                "contrast" | "contrast=mac" => experiment.contrast = 2,
-                "contrast=half" => experiment.contrast = 3,
-                "rigid" => experiment.rigid = true,
                 "log" => experiment.log = true,
                 "" => {}
                 other => log::warn!("SK_TEXT_EXPERIMENT: unknown switch {other:?}"),
@@ -150,14 +137,18 @@ fn transform_bits(transform: &TransformationMatrix) -> [u32; 6] {
 }
 
 impl TextSettle {
-    /// The placement for a glyph under `transform`.
-    pub(crate) fn placement(&mut self, transform: &TransformationMatrix) -> GlyphTransform {
-        let experiment = text_experiment();
-        if !experiment.settle || transform.is_unit() {
+    /// The placement for a glyph under `transform`. A `rigid` run (`will-change: transform`)
+    /// keeps a translation as its transform while it moves, as a scaled run does.
+    pub(crate) fn placement(
+        &mut self,
+        transform: &TransformationMatrix,
+        rigid: bool,
+    ) -> GlyphTransform {
+        if !text_experiment().settle || transform.is_unit() {
             return GlyphTransform::Default;
         }
         let [[a, b], [c, d]] = transform.rotation_scale;
-        if !(b == 0.0 && c == 0.0 && a == d && a > 0.0) || (a == 1.0 && !experiment.rigid) {
+        if !(b == 0.0 && c == 0.0 && a == d && a > 0.0) || (a == 1.0 && !rigid) {
             return GlyphTransform::Default;
         }
         let now = Instant::now();
@@ -267,18 +258,24 @@ mod tests {
         let mut settle = TextSettle::default();
         for i in 1..20 {
             let moving = scale(1.0 + i as f32 / 100.0);
-            assert!(matches!(settle.placement(&moving), GlyphTransform::Pending));
+            assert!(matches!(
+                settle.placement(&moving, false),
+                GlyphTransform::Pending
+            ));
             std::thread::sleep(Duration::from_millis(15));
         }
         let still = scale(1.14);
-        assert!(matches!(settle.placement(&still), GlyphTransform::Pending));
+        assert!(matches!(
+            settle.placement(&still, false),
+            GlyphTransform::Pending
+        ));
         assert!(settle.arm_timer());
         assert!(!settle.arm_timer());
         std::thread::sleep(SETTLE + Duration::from_millis(20));
         assert_eq!(settle.remaining(Instant::now()), Some(Duration::ZERO));
         settle.begin_settle_frame();
         assert!(matches!(
-            settle.placement(&still),
+            settle.placement(&still, false),
             GlyphTransform::Fold { .. }
         ));
         settle.end_frame();
@@ -292,8 +289,37 @@ mod tests {
         }
         let mut settle = TextSettle::default();
         let turn = scale(1.14);
-        settle.placement(&turn);
+        settle.placement(&turn, false);
         std::thread::sleep(SETTLE + Duration::from_millis(20));
-        assert!(matches!(settle.placement(&turn), GlyphTransform::Pending));
+        assert!(matches!(
+            settle.placement(&turn, false),
+            GlyphTransform::Pending
+        ));
+    }
+
+    #[test]
+    fn only_a_rigid_run_keeps_a_translation_and_settles_it() {
+        if !text_experiment().settle {
+            return;
+        }
+        let mut settle = TextSettle::default();
+        let moved = TransformationMatrix {
+            rotation_scale: [[1.0, 0.0], [0.0, 1.0]],
+            translation: [3.3, 1.4],
+        };
+        assert!(matches!(
+            settle.placement(&moved, false),
+            GlyphTransform::Default
+        ));
+        assert!(matches!(
+            settle.placement(&moved, true),
+            GlyphTransform::Pending
+        ));
+        std::thread::sleep(SETTLE + Duration::from_millis(20));
+        settle.begin_settle_frame();
+        assert!(matches!(
+            settle.placement(&moved, true),
+            GlyphTransform::Fold { scale } if scale == 1.0
+        ));
     }
 }
