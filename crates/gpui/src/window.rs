@@ -8934,6 +8934,18 @@ impl Window {
         self.layout_engine = Some(layout_engine);
     }
 
+    /// vue-native fork: the unrounded device-pixel origin of a node whose bounds were read this frame.
+    pub(crate) fn vn_unrounded_layout_origin(&self, layout_id: LayoutId) -> Option<Point<f32>> {
+        self.layout_engine.as_ref()?.vn_unrounded_origin(layout_id)
+    }
+
+    /// vue-native fork: see [`TaffyLayoutEngine::vn_set_root_origin`].
+    pub(crate) fn vn_set_layout_root_origin(&mut self, root: LayoutId, origin: Point<f32>) {
+        if let Some(engine) = self.layout_engine.as_mut() {
+            engine.vn_set_root_origin(root, origin);
+        }
+    }
+
     /// vue-native fork: whether the layout node is out of flow (`position:
     /// absolute`).
     pub fn layout_is_absolute(&self, layout_id: LayoutId) -> bool {

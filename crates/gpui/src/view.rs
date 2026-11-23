@@ -1,7 +1,7 @@
 use crate::{
     AnyElement, AnyEntity, AnyWeakEntity, App, AvailableSpace, Bounds, ContentMask, Context,
     Element, ElementId, Entity, EntityId, GlobalElementId, InspectorElementId, IntoElement,
-    LayoutId, PaintIndex, Pixels, PrepaintStateIndex, Render, RenderOnce, Size, Style,
+    LayoutId, PaintIndex, Pixels, Point, PrepaintStateIndex, Render, RenderOnce, Size, Style,
     StyleRefinement, TextStyle, TransformationMatrix, WeakEntity,
 };
 use crate::{Empty, Window};
@@ -267,6 +267,8 @@ pub struct ViewElement<V: View> {
     view: Option<V>,
     entity_id: Option<EntityId>,
     cached_style: Option<StyleRefinement>,
+    /// vue-native fork: the node the view is laid out as in its parent's layout.
+    layout_id: Option<LayoutId>,
     #[cfg(feature = "profiler")]
     view_type_name: &'static str,
     #[cfg(debug_assertions)]
@@ -289,6 +291,7 @@ impl<V: View> ViewElement<V> {
         ViewElement {
             entity_id,
             cached_style: None,
+            layout_id: None,
             #[cfg(feature = "profiler")]
             view_type_name,
             view: Some(view),
@@ -337,6 +340,9 @@ struct ViewElementCacheKey {
     /// vue-native fork: the `clip-path` shapes around the view, which its
     /// hitboxes carry (`Window::vn_with_clip_shape`).
     vn_clip: Option<std::sync::Arc<crate::VnClipNode>>,
+    /// vue-native fork: how far the view's unrounded layout origin lies from its snapped one,
+    /// in device pixels, which decides where the edges inside it snap.
+    layout_fract: Point<f32>,
 }
 
 #[cfg(not(gpui_hot_reload))]
@@ -392,6 +398,7 @@ impl<V: View> Element for ViewElement<V> {
                 cx,
                 &mut |window, cx| render_view(view.take().unwrap(), window, cx),
             );
+            self.layout_id = Some(layout.0);
             #[cfg(feature = "profiler")]
             window.window_profiler.end_view(
                 start,
@@ -424,6 +431,7 @@ impl<V: View> Element for ViewElement<V> {
                 entity_id,
                 global_id,
                 bounds,
+                self.layout_id,
                 element,
                 window,
                 cx,
@@ -531,6 +539,7 @@ fn prepaint_view(
     entity_id: EntityId,
     global_id: Option<&GlobalElementId>,
     bounds: Bounds<Pixels>,
+    layout_id: Option<LayoutId>,
     element: &mut Option<AnyElement>,
     window: &mut Window,
     cx: &mut App,
@@ -542,6 +551,11 @@ fn prepaint_view(
             element.prepaint(window, cx);
             return Some(element);
         }
+
+        let layout_origin = layout_id.and_then(|id| window.vn_unrounded_layout_origin(id));
+        let layout_fract = layout_origin
+            .map(|origin| origin - origin.map(crate::util::round_half_toward_zero))
+            .unwrap_or_default();
 
         window.with_element_state::<ViewElementState, _>(
             global_id.unwrap(),
@@ -561,6 +575,8 @@ fn prepaint_view(
                     && element_state.cache_key.opacity.to_bits() == opacity.to_bits()
                     && element_state.cache_key.transform == transform
                     && crate::VnClipNode::same(&element_state.cache_key.vn_clip, &vn_clip)
+                    && element_state.cache_key.layout_fract.map(f32::to_bits)
+                        == layout_fract.map(f32::to_bits)
                     && !window.dirty_views.contains(&entity_id)
                     && !window.refreshing
                 {
@@ -578,6 +594,13 @@ fn prepaint_view(
                 let prepaint_start = window.prepaint_index();
                 let (element, accessed_entities) = cx.detect_accessed_entities(|cx| {
                     let mut element = render(window, cx);
+                    // Laid out on its own, the subtree would snap its edges relative to the
+                    // view's snapped origin and land a device pixel away from where the
+                    // frames that lay it out inline put it.
+                    let root = element.request_layout(window, cx);
+                    if let Some(origin) = layout_origin {
+                        window.vn_set_layout_root_origin(root, origin);
+                    }
                     element.layout_as_root(Size::<AvailableSpace>::from(bounds.size), window, cx);
                     element.prepaint_at(bounds.origin, window, cx);
                     element
@@ -599,6 +622,7 @@ fn prepaint_view(
                             opacity,
                             transform,
                             vn_clip,
+                            layout_fract,
                         },
                     },
                 )

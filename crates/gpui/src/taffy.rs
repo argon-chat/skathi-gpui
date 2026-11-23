@@ -39,8 +39,11 @@ struct NodeContext {
 pub struct TaffyLayoutEngine {
     taffy: TaffyTree<NodeContext>,
     absolute_layout_bounds: LayoutIdMap<Bounds<Pixels>>,
-    /// Unrounded absolute border-box top-left per-node coordinate in device pixels.
-    absolute_outer_origins: LayoutIdMap<Point<f32>>,
+    /// Unrounded absolute border-box top-left per-node coordinate in device pixels, and the
+    /// snapped origin of the node's layout root.
+    absolute_outer_origins: LayoutIdMap<(Point<f32>, Point<f32>)>,
+    /// vue-native fork: the unrounded device-pixel origin a detached layout root is placed at.
+    vn_root_origins: FxHashMap<LayoutId, Point<f32>>,
     retention: retained::Retention,
     computed_layouts: FxHashSet<LayoutId>,
     layout_bounds_scratch_space: Vec<LayoutId>,
@@ -59,6 +62,7 @@ impl TaffyLayoutEngine {
             taffy,
             absolute_layout_bounds: LayoutIdMap::default(),
             absolute_outer_origins: LayoutIdMap::default(),
+            vn_root_origins: FxHashMap::default(),
             retention: retained::Retention::default(),
             computed_layouts: FxHashSet::default(),
             layout_bounds_scratch_space: Vec::new(),
@@ -75,6 +79,7 @@ impl TaffyLayoutEngine {
         }
         self.absolute_layout_bounds.clear();
         self.absolute_outer_origins.clear();
+        self.vn_root_origins.clear();
         self.computed_layouts.clear();
         self.orders.clear();
         self.calc_sizes.clear();
@@ -756,6 +761,21 @@ impl TaffyLayoutEngine {
         ))
     }
 
+    /// vue-native fork: the unrounded device-pixel origin of a node whose bounds were read this
+    /// frame, in the coordinates its layout root is seeded with.
+    pub(crate) fn vn_unrounded_origin(&self, id: LayoutId) -> Option<Point<f32>> {
+        self.absolute_outer_origins
+            .get(&id)
+            .map(|(origin, _)| *origin)
+    }
+
+    /// vue-native fork: lays the next [`Self::compute_layout`] of `root` out as if its top-left
+    /// sat at `origin` (unrounded device pixels) in an enclosing layout, so the edges inside it
+    /// snap to the same device pixels as they would there.
+    pub(crate) fn vn_set_root_origin(&mut self, root: LayoutId, origin: Point<f32>) {
+        self.vn_root_origins.insert(root, origin);
+    }
+
     pub fn layout_bounds(&mut self, id: LayoutId, scale_factor: f32) -> Bounds<Pixels> {
         if let Some(layout) = self.absolute_layout_bounds.get(&id).cloned() {
             return layout;
@@ -766,25 +786,33 @@ impl TaffyLayoutEngine {
         let layout_size = layout.size;
         let parent = self.taffy.parent(id.0);
 
-        let absolute_outer_origin = match parent {
+        let (absolute_outer_origin, root_origin) = match parent {
             Some(parent_id) => {
                 let parent_id = LayoutId::from(parent_id);
                 self.layout_bounds(parent_id, scale_factor);
-                let parent_origin = *self
+                let (parent_origin, root_origin) = *self
                     .absolute_outer_origins
                     .get(&parent_id)
                     .expect("parent absolute outer origin should be cached");
-                parent_origin + Point::from(layout_location)
+                (parent_origin + Point::from(layout_location), root_origin)
             }
-            None => Point::from(layout_location),
+            None => {
+                let seed = self.vn_root_origins.get(&id).copied().unwrap_or_default();
+                (
+                    seed + Point::from(layout_location),
+                    seed.map(round_half_toward_zero),
+                )
+            }
         };
         self.absolute_outer_origins
-            .insert(id, absolute_outer_origin);
+            .insert(id, (absolute_outer_origin, root_origin));
 
+        // A root seeded with the unrounded origin it is placed at rounds its descendants' edges
+        // where the enclosing layout would have, and reports them relative to its snapped origin.
         let absolute_far = absolute_outer_origin + Point::from(Size::from(layout_size));
         let snapped_bounds = Bounds::from_corners(
-            absolute_outer_origin.map(round_half_toward_zero),
-            absolute_far.map(round_half_toward_zero),
+            absolute_outer_origin.map(round_half_toward_zero) - root_origin,
+            absolute_far.map(round_half_toward_zero) - root_origin,
         );
 
         let bounds = (snapped_bounds / scale_factor).map(Pixels);

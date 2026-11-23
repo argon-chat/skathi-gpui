@@ -259,4 +259,49 @@ mod tests {
             "paint transforms must not enter layout coordinates"
         );
     }
+
+    #[test]
+    fn a_detached_root_seeded_at_its_inline_origin_snaps_like_the_inline_layout() {
+        use taffy::style::Position;
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let (mut engine, child) = fractional_tree();
+            let parent: LayoutId = engine.taffy.parent(child.into()).unwrap().into();
+            let inline_child = engine.layout_bounds(child, scale);
+            let inline_parent = engine.layout_bounds(parent, scale);
+            let origin = engine.vn_unrounded_origin(parent).unwrap();
+
+            let leaf = engine
+                .taffy
+                .new_leaf(engine.taffy.style(child.into()).unwrap().clone())
+                .unwrap();
+            let mut root_style = Style::default();
+            root_style.position = Position::Relative;
+            root_style.size = engine.taffy.style(parent.into()).unwrap().size;
+            let root = engine.taffy.new_with_children(root_style, &[leaf]).unwrap();
+            let space = taffy::geometry::Size {
+                width: taffy::style::AvailableSpace::MaxContent,
+                height: taffy::style::AvailableSpace::MaxContent,
+            };
+            engine.taffy.compute_layout(root, space).unwrap();
+            engine.vn_set_root_origin(root.into(), origin);
+            let detached = engine.layout_bounds(leaf.into(), scale);
+
+            let device = |v: crate::Pixels| (v.0 * scale).round();
+            assert_eq!(
+                device(detached.origin.x) + device(inline_parent.origin.x),
+                device(inline_child.origin.x),
+                "x at {scale}"
+            );
+            assert_eq!(
+                device(detached.origin.y) + device(inline_parent.origin.y),
+                device(inline_child.origin.y),
+                "y at {scale}"
+            );
+            assert_eq!(device(detached.size.width), device(inline_child.size.width));
+            assert_eq!(
+                device(detached.size.height),
+                device(inline_child.size.height)
+            );
+        }
+    }
 }
