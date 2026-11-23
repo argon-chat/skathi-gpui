@@ -1930,7 +1930,7 @@ MonochromeSpriteVertexOutput monochrome_sprite_vertex(uint vertex_id: SV_VertexI
                                sprite.content_mask_radii.bottom_right, sprite.content_mask_radii.bottom_left);
     output.mask_shapes = uint4(sprite.content_mask_shapes.top_left, sprite.content_mask_shapes.top_right,
                                sprite.content_mask_shapes.bottom_right, sprite.content_mask_shapes.bottom_left);
-    // vue-native fork: 1 raw coverage, 2 a glyph under `text-contrast: luminance`.
+    // vue-native fork: 1 raw coverage, 2 a glyph under `font-dilation: luminance`.
     output.raw_coverage = sprite.raw_coverage != 0u ? 1u : (sprite.pad == 1u ? 2u : 0u);
     output.tile_clamp = to_tile_clamp(sprite.tile);
     output.clip_distance = clip_distance;

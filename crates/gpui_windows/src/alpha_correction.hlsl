@@ -14,7 +14,7 @@ float text_luminance_level(float3 color) {
     return floor(4.0f * dot(linear_color, float3(0.2126f, 0.7152f, 0.0722f)) + 0.5f) / 4.0f;
 }
 
-// vue-native fork: `text-contrast: luminance` (`luminance` 1) gives light text more weight, in
+// vue-native fork: `font-dilation: luminance` (`luminance` 1) gives light text more weight, in
 // steps of its luminance level, instead of fading the contrast out above brightness 0.5.
 float light_on_dark_contrast(float enhancedContrast, float3 color, uint luminance) {
     if (luminance == 1u) {

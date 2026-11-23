@@ -43,7 +43,7 @@ fn text_luminance_level(color: vec3<f32>) -> f32 {
     return floor(4.0 * dot(linear_color, vec3<f32>(0.2126, 0.7152, 0.0722)) + 0.5) / 4.0;
 }
 
-// vue-native fork: `text-contrast: luminance` (`luminance` 1) gives light text more weight, in
+// vue-native fork: `font-dilation: luminance` (`luminance` 1) gives light text more weight, in
 // steps of its luminance level, instead of fading the contrast out above brightness 0.5.
 fn light_on_dark_contrast(enhancedContrast: f32, color: vec3<f32>, luminance: u32) -> f32 {
     if (luminance == 1u) {
@@ -1810,7 +1810,7 @@ struct MonochromeSprite {
     content_mask_shapes: CornerShapes,
     color: Hsla,
     transformation: TransformationMatrix,
-    // vue-native fork: 1 under `text-contrast: luminance`.
+    // vue-native fork: 1 under `font-dilation: luminance`.
     contrast: u32,
 }
 
@@ -1855,7 +1855,7 @@ fn vs_mono_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index
                                sprite.content_mask_radii.bottom_right, sprite.content_mask_radii.bottom_left);
     out.mask_shapes = vec4<u32>(sprite.content_mask_shapes.top_left, sprite.content_mask_shapes.top_right,
                                 sprite.content_mask_shapes.bottom_right, sprite.content_mask_shapes.bottom_left);
-    // vue-native fork: 1 raw coverage, 2 a glyph under `text-contrast: luminance`.
+    // vue-native fork: 1 raw coverage, 2 a glyph under `font-dilation: luminance`.
     out.raw_coverage = select(select(0u, 2u, sprite.contrast == 1u), 1u, sprite.raw_coverage != 0u);
     out.tile_clamp = to_tile_clamp(sprite.tile);
     return out;

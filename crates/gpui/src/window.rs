@@ -8067,7 +8067,7 @@ impl Window {
                 size: tile.bounds.size.map(Into::into),
             };
             let content_mask = self.snapped_content_mask();
-            // The renderers read the sprite's spare word as its `text-contrast`.
+            // The renderers read the sprite's spare word as its `font-dilation`.
             let contrast = match self
                 .text_style_stack
                 .iter()

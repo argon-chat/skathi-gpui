@@ -1056,7 +1056,7 @@ pub enum FontSmoothing {
     SubpixelAntialiased,
 }
 
-/// vue-native fork: CSS `text-contrast`, how much glyph coverage is darkened for the text colour.
+/// vue-native fork: CSS `font-dilation`, how much glyph coverage is darkened for the text colour.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(JsonSchema))]
 pub enum TextContrast {
@@ -1305,7 +1305,7 @@ pub struct TextStyle {
     /// vue-native fork: CSS `font-smoothing`.
     pub font_smoothing: FontSmoothing,
 
-    /// vue-native fork: CSS `text-contrast`.
+    /// vue-native fork: CSS `font-dilation`.
     pub text_contrast: TextContrast,
 
     /// vue-native fork: inside a `will-change: transform` box, whose text moves as a layer.
