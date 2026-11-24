@@ -3200,6 +3200,161 @@ mod text_shadow_tests {
 }
 
 #[cfg(all(test, any(target_os = "linux", target_os = "windows")))]
+mod sprite_gutter_tests {
+    use super::*;
+    use gpui::{
+        AtlasKey, ContentMask, MonochromeSprite, PlatformHeadlessRenderer, Quad, RenderSvgParams,
+        TransformationMatrix, point, rgb, size,
+    };
+    use std::borrow::Cow;
+
+    /// Bilinear coverage of a run of full texels from `start` to `end` with transparent texels
+    /// beyond, at pixel centre `c`.
+    fn coverage(c: f32, start: f32, end: f32) -> f32 {
+        let inside = |x: f32| (start..end).contains(&x);
+        let u = c - start - 0.5;
+        let (i, t) = (u.floor(), u - u.floor());
+        let at = |k: f32| if inside(start + k + 0.5) { 1. } else { 0. };
+        at(i) * (1. - t) + at(i + 1.) * t
+    }
+
+    /// A sprite moved by a fraction of a pixel is resampled whole: its edge texels fade out past
+    /// the quad as they would over a transparent gutter, so the ink moves by exactly the shift.
+    #[test]
+    fn a_translated_sprite_draws_its_edges_as_bilinear_over_a_transparent_gutter() -> Result<()> {
+        let mut renderer = WgpuHeadlessRenderer::new()?;
+        let side = size(DevicePixels(4), DevicePixels(4));
+        let tile = renderer
+            .sprite_atlas()
+            .get_or_insert_with(
+                AtlasKey::Svg(RenderSvgParams {
+                    path: "gutter-coverage".into(),
+                    size: side,
+                }),
+                &mut || Ok(Some((side, Cow::Borrowed([255u8; 16].as_slice())))),
+            )?
+            .context("tile was not allocated")?;
+        let frame = Bounds::new(
+            point(ScaledPixels(0.), ScaledPixels(0.)),
+            size(ScaledPixels(16.), ScaledPixels(16.)),
+        );
+        let shift = (0.3, 0.6);
+        let mut scene = Scene::default();
+        scene.insert_primitive(Quad {
+            bounds: frame,
+            background: rgb(0xffffff).into(),
+            content_mask: ContentMask::rect(frame),
+            ..Default::default()
+        });
+        scene.insert_primitive(MonochromeSprite {
+            order: 0,
+            raw_coverage: true.into(),
+            tile,
+            bounds: Bounds::new(
+                point(ScaledPixels(5.), ScaledPixels(5.)),
+                size(ScaledPixels(4.), ScaledPixels(4.)),
+            ),
+            content_mask: ContentMask::rect(frame),
+            color: rgb(0x000000).into(),
+            transformation: TransformationMatrix {
+                rotation_scale: [[1., 0.], [0., 1.]],
+                translation: [shift.0, shift.1],
+            },
+            animation: gpui::SpriteAnimationId::NONE,
+            pad: 0,
+        });
+        scene.finish();
+        let image =
+            renderer.render_scene_to_image(&scene, size(DevicePixels(16), DevicePixels(16)))?;
+        for y in 3..12u32 {
+            for x in 3..12u32 {
+                let expected = coverage(x as f32 + 0.5, 5. + shift.0, 9. + shift.0)
+                    * coverage(y as f32 + 0.5, 5. + shift.1, 9. + shift.1);
+                let actual = 1. - image.get_pixel(x, y).0[0] as f32 / 255.;
+                assert!(
+                    (actual - expected).abs() <= 0.02,
+                    "({x}, {y}): coverage {actual:.3}, expected {expected:.3}"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "windows")))]
+mod plain_rect_tests {
+    use super::*;
+    use gpui::{
+        ContentMask, PlatformHeadlessRenderer, Quad, TransformationMatrix, point, rgb, size,
+    };
+
+    /// The share of pixel `[p, p + 1)` that `[start, end)` covers.
+    fn overlap(p: f32, start: f32, end: f32) -> f32 {
+        (end.min(p + 1.) - start.max(p)).clamp(0., 1.)
+    }
+
+    /// The coverage of each pixel of a 16x16 frame with a black 4x3 rectangle at (5, 5) under
+    /// `translation`.
+    fn draw(translation: [f32; 2]) -> Result<Vec<f32>> {
+        let frame = Bounds::new(
+            point(ScaledPixels(0.), ScaledPixels(0.)),
+            size(ScaledPixels(16.), ScaledPixels(16.)),
+        );
+        let mut scene = Scene::default();
+        scene.insert_primitive(Quad {
+            bounds: frame,
+            background: rgb(0xffffff).into(),
+            content_mask: ContentMask::rect(frame),
+            ..Default::default()
+        });
+        scene.insert_primitive(Quad {
+            bounds: Bounds::new(
+                point(ScaledPixels(5.), ScaledPixels(5.)),
+                size(ScaledPixels(4.), ScaledPixels(3.)),
+            ),
+            background: rgb(0x000000).into(),
+            content_mask: ContentMask::rect(frame),
+            transformation: TransformationMatrix {
+                rotation_scale: [[1., 0.], [0., 1.]],
+                translation,
+            },
+            ..Default::default()
+        });
+        scene.finish();
+        let image = WgpuHeadlessRenderer::new()?
+            .render_scene_to_image(&scene, size(DevicePixels(16), DevicePixels(16)))?;
+        Ok(image
+            .pixels()
+            .map(|pixel| 1. - pixel.0[0] as f32 / 255.)
+            .collect())
+    }
+
+    /// A plain rectangle on the pixel grid is drawn without antialiasing, as before; off it, each
+    /// pixel is covered by the share of it the rectangle overlaps, so the rectangle moves by
+    /// fractions of a pixel with the text of its layer.
+    #[test]
+    fn a_plain_rectangle_is_exact_on_the_grid_and_antialiased_off_it() -> Result<()> {
+        for translation in [[0., 0.], [2., -1.], [0.3, 0.6], [-0.25, 1.5]] {
+            let image = draw(translation)?;
+            for y in 0..16 {
+                for x in 0..16 {
+                    let expected = overlap(x as f32, 5. + translation[0], 9. + translation[0])
+                        * overlap(y as f32, 5. + translation[1], 8. + translation[1]);
+                    let actual = image[y * 16 + x];
+                    let on_grid = translation.iter().all(|t| t.fract() == 0.);
+                    let tolerance = if on_grid { 0. } else { 0.02 };
+                    assert!(
+                        (actual - expected).abs() <= tolerance,
+                        "{translation:?} ({x}, {y}): coverage {actual:.3}, expected {expected:.3}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "windows")))]
 mod corner_shape_tests {
     use super::*;
     use gpui::PlatformHeadlessRenderer;

@@ -37,12 +37,14 @@ fn vs_subpixel_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_i
     let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
     let sprite = b_subpixel_sprites[instance_id];
 
+    let gutter = sprite_gutter(sprite.transformation);
+    let bounds = grow_sprite_bounds(sprite.bounds, sprite.tile, gutter);
     var out = SubpixelSpriteOutput();
-    out.position = to_device_position_transformed(unit_vertex, sprite.bounds, sprite.transformation);
-    out.tile_position = to_tile_position(unit_vertex, sprite.tile);
+    out.position = to_device_position_transformed(unit_vertex, bounds, sprite.transformation);
+    out.tile_position = to_grown_tile_position(unit_vertex, sprite.tile, gutter);
     out.tile_clamp = to_tile_clamp(sprite.tile);
     out.color = hsla_to_rgba(sprite.color);
-    out.clip_distances = distance_from_clip_rect_transformed(unit_vertex, sprite.bounds, sprite.content_mask, sprite.transformation);
+    out.clip_distances = distance_from_clip_rect_transformed(unit_vertex, bounds, sprite.content_mask, sprite.transformation);
     out.mask_bounds = vec4<f32>(sprite.content_mask.origin, sprite.content_mask.size);
     out.mask_radii = vec4<f32>(sprite.content_mask_radii.top_left, sprite.content_mask_radii.top_right,
                                sprite.content_mask_radii.bottom_right, sprite.content_mask_radii.bottom_left);
@@ -55,7 +57,7 @@ fn vs_subpixel_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_i
 @fragment
 fn fs_subpixel_sprite(input: SubpixelSpriteOutput) -> SubpixelSpriteFragmentOutput {
     let uv = clamp(input.tile_position, input.tile_clamp.xy, input.tile_clamp.zw);
-    var sample = textureSample(t_sprite, s_sprite, uv).rgb;
+    var sample = textureSample(t_sprite, s_sprite, uv).rgb * tile_gutter_fade(input.tile_position, input.tile_clamp);
     if (gamma_params.is_bgr != 0u) {
         sample = sample.bgr;
     }

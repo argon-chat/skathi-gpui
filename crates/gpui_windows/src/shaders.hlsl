@@ -316,6 +316,39 @@ float4 to_tile_clamp(AtlasTile tile) {
     return float4(origin + 0.5, origin + float2(tile.bounds.size) - 0.5) / atlas_size.xyxy;
 }
 
+// vue-native fork: a transformed sprite's quad grows by a texel on every side, and `tile_gutter_fade`
+// fades the samples past the outermost texel centres to zero, as a transparent gutter would: the
+// bilinear filter then draws the mask's edge instead of the quad cutting it off.
+float sprite_gutter(TransformationMatrix transformation) {
+    bool unit = all(transformation.rotation_scale[0] == float2(1.0, 0.0))
+        && all(transformation.rotation_scale[1] == float2(0.0, 1.0))
+        && all(transformation.translation == float2(0.0, 0.0));
+    return unit ? 0.0 : 1.0;
+}
+
+Bounds grow_sprite_bounds(Bounds bounds, AtlasTile tile, float gutter) {
+    float2 texel = bounds.size / float2(tile.bounds.size);
+    Bounds grown;
+    grown.origin = bounds.origin - texel * gutter;
+    grown.size = bounds.size + 2.0 * texel * gutter;
+    return grown;
+}
+
+float2 to_grown_tile_position(float2 unit_vertex, AtlasTile tile, float gutter) {
+    float2 atlas_size;
+    t_sprite.GetDimensions(atlas_size.x, atlas_size.y);
+    float2 size = float2(tile.bounds.size) + 2.0 * gutter;
+    return (float2(tile.bounds.origin) - gutter + unit_vertex * size) / atlas_size;
+}
+
+float tile_gutter_fade(float2 tile_position, float4 tile_clamp) {
+    float2 atlas_size;
+    t_sprite.GetDimensions(atlas_size.x, atlas_size.y);
+    float2 outside = abs(tile_position - clamp(tile_position, tile_clamp.xy, tile_clamp.zw)) * atlas_size;
+    float2 fade = saturate(1.0 - outside);
+    return fade.x * fade.y;
+}
+
 // Selects corner radius based on quadrant.
 float pick_corner_radius(float2 center_to_point, Corners corner_radii) {
     if (center_to_point.x < 0.) {
@@ -869,23 +902,51 @@ struct QuadFragmentInput {
 
 StructuredBuffer<Quad> quads: register(t1);
 
+bool is_plain_rect(Quad quad) {
+    return quad.border_widths.top == 0.0 && quad.border_widths.left == 0.0 &&
+        quad.border_widths.right == 0.0 && quad.border_widths.bottom == 0.0 &&
+        quad.corner_radii.top_left == 0.0 && quad.corner_radii.top_right == 0.0 &&
+        quad.corner_radii.bottom_left == 0.0 && quad.corner_radii.bottom_right == 0.0;
+}
+
+// vue-native fork: a plain rectangle is drawn without antialiasing, which is exact on the pixel
+// grid. Under a fractional translation, a scale or a rotation its quad grows by a pixel and
+// `plain_rect_coverage` antialiases its edges, so it moves with the text of its layer instead of
+// stepping by whole pixels.
+bool is_off_grid(TransformationMatrix transformation) {
+    return any(transformation.rotation_scale[0] != float2(1.0, 0.0))
+        || any(transformation.rotation_scale[1] != float2(0.0, 1.0))
+        || any(transformation.translation != round(transformation.translation));
+}
+
+float plain_rect_coverage(float2 local_position, float2 local_step, Bounds bounds) {
+    float2 inside = min(local_position - bounds.origin, bounds.origin + bounds.size - local_position);
+    float2 coverage = saturate(inside / max(local_step, 1e-4) + 0.5);
+    return coverage.x * coverage.y;
+}
+
 QuadVertexOutput quad_vertex(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
     float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
     uint quad_id = batch_start_index + instance_id;
     Quad quad = quads[quad_id];
+    Bounds bounds = quad.bounds;
+    if (is_plain_rect(quad) && is_off_grid(quad.transformation)) {
+        bounds.origin -= 1.0;
+        bounds.size += 2.0;
+    }
     float4 device_position =
-        to_device_position_transformed(unit_vertex, quad.bounds, quad.transformation);
+        to_device_position_transformed(unit_vertex, bounds, quad.transformation);
 
     GradientColor gradient = prepare_gradient_color(quad.background);
     float4 clip_distance = distance_from_clip_rect_transformed(
-        unit_vertex, quad.bounds, quad.content_mask, quad.transformation);
+        unit_vertex, bounds, quad.content_mask, quad.transformation);
     float4 border_color = hsla_to_rgba(quad.border_color);
 
     QuadVertexOutput output;
     output.position = device_position;
     // Affine in `unit_vertex`, so the rasteriser's perspective-correct
     // interpolation reproduces it exactly across the quad.
-    output.local_position = unit_vertex * quad.bounds.size + quad.bounds.origin;
+    output.local_position = unit_vertex * bounds.size + bounds.origin;
     output.border_color = border_color;
     output.quad_id = quad_id;
     output.background_solid = gradient.solid;
@@ -899,6 +960,8 @@ QuadVertexOutput quad_vertex(uint vertex_id: SV_VertexID, uint instance_id: SV_I
 // from a handful of places, and the wrapper below takes them all.
 float4 quad_color(QuadFragmentInput input) {
     Quad quad = quads[input.quad_id];
+    // Outside the branch below: derivatives are undefined in divergent flow.
+    float2 local_step = fwidth(input.local_position);
     float4 background_color = gradient_color(quad.background, input.local_position, quad.bounds,
     input.background_solid, input.background_color0, input.background_color1);
     // vue-native fork: what fills the inside of the inner border edge. A
@@ -914,11 +977,10 @@ float4 quad_color(QuadFragmentInput input) {
         quad.corner_radii.bottom_right == 0.0;
 
     // Fast path when the quad is not rounded and doesn't have any border
-    if (quad.border_widths.top == 0.0 &&
-        quad.border_widths.left == 0.0 &&
-        quad.border_widths.right == 0.0 &&
-        quad.border_widths.bottom == 0.0 &&
-        unrounded) {
+    if (is_plain_rect(quad)) {
+        if (is_off_grid(quad.transformation)) {
+            interior_color.a *= plain_rect_coverage(input.local_position, local_step, quad.bounds);
+        }
         return interior_color;
     }
 
@@ -1915,10 +1977,12 @@ MonochromeSpriteVertexOutput monochrome_sprite_vertex(uint vertex_id: SV_VertexI
     float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
     uint sprite_id = batch_start_index + instance_id;
     MonochromeSprite sprite = mono_sprites[sprite_id];
+    float gutter = sprite_gutter(sprite.transformation);
+    Bounds bounds = grow_sprite_bounds(sprite.bounds, sprite.tile, gutter);
     float4 device_position =
-        to_device_position_transformed(unit_vertex, sprite.bounds, sprite.transformation);
-    float4 clip_distance = distance_from_clip_rect_transformed(unit_vertex, sprite.bounds, sprite.content_mask, sprite.transformation);
-    float2 tile_position = to_tile_position(unit_vertex, sprite.tile);
+        to_device_position_transformed(unit_vertex, bounds, sprite.transformation);
+    float4 clip_distance = distance_from_clip_rect_transformed(unit_vertex, bounds, sprite.content_mask, sprite.transformation);
+    float2 tile_position = to_grown_tile_position(unit_vertex, sprite.tile, gutter);
     float4 color = hsla_to_rgba(sprite.color);
 
     MonochromeSpriteVertexOutput output;
@@ -1939,7 +2003,7 @@ MonochromeSpriteVertexOutput monochrome_sprite_vertex(uint vertex_id: SV_VertexI
 
 float4 monochrome_sprite_fragment(MonochromeSpriteFragmentInput input): SV_Target {
     float2 uv = clamp(input.tile_position, input.tile_clamp.xy, input.tile_clamp.zw);
-    float sample = t_sprite.Sample(s_sprite, uv).r;
+    float sample = t_sprite.Sample(s_sprite, uv).r * tile_gutter_fade(input.tile_position, input.tile_clamp);
     float alpha_corrected = input.raw_coverage == 1u
         ? sample
         : apply_contrast_and_gamma_correction(sample, input.color.rgb, grayscale_enhanced_contrast, gamma_ratios, input.raw_coverage == 2u ? 1u : 0u);
@@ -1967,10 +2031,12 @@ MonochromeSpriteVertexOutput subpixel_sprite_vertex(uint vertex_id: SV_VertexID,
     float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
     SubpixelSprite sprite = subpixel_sprites[batch_start_index + instance_id];
 
+    float gutter = sprite_gutter(sprite.transformation);
+    Bounds bounds = grow_sprite_bounds(sprite.bounds, sprite.tile, gutter);
     MonochromeSpriteVertexOutput output;
     output.position =
-        to_device_position_transformed(unit_vertex, sprite.bounds, sprite.transformation);
-    output.tile_position = to_tile_position(unit_vertex, sprite.tile);
+        to_device_position_transformed(unit_vertex, bounds, sprite.transformation);
+    output.tile_position = to_grown_tile_position(unit_vertex, sprite.tile, gutter);
     output.color = hsla_to_rgba(sprite.color);
     output.mask_bounds = float4(sprite.content_mask.origin, sprite.content_mask.size);
     output.mask_radii = float4(sprite.content_mask_radii.top_left, sprite.content_mask_radii.top_right,
@@ -1980,13 +2046,13 @@ MonochromeSpriteVertexOutput subpixel_sprite_vertex(uint vertex_id: SV_VertexID,
     output.raw_coverage = sprite.pad == 1u ? 2u : 0u;
     output.tile_clamp = to_tile_clamp(sprite.tile);
     output.clip_distance = distance_from_clip_rect_transformed(
-        unit_vertex, sprite.bounds, sprite.content_mask, sprite.transformation);
+        unit_vertex, bounds, sprite.content_mask, sprite.transformation);
     return output;
 }
 
 SubpixelSpriteFragmentOutput subpixel_sprite_fragment(MonochromeSpriteFragmentInput input) {
     float2 uv = clamp(input.tile_position, input.tile_clamp.xy, input.tile_clamp.zw);
-    float3 sample = t_sprite.Sample(s_sprite, uv).rgb;
+    float3 sample = t_sprite.Sample(s_sprite, uv).rgb * tile_gutter_fade(input.tile_position, input.tile_clamp);
     if (is_bgr) {
         sample = sample.bgr;
     }

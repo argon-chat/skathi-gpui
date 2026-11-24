@@ -57,11 +57,36 @@ fn phases_for(ppem: f32) -> u8 {
     (1.0 / (0.03 * ppem)).ceil().clamp(1.0, 5.0) as u8
 }
 
+/// The nearest of `q` steps per pixel, halfway and up to 0.001 px past it to the lower one: positions
+/// at fractional scales are halfway only up to float error, and must not flip between frames.
+fn nearest_step(value: f32, q: u8) -> i64 {
+    ((value - 0.001) * q as f32 - 0.5).ceil() as i64
+}
+
 /// A glyph's whole-pixel origin and its subpixel variant, for an origin in device pixels.
 pub fn quantize_glyph_origin(
     origin: Point<ScaledPixels>,
     ppem: f32,
 ) -> (Point<ScaledPixels>, Point<u8>) {
+    quantize_shifted_glyph_origin(origin, Point::default(), ppem)
+}
+
+/// [`quantize_glyph_origin`] for a glyph moved by `shift` device pixels, rounded once for the run
+/// to its phase grid across and to whole pixels down: every glyph of the run moves by the same
+/// amount, so a moving translation does not change the spacing between them.
+pub(crate) fn quantize_shifted_glyph_origin(
+    origin: Point<ScaledPixels>,
+    shift: Point<f32>,
+    ppem: f32,
+) -> (Point<ScaledPixels>, Point<u8>) {
+    let origin = if text_experiment().phases {
+        origin
+    } else {
+        Point::new(
+            origin.x + ScaledPixels(shift.x),
+            origin.y + ScaledPixels(shift.y),
+        )
+    };
     if !text_experiment().phases {
         let quantized = Point::new(
             crate::util::round_half_toward_zero(origin.x.0 * SUBPIXEL_VARIANTS_X as f32)
@@ -81,18 +106,17 @@ pub fn quantize_glyph_origin(
             steps.rem_euclid(q as i64) as u8,
         )
     };
-    let nearest = |value: f32, q: u8| crate::util::round_half_toward_zero(value * q as f32) as i64;
     let q = phases_for(ppem);
     // macOS floors to the phase grid, with an epsilon so a whole pixel up to float error is
     // that pixel; the native mask for a pen position is the one its floor selects.
     let x_steps = if cfg!(target_os = "macos") {
         ((origin.x.0 + 0.001) * q as f32).floor() as i64
     } else {
-        nearest(origin.x.0, q)
-    };
+        nearest_step(origin.x.0, q)
+    } + nearest_step(shift.x, q);
     let (x, phase_x) = split(x_steps, q);
     let (y, phase_y) = split(
-        nearest(origin.y.0, SUBPIXEL_VARIANTS_Y),
+        nearest_step(origin.y.0, SUBPIXEL_VARIANTS_Y) + nearest_step(shift.y, SUBPIXEL_VARIANTS_Y),
         SUBPIXEL_VARIANTS_Y,
     );
     (
@@ -251,6 +275,66 @@ mod tests {
                 };
                 assert!(lands, "{x} at {ppem} ppem lands at {at}");
                 assert_eq!(whole.y.0, 5.0);
+            }
+        }
+    }
+
+    fn placed(origin: Point<f32>, shift: Point<f32>, ppem: f32) -> (f32, f32) {
+        let (whole, variant) = quantize_shifted_glyph_origin(
+            Point::new(ScaledPixels(origin.x), ScaledPixels(origin.y)),
+            shift,
+            ppem,
+        );
+        let offset = subpixel_variant_offset(variant);
+        (whole.x.0 + offset.x, whole.y.0 + offset.y)
+    }
+
+    #[test]
+    fn a_position_halfway_between_steps_up_to_float_error_lands_on_one_step() {
+        if !text_experiment().phases {
+            return;
+        }
+        for quarter in -40..400 {
+            let at = quarter as f32 * 0.25;
+            let (below, above) = (at - 1e-5, at + 1e-5);
+            for ppem in [13.0, 20.0, 40.0] {
+                let exact = placed(Point::new(at, at), Point::default(), ppem);
+                for near in [below, above] {
+                    let near = placed(Point::new(near, near), Point::default(), ppem);
+                    assert_eq!(exact.1, near.1, "baseline at {at}, {ppem} ppem");
+                    if !cfg!(target_os = "macos") {
+                        assert_eq!(exact.0, near.0, "pen at {at}, {ppem} ppem");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_shifted_run_keeps_the_distances_between_its_glyphs() {
+        if !text_experiment().phases {
+            return;
+        }
+        let pens = [3.1, 11.37, 19.62, 27.95, 36.4, 44.71];
+        for ppem in [13.0, 20.0, 40.0] {
+            let at_rest: Vec<_> = pens
+                .iter()
+                .map(|&x| placed(Point::new(x, 7.6), Point::default(), ppem))
+                .collect();
+            for step in 1..40 {
+                let shift = Point::new(step as f32 * 0.137, step as f32 * 0.093);
+                let moved: Vec<_> = pens
+                    .iter()
+                    .map(|&x| placed(Point::new(x, 7.6), shift, ppem))
+                    .collect();
+                for (rest, moved) in at_rest.windows(2).zip(moved.windows(2)) {
+                    assert!(
+                        ((moved[1].0 - moved[0].0) - (rest[1].0 - rest[0].0)).abs() < 1e-4,
+                        "{ppem} ppem shifted by {shift:?}"
+                    );
+                }
+                assert!(moved.iter().all(|m| m.1 == moved[0].1));
+                assert!((moved[0].1 - 8.0 - shift.y).abs() <= 0.5);
             }
         }
     }

@@ -81,6 +81,36 @@ struct QuadFragmentInput {
   float4 background_color1 [[flat]];
 };
 
+bool is_plain_rect(Quad quad) {
+  return quad.border_widths.top == 0.0 && quad.border_widths.left == 0.0 &&
+         quad.border_widths.right == 0.0 && quad.border_widths.bottom == 0.0 &&
+         quad.corner_radii.top_left == 0.0 && quad.corner_radii.top_right == 0.0 &&
+         quad.corner_radii.bottom_left == 0.0 && quad.corner_radii.bottom_right == 0.0;
+}
+
+// vue-native fork: a plain rectangle is drawn without antialiasing, which is
+// exact on the pixel grid. Under a fractional translation, a scale or a
+// rotation its quad grows by a pixel and `plain_rect_coverage` antialiases its
+// edges, so it moves with the text of its layer instead of stepping by whole
+// pixels.
+bool is_off_grid(TransformationMatrix transformation) {
+  return transformation.rotation_scale[0][0] != 1. ||
+         transformation.rotation_scale[0][1] != 0. ||
+         transformation.rotation_scale[1][0] != 0. ||
+         transformation.rotation_scale[1][1] != 1. ||
+         transformation.translation[0] != rint(transformation.translation[0]) ||
+         transformation.translation[1] != rint(transformation.translation[1]);
+}
+
+float plain_rect_coverage(float2 local_position, float2 local_step,
+                          Bounds_ScaledPixels bounds) {
+  float2 origin = float2(bounds.origin.x, bounds.origin.y);
+  float2 size = float2(bounds.size.width, bounds.size.height);
+  float2 inside = min(local_position - origin, origin + size - local_position);
+  float2 coverage = saturate(inside / max(local_step, float2(1e-4)) + 0.5);
+  return coverage.x * coverage.y;
+}
+
 vertex QuadVertexOutput quad_vertex(uint unit_vertex_id [[vertex_id]],
                                     uint quad_id [[instance_id]],
                                     constant float2 *unit_vertices
@@ -91,18 +121,25 @@ vertex QuadVertexOutput quad_vertex(uint unit_vertex_id [[vertex_id]],
                                     [[buffer(QuadInputIndex_ViewportSize)]]) {
   float2 unit_vertex = unit_vertices[unit_vertex_id];
   Quad quad = quads[quad_id];
+  Bounds_ScaledPixels bounds = quad.bounds;
+  if (is_plain_rect(quad) && is_off_grid(quad.transformation)) {
+    bounds.origin.x -= 1.;
+    bounds.origin.y -= 1.;
+    bounds.size.width += 2.;
+    bounds.size.height += 2.;
+  }
   // vue-native fork: CSS `transform` (`Quad::transformation`), applied here
   // only. The clip distances are measured from the TRANSFORMED vertex, since
   // the content mask is in screen space.
   float4 device_position = to_device_position_transformed(
-      unit_vertex, quad.bounds, quad.transformation, viewport_size);
+      unit_vertex, bounds, quad.transformation, viewport_size);
   float4 clip_distance = distance_from_clip_rect_transformed(
-      unit_vertex, quad.bounds, quad.content_mask.bounds, quad.transformation);
+      unit_vertex, bounds, quad.content_mask.bounds, quad.transformation);
   // Affine in `unit_vertex`, so the rasteriser's interpolation reproduces it
   // exactly across the quad.
   float2 local_position =
-      unit_vertex * float2(quad.bounds.size.width, quad.bounds.size.height) +
-      float2(quad.bounds.origin.x, quad.bounds.origin.y);
+      unit_vertex * float2(bounds.size.width, bounds.size.height) +
+      float2(bounds.origin.x, bounds.origin.y);
   float4 border_color = hsla_to_rgba(quad.border_color);
 
   GradientColor gradient = prepare_fill_color(
@@ -129,9 +166,9 @@ vertex QuadVertexOutput quad_vertex(uint unit_vertex_id [[vertex_id]],
 // inputs are the fragment's varyings, passed one by one; `local_position` is
 // the untransformed position (see `QuadVertexOutput`), where the old body read
 // `input.position.xy`.
-float4 quad_color(Quad quad, float2 local_position, float4 input_border_color,
-                  float4 background_solid, float4 background_color0,
-                  float4 background_color1) {
+float4 quad_color(Quad quad, float2 local_position, float2 local_step,
+                  float4 input_border_color, float4 background_solid,
+                  float4 background_color0, float4 background_color1) {
   float4 background_color = fill_color(quad.background, local_position, quad.bounds,
     background_solid, background_color0, background_color1);
   // vue-native fork: what fills the inside of the inner border edge. A
@@ -147,11 +184,10 @@ float4 quad_color(Quad quad, float2 local_position, float4 input_border_color,
     quad.corner_radii.bottom_right == 0.0;
 
   // Fast path when the quad is not rounded and doesn't have any border
-  if (quad.border_widths.top == 0.0 &&
-      quad.border_widths.left == 0.0 &&
-      quad.border_widths.right == 0.0 &&
-      quad.border_widths.bottom == 0.0 &&
-      unrounded) {
+  if (is_plain_rect(quad)) {
+    if (is_off_grid(quad.transformation)) {
+      interior_color.a *= plain_rect_coverage(local_position, local_step, quad.bounds);
+    }
     return interior_color;
   }
 
@@ -478,9 +514,9 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
                               constant Quad *quads
                               [[buffer(QuadInputIndex_Quads)]]) {
   Quad quad = quads[input.quad_id];
-  float4 color = quad_color(quad, input.local_position, input.border_color,
-                            input.background_solid, input.background_color0,
-                            input.background_color1);
+  float4 color = quad_color(quad, input.local_position, fwidth(input.local_position),
+                            input.border_color, input.background_solid,
+                            input.background_color0, input.background_color1);
   // vue-native fork: the content mask's rounded corners, in screen space.
   // Straight alpha, like everything `quad_color` returns.
   Corners_ScaledPixels radii = quad.content_mask.corner_radii;
@@ -814,6 +850,51 @@ float2 clamp_to_tile(float2 tile_position, AtlasTile tile,
                (origin + size - 0.5) / atlas_size);
 }
 
+// vue-native fork: a transformed sprite's quad grows by a texel on every side,
+// and `tile_gutter_fade` fades the samples past the outermost texel centres to
+// zero, as a transparent gutter would: the bilinear filter then draws the
+// mask's edge instead of the quad cutting it off.
+float sprite_gutter(TransformationMatrix transformation) {
+  bool unit = transformation.rotation_scale[0][0] == 1. &&
+              transformation.rotation_scale[0][1] == 0. &&
+              transformation.rotation_scale[1][0] == 0. &&
+              transformation.rotation_scale[1][1] == 1. &&
+              transformation.translation[0] == 0. &&
+              transformation.translation[1] == 0.;
+  return unit ? 0. : 1.;
+}
+
+Bounds_ScaledPixels grow_sprite_bounds(Bounds_ScaledPixels bounds,
+                                       AtlasTile tile, float gutter) {
+  float2 texel = float2(bounds.size.width, bounds.size.height) /
+                 float2(tile.bounds.size.width, tile.bounds.size.height);
+  Bounds_ScaledPixels grown = bounds;
+  grown.origin.x -= texel.x * gutter;
+  grown.origin.y -= texel.y * gutter;
+  grown.size.width += 2. * texel.x * gutter;
+  grown.size.height += 2. * texel.y * gutter;
+  return grown;
+}
+
+float2 to_grown_tile_position(float2 unit_vertex, AtlasTile tile, float gutter,
+                              constant Size_DevicePixels *atlas_size) {
+  float2 origin = float2(tile.bounds.origin.x, tile.bounds.origin.y);
+  float2 size = float2(tile.bounds.size.width, tile.bounds.size.height) + 2. * gutter;
+  return (origin - gutter + unit_vertex * size) /
+         float2((float)atlas_size->width, (float)atlas_size->height);
+}
+
+float tile_gutter_fade(float2 tile_position, AtlasTile tile,
+                       texture2d<float> atlas_texture) {
+  float2 atlas_size =
+      float2(atlas_texture.get_width(), atlas_texture.get_height());
+  float2 outside =
+      abs(tile_position - clamp_to_tile(tile_position, tile, atlas_texture)) *
+      atlas_size;
+  float2 fade = saturate(1. - outside);
+  return fade.x * fade.y;
+}
+
 // vue-native fork: `sprite_id` carries the sprite to the fragment shader for
 // its content mask's rounded corners. (gpui_windows and gpui_wgpu pass the
 // mask as flat varyings instead; here the sprites buffer is already bound to
@@ -844,11 +925,13 @@ vertex MonochromeSpriteVertexOutput monochrome_sprite_vertex(
     [[buffer(SpriteInputIndex_AtlasTextureSize)]]) {
   float2 unit_vertex = unit_vertices[unit_vertex_id];
   MonochromeSprite sprite = sprites[sprite_id];
+  float gutter = sprite_gutter(sprite.transformation);
+  Bounds_ScaledPixels bounds = grow_sprite_bounds(sprite.bounds, sprite.tile, gutter);
   float4 device_position =
-      to_device_position_transformed(unit_vertex, sprite.bounds, sprite.transformation, viewport_size);
-  float4 clip_distance = distance_from_clip_rect_transformed(unit_vertex, sprite.bounds,
+      to_device_position_transformed(unit_vertex, bounds, sprite.transformation, viewport_size);
+  float4 clip_distance = distance_from_clip_rect_transformed(unit_vertex, bounds,
                                                  sprite.content_mask.bounds, sprite.transformation);
-  float2 tile_position = to_tile_position(unit_vertex, sprite.tile, atlas_size);
+  float2 tile_position = to_grown_tile_position(unit_vertex, sprite.tile, gutter, atlas_size);
   float4 color = hsla_to_rgba(sprite.color);
   return MonochromeSpriteVertexOutput{
       device_position,
@@ -874,7 +957,8 @@ fragment float4 monochrome_sprite_fragment(
   MonochromeSprite sprite = sprites[input.sprite_id];
   float4 sample = atlas_texture.sample(
       atlas_texture_sampler,
-      clamp_to_tile(input.tile_position, sprite.tile, atlas_texture));
+      clamp_to_tile(input.tile_position, sprite.tile, atlas_texture)) *
+      tile_gutter_fade(input.tile_position, sprite.tile, atlas_texture);
   float4 color = input.color;
   // vue-native fork: the content mask's rounded corners, in screen space.
   color.a *= sample.a *

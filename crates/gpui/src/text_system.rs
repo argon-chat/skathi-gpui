@@ -7,7 +7,7 @@ mod line_layout;
 mod line_wrapper;
 
 pub use composed_family::*;
-pub(crate) use experiment::{GlyphTransform, TextSettle};
+pub(crate) use experiment::{GlyphTransform, TextSettle, quantize_shifted_glyph_origin};
 pub use experiment::{
     TextExperiment, quantize_glyph_origin, subpixel_variant_offset, text_experiment,
 };

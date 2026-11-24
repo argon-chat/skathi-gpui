@@ -3290,6 +3290,97 @@ mod tests {
         Ok(())
     }
 
+    /// gpui_wgpu's `a_translated_sprite_draws_its_edges_as_bilinear_over_a_transparent_gutter`.
+    #[::core::prelude::v1::test]
+    #[ignore = "requires a native D3D12 hardware adapter; run explicitly for renderer qualification"]
+    fn native_translated_sprite_draws_its_edges_as_bilinear_over_a_transparent_gutter() -> Result<()>
+    {
+        let coverage = |c: f32, start: f32| {
+            let u = c - start - 0.5;
+            let (i, t) = (u.floor(), u - u.floor());
+            let at = |k: f32| if (0. ..4.).contains(&k) { 1. } else { 0. };
+            at(i) * (1. - t) + at(i + 1.) * t
+        };
+        let mut renderer = offscreen(16, 16)?;
+        let content_mask = mask(16., 16.);
+        let side = size(DevicePixels(4), DevicePixels(4));
+        let key = AtlasKey::Svg(RenderSvgParams {
+            path: "native-gutter-coverage".into(),
+            size: side,
+        });
+        let tile = renderer
+            .atlas
+            .write_bytes(&key, side, &[255; 16])?
+            .context("tile was not allocated")?;
+        let shift = (0.3, 0.6);
+        let mut scene = Scene::default();
+        scene.insert_primitive(quad(bounds(0., 0., 16., 16.), rgb(0xffffff), content_mask));
+        scene.insert_primitive(MonochromeSprite {
+            order: 0,
+            raw_coverage: true.into(),
+            tile,
+            bounds: bounds(5., 5., 4., 4.),
+            content_mask,
+            color: rgb(0x000000).into(),
+            transformation: TransformationMatrix {
+                rotation_scale: [[1., 0.], [0., 1.]],
+                translation: [shift.0, shift.1],
+            },
+            animation: SpriteAnimationId::NONE,
+            pad: 0,
+        });
+        scene.finish();
+        let image = renderer.render_to_image(&scene, WindowBackgroundAppearance::Opaque)?;
+        for y in 3..12u32 {
+            for x in 3..12u32 {
+                let expected =
+                    coverage(x as f32 + 0.5, 5. + shift.0) * coverage(y as f32 + 0.5, 5. + shift.1);
+                let actual = 1. - image.get_pixel(x, y).0[0] as f32 / 255.;
+                assert!(
+                    (actual - expected).abs() <= 0.02,
+                    "({x}, {y}): coverage {actual:.3}, expected {expected:.3}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// gpui_wgpu's `a_plain_rectangle_is_exact_on_the_grid_and_antialiased_off_it`.
+    #[::core::prelude::v1::test]
+    #[ignore = "requires a native D3D12 hardware adapter; run explicitly for renderer qualification"]
+    fn native_plain_rectangle_is_exact_on_the_grid_and_antialiased_off_it() -> Result<()> {
+        let overlap = |p: f32, start: f32, end: f32| (end.min(p + 1.) - start.max(p)).clamp(0., 1.);
+        let content_mask = mask(16., 16.);
+        for translation in [[0., 0.], [2., -1.], [0.3, 0.6], [-0.25, 1.5]] {
+            let mut renderer = offscreen(16, 16)?;
+            let mut scene = Scene::default();
+            scene.insert_primitive(quad(bounds(0., 0., 16., 16.), rgb(0xffffff), content_mask));
+            scene.insert_primitive(Quad {
+                transformation: TransformationMatrix {
+                    rotation_scale: [[1., 0.], [0., 1.]],
+                    translation,
+                },
+                ..quad(bounds(5., 5., 4., 3.), rgb(0x000000), content_mask)
+            });
+            scene.finish();
+            let image = renderer.render_to_image(&scene, WindowBackgroundAppearance::Opaque)?;
+            let on_grid = translation.iter().all(|t| t.fract() == 0.);
+            for y in 0..16u32 {
+                for x in 0..16u32 {
+                    let expected = overlap(x as f32, 5. + translation[0], 9. + translation[0])
+                        * overlap(y as f32, 5. + translation[1], 8. + translation[1]);
+                    let actual = 1. - image.get_pixel(x, y).0[0] as f32 / 255.;
+                    let tolerance = if on_grid { 0. } else { 0.02 };
+                    assert!(
+                        (actual - expected).abs() <= tolerance,
+                        "{translation:?} ({x}, {y}): coverage {actual:.3}, expected {expected:.3}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[::core::prelude::v1::test]
     #[ignore = "requires a native D3D12 hardware adapter; run explicitly for renderer qualification"]
     fn native_quads_preserve_premultiplied_alpha_and_paths_antialias() -> Result<()> {

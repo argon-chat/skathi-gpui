@@ -8041,9 +8041,12 @@ impl Window {
         self.invalidator.debug_assert_paint();
 
         let element_opacity = self.element_opacity();
-        let (glyph_origin, transformation, scale_factor) = self.text_glyph_placement(origin);
-        let (integer_origin, subpixel_variant) =
-            crate::text_system::quantize_glyph_origin(glyph_origin, font_size.0 * scale_factor);
+        let (glyph_origin, shift, transformation, scale_factor) = self.text_glyph_placement(origin);
+        let (integer_origin, subpixel_variant) = crate::text_system::quantize_shifted_glyph_origin(
+            glyph_origin,
+            shift,
+            font_size.0 * scale_factor,
+        );
         let subpixel_rendering = self.should_use_subpixel_rendering(font_id, font_size);
         let dilation = self.glyph_dilation(color);
         let params = RenderGlyphParams {
@@ -8109,22 +8112,27 @@ impl Window {
         Ok(())
     }
 
-    /// vue-native fork: a glyph's origin in device pixels and the transform left to draw it with.
-    /// A transform that only translates moves the origin instead, so the glyph is rasterized at
-    /// its subpixel position like untransformed text rather than resampled between pixels.
+    /// vue-native fork: a glyph's origin in device pixels, the shift its run moves by, and the
+    /// transform left to draw it with. A transform that only translates becomes the shift, so the
+    /// glyph is rasterized at a subpixel position like untransformed text rather than resampled.
     fn glyph_placement(
         &self,
         origin: Point<Pixels>,
-    ) -> (Point<ScaledPixels>, TransformationMatrix) {
+    ) -> (Point<ScaledPixels>, Point<f32>, TransformationMatrix) {
         let origin = origin.scale(self.scale_factor());
         let transform = self.element_transform;
         if transform.rotation_scale != TransformationMatrix::unit().rotation_scale {
-            return (origin, transform);
+            return (origin, Point::default(), transform);
         }
         let [x, y] = transform.translation;
-        (
-            point(origin.x + ScaledPixels(x), origin.y + ScaledPixels(y)),
-            TransformationMatrix::unit(),
+        (origin, point(x, y), TransformationMatrix::unit())
+    }
+
+    /// vue-native fork: an emoji's whole-pixel origin, its run's shift rounded once.
+    fn whole_pixel_origin(origin: Point<ScaledPixels>, shift: Point<f32>) -> Point<ScaledPixels> {
+        point(
+            ScaledPixels(round_half_toward_zero(origin.x.0) + round_half_toward_zero(shift.x)),
+            ScaledPixels(round_half_toward_zero(origin.y.0) + round_half_toward_zero(shift.y)),
         )
     }
 
@@ -8165,7 +8173,7 @@ impl Window {
     fn text_glyph_placement(
         &mut self,
         origin: Point<Pixels>,
-    ) -> (Point<ScaledPixels>, TransformationMatrix, f32) {
+    ) -> (Point<ScaledPixels>, Point<f32>, TransformationMatrix, f32) {
         use crate::text_system::GlyphTransform;
         let scale_factor = self.scale_factor();
         let transform = self.element_transform;
@@ -8175,10 +8183,15 @@ impl Window {
             .any(|style| style.will_change_transform == Some(true));
         match self.vn_text_settle.placement(&transform, rigid) {
             GlyphTransform::Default => {
-                let (origin, transform) = self.glyph_placement(origin);
-                (origin, transform, scale_factor)
+                let (origin, shift, transform) = self.glyph_placement(origin);
+                (origin, shift, transform, scale_factor)
             }
-            GlyphTransform::Pending => (origin.scale(scale_factor), transform, scale_factor),
+            GlyphTransform::Pending => (
+                origin.scale(scale_factor),
+                Point::default(),
+                transform,
+                scale_factor,
+            ),
             GlyphTransform::Fold { scale } => {
                 let origin = origin.scale(scale_factor);
                 let [x, y] = transform.translation;
@@ -8187,6 +8200,7 @@ impl Window {
                         ScaledPixels(origin.x.0 * scale + x),
                         ScaledPixels(origin.y.0 * scale + y),
                     ),
+                    Point::default(),
                     TransformationMatrix::unit(),
                     scale_factor * scale,
                 )
@@ -8211,14 +8225,18 @@ impl Window {
             return self.paint_glyph(origin, font_id, glyph_id, font_size, color);
         }
 
-        let (glyph_origin, transformation, scale_factor) = self.text_glyph_placement(origin);
+        let (glyph_origin, shift, transformation, scale_factor) = self.text_glyph_placement(origin);
         let (integer_origin, subpixel_variant) = if is_emoji {
             (
-                glyph_origin.map(|c| ScaledPixels(round_half_toward_zero(c.0))),
+                Self::whole_pixel_origin(glyph_origin, shift),
                 Point::default(),
             )
         } else {
-            crate::text_system::quantize_glyph_origin(glyph_origin, font_size.0 * scale_factor)
+            crate::text_system::quantize_shifted_glyph_origin(
+                glyph_origin,
+                shift,
+                font_size.0 * scale_factor,
+            )
         };
         let glyph = RenderGlyphParams {
             font_id,
@@ -8350,8 +8368,8 @@ impl Window {
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
-        let (glyph_origin, transformation) = self.glyph_placement(origin);
-        let integer_origin = glyph_origin.map(|c| ScaledPixels(round_half_toward_zero(c.0)));
+        let (glyph_origin, shift, transformation) = self.glyph_placement(origin);
+        let integer_origin = Self::whole_pixel_origin(glyph_origin, shift);
         let params = RenderGlyphParams {
             font_id,
             glyph_id,

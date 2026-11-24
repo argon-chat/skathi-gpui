@@ -249,6 +249,34 @@ fn to_tile_clamp(tile: AtlasTile) -> vec4<f32> {
   return vec4<f32>((origin + 0.5) / atlas_size, (origin + size - 0.5) / atlas_size);
 }
 
+// vue-native fork: a transformed sprite's quad grows by a texel on every side, and `tile_gutter_fade`
+// fades the samples past the outermost texel centres to zero, as a transparent gutter would: the
+// bilinear filter then draws the mask's edge instead of the quad cutting it off.
+fn sprite_gutter(transform: TransformationMatrix) -> f32 {
+  let unit = all(transform.rotation_scale[0] == vec2<f32>(1.0, 0.0))
+    && all(transform.rotation_scale[1] == vec2<f32>(0.0, 1.0))
+    && all(transform.translation == vec2<f32>(0.0));
+  return select(1.0, 0.0, unit);
+}
+
+fn grow_sprite_bounds(bounds: Bounds, tile: AtlasTile, gutter: f32) -> Bounds {
+  let texel = bounds.size / vec2<f32>(tile.bounds.size);
+  return Bounds(bounds.origin - texel * gutter, bounds.size + 2.0 * texel * gutter);
+}
+
+fn to_grown_tile_position(unit_vertex: vec2<f32>, tile: AtlasTile, gutter: f32) -> vec2<f32> {
+  let atlas_size = vec2<f32>(textureDimensions(t_sprite, 0));
+  let size = vec2<f32>(tile.bounds.size) + 2.0 * gutter;
+  return (vec2<f32>(tile.bounds.origin) - gutter + unit_vertex * size) / atlas_size;
+}
+
+fn tile_gutter_fade(tile_position: vec2<f32>, tile_clamp: vec4<f32>) -> f32 {
+  let atlas_size = vec2<f32>(textureDimensions(t_sprite, 0));
+  let outside = abs(tile_position - clamp(tile_position, tile_clamp.xy, tile_clamp.zw)) * atlas_size;
+  let fade = saturate(1.0 - outside);
+  return fade.x * fade.y;
+}
+
 fn distance_from_clip_rect_impl(position: vec2<f32>, clip_bounds: Bounds) -> vec4<f32> {
     let tl = position - clip_bounds.origin;
     let br = clip_bounds.origin + clip_bounds.size - position;
@@ -894,9 +922,13 @@ fn vs_quad(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) insta
     let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
     let quad = load_quad(instance_id);
 
+    var bounds = quad.bounds;
+    if (is_plain_rect(quad) && is_off_grid(quad.transformation)) {
+        bounds = Bounds(bounds.origin - 1.0, bounds.size + 2.0);
+    }
     var out = QuadVarying();
-    out.position = to_device_position_transformed(unit_vertex, quad.bounds, quad.transformation);
-    out.local_position = unit_vertex * quad.bounds.size + quad.bounds.origin;
+    out.position = to_device_position_transformed(unit_vertex, bounds, quad.transformation);
+    out.local_position = unit_vertex * bounds.size + bounds.origin;
 
     let gradient = prepare_gradient_color(quad.background);
     out.background_solid = gradient.solid;
@@ -904,13 +936,38 @@ fn vs_quad(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) insta
     out.background_color1 = gradient.color1;
     out.border_color = hsla_to_rgba(quad.border_color);
     out.quad_id = instance_id;
-    out.clip_distances = distance_from_clip_rect_transformed(unit_vertex, quad.bounds, quad.content_mask, quad.transformation);
+    out.clip_distances = distance_from_clip_rect_transformed(unit_vertex, bounds, quad.content_mask, quad.transformation);
     return out;
+}
+
+fn is_plain_rect(quad: Quad) -> bool {
+    return quad.border_widths.top == 0.0 && quad.border_widths.left == 0.0 &&
+        quad.border_widths.right == 0.0 && quad.border_widths.bottom == 0.0 &&
+        quad.corner_radii.top_left == 0.0 && quad.corner_radii.top_right == 0.0 &&
+        quad.corner_radii.bottom_left == 0.0 && quad.corner_radii.bottom_right == 0.0;
+}
+
+// vue-native fork: a plain rectangle is drawn without antialiasing, which is exact on the pixel
+// grid. Under a fractional translation, a scale or a rotation its quad grows by a pixel and
+// `plain_rect_coverage` antialiases its edges, so it moves with the text of its layer instead of
+// stepping by whole pixels.
+fn is_off_grid(transform: TransformationMatrix) -> bool {
+    return any(transform.rotation_scale[0] != vec2<f32>(1.0, 0.0))
+        || any(transform.rotation_scale[1] != vec2<f32>(0.0, 1.0))
+        || any(transform.translation != round(transform.translation));
+}
+
+fn plain_rect_coverage(local_position: vec2<f32>, local_step: vec2<f32>, bounds: Bounds) -> f32 {
+    let inside = min(local_position - bounds.origin, bounds.origin + bounds.size - local_position);
+    let coverage = saturate(inside / max(local_step, vec2<f32>(1e-4)) + 0.5);
+    return coverage.x * coverage.y;
 }
 
 // vue-native fork: `fs_quad` before the content mask's corners; it returns from
 // a handful of places, and the wrapper below takes them all.
 fn quad_color(input: QuadVarying) -> vec4<f32> {
+    // Before any return: derivatives need uniform control flow.
+    let local_step = fwidth(input.local_position);
     // Alpha clip first, since we don't have `clip_distance`.
     if (any(input.clip_distances < vec4<f32>(0.0))) {
         return vec4<f32>(0.0);
@@ -934,11 +991,10 @@ fn quad_color(input: QuadVarying) -> vec4<f32> {
         quad.corner_radii.bottom_right == 0.0;
 
     // Fast path when the quad is not rounded and doesn't have any border
-    if (quad.border_widths.top == 0.0 &&
-            quad.border_widths.left == 0.0 &&
-            quad.border_widths.right == 0.0 &&
-            quad.border_widths.bottom == 0.0 &&
-            unrounded) {
+    if (is_plain_rect(quad)) {
+        if (is_off_grid(quad.transformation)) {
+            return blend_color(interior_color, plain_rect_coverage(input.local_position, local_step, quad.bounds));
+        }
         return blend_color(interior_color, 1.0);
     }
 
@@ -1844,12 +1900,14 @@ fn vs_mono_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index
     let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
     let sprite = load_mono_sprite(instance_id);
 
+    let gutter = sprite_gutter(sprite.transformation);
+    let bounds = grow_sprite_bounds(sprite.bounds, sprite.tile, gutter);
     var out = MonoSpriteVarying();
-    out.position = to_device_position_transformed(unit_vertex, sprite.bounds, sprite.transformation);
+    out.position = to_device_position_transformed(unit_vertex, bounds, sprite.transformation);
 
-    out.tile_position = to_tile_position(unit_vertex, sprite.tile);
+    out.tile_position = to_grown_tile_position(unit_vertex, sprite.tile, gutter);
     out.color = hsla_to_rgba(sprite.color);
-    out.clip_distances = distance_from_clip_rect_transformed(unit_vertex, sprite.bounds, sprite.content_mask, sprite.transformation);
+    out.clip_distances = distance_from_clip_rect_transformed(unit_vertex, bounds, sprite.content_mask, sprite.transformation);
     out.mask_bounds = vec4<f32>(sprite.content_mask.origin, sprite.content_mask.size);
     out.mask_radii = vec4<f32>(sprite.content_mask_radii.top_left, sprite.content_mask_radii.top_right,
                                sprite.content_mask_radii.bottom_right, sprite.content_mask_radii.bottom_left);
@@ -1864,7 +1922,7 @@ fn vs_mono_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index
 @fragment
 fn fs_mono_sprite(input: MonoSpriteVarying) -> @location(0) vec4<f32> {
     let uv = clamp(input.tile_position, input.tile_clamp.xy, input.tile_clamp.zw);
-    let sample = textureSample(t_sprite, s_sprite, uv).r;
+    let sample = textureSample(t_sprite, s_sprite, uv).r * tile_gutter_fade(input.tile_position, input.tile_clamp);
     var alpha_corrected = sample;
     if (input.raw_coverage != 1u) {
         alpha_corrected = apply_contrast_and_gamma_correction(sample, input.color.rgb, gamma_params.grayscale_enhanced_contrast, gamma_params.gamma_ratios, select(0u, 1u, input.raw_coverage == 2u));
