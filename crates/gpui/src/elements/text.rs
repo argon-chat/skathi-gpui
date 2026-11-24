@@ -1,10 +1,9 @@
 use crate::{
     ActiveTooltip, AnyView, App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId,
     HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
-    LineBoxRules, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size,
-    TextOverflow, TextRun, TextStyle, TextWrap, TooltipId, TruncateFrom, WhiteSpace, Window,
-    WrappedLine, WrappedLineLayout, line_baseline, register_tooltip_mouse_handlers,
-    set_tooltip_on_window,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size, TextOverflow,
+    TextRun, TextStyle, TextWrap, TooltipId, TruncateFrom, WhiteSpace, Window, WrappedLine,
+    WrappedLineLayout, line_baseline, register_tooltip_mouse_handlers, set_tooltip_on_window,
 };
 use anyhow::Context as _;
 use gpui_util::ResultExt;
@@ -656,10 +655,11 @@ fn soft_hyphen_width(
 /// vue-native fork: the first line's baseline below the text's top, when every run is at the
 /// text's size and none holds an inline box, so the first line's box is the uniform one.
 fn first_baseline(
+    text: &SharedString,
     runs: &[TextRun],
     font_size: Pixels,
     line_height: Pixels,
-    line_box: LineBoxRules,
+    rules: TextWrap,
     window: &Window,
 ) -> Option<Pixels> {
     let first = runs.first()?;
@@ -667,6 +667,21 @@ fn first_baseline(
         return None;
     }
     let text_system = window.text_system();
+    let line_box = rules.line_box;
+    // A fallback font can move the first baseline: read it from the first line laid out whole.
+    // A first line that wraps before the fallback font's text is placed as if it held it.
+    if (line_box.normal.is_some() || rules.font_size_adjust.is_some())
+        && let Ok(lines) =
+            text_system.shape_text_with(text.clone(), font_size, runs, None, None, rules)
+        && let Some(line) = lines.first()
+        && line.layout.unwrapped_layout.has_mixed_runs()
+    {
+        return line
+            .layout
+            .line_boxes(line_height)
+            .first()
+            .map(|line| line.baseline);
+    }
     let font_id = text_system.resolve_font(&first.font);
     let (ascent, descent) = text_system.line_extent(font_id, font_size, line_box.metrics);
     Some(line_baseline(
@@ -702,13 +717,24 @@ impl TextLayout {
                 .line_height
                 .to_pixels(font_size.into(), window.rem_size()),
         );
+        // vue-native fork: CSS `font-size-adjust` and the fallback fonts of `line-height: normal`.
+        let font_size = window.text_system().adjusted_font_size(
+            &text_style.font(),
+            font_size,
+            text_style.font_size_adjust,
+        );
+        let mut rules = text_style.wrap();
+        rules.font_size_adjust = text_style.font_size_adjust.aspect();
+        if text_style.line_height_was_normal {
+            rules.line_box.normal = Some(line_height);
+        }
 
         let runs = if let Some(runs) = runs {
             runs
         } else {
             vec![text_style.to_run(text.len())]
         };
-        let baseline = first_baseline(&runs, font_size, line_height, text_style.line_box(), window);
+        let baseline = first_baseline(&text, &runs, font_size, line_height, rules, window);
         window.request_measured_layout_with_baseline(Default::default(), baseline, {
             let element_state = self.clone();
 
@@ -747,14 +773,8 @@ impl TextLayout {
                     && text_style.text_overflow.is_none()
                     && known_dimensions.width.is_none()
                     && available_space.width == crate::AvailableSpace::MinContent
-                    && let Some(size) = min_content_size(
-                        &text,
-                        font_size,
-                        &runs,
-                        line_height,
-                        text_style.wrap(),
-                        window,
-                    )
+                    && let Some(size) =
+                        min_content_size(&text, font_size, &runs, line_height, rules, window)
                 {
                     return size;
                 }
@@ -840,7 +860,7 @@ impl TextLayout {
                         &runs,
                         wrap_width,            // Wrap if we know the width.
                         text_style.line_clamp, // Limit the number of lines if line_clamp is set.
-                        text_style.wrap(),     // vue-native fork: under the CSS rules.
+                        rules,                 // vue-native fork: under the CSS rules.
                     )
                     .log_err()
                 else {

@@ -26,6 +26,7 @@ mod platform;
 mod pointer_lock;
 mod present_feedback;
 mod profiling;
+mod skathi_raster;
 mod system_notifications;
 mod system_settings;
 mod util;

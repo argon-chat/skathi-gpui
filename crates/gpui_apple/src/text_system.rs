@@ -76,6 +76,9 @@ struct AppleTextSystemState {
     font_ids_by_postscript_name: HashMap<String, FontId>,
     font_ids_by_font_key: HashMap<FontKey, SmallVec<[FontId; 4]>>,
     postscript_names_by_font_id: HashMap<FontId, String>,
+    /// vue-native fork: `font-family` lists and composed families, which Core Text's cascade
+    /// cannot draw: it does not see fonts added from memory.
+    lists: gpui::FontLists,
 }
 
 impl AppleTextSystem {
@@ -89,6 +92,7 @@ impl AppleTextSystem {
             font_ids_by_postscript_name: HashMap::default(),
             font_ids_by_font_key: HashMap::default(),
             postscript_names_by_font_id: HashMap::default(),
+            lists: gpui::FontLists::default(),
         }))
     }
 }
@@ -144,44 +148,23 @@ impl PlatformTextSystem for AppleTextSystem {
             Ok(*font_id)
         } else {
             let mut lock = RwLockUpgradableReadGuard::upgrade(lock);
-            let font_key = FontKey {
-                font_family: font.family.clone(),
-                font_features: font.features.clone(),
-                font_fallbacks: font.fallbacks.clone(),
-            };
-            let candidates = if let Some(font_ids) = lock.font_ids_by_font_key.get(&font_key) {
-                font_ids.as_slice()
-            } else {
-                let font_ids =
-                    lock.load_family(&font.family, &font.features, font.fallbacks.as_ref())?;
-                lock.font_ids_by_font_key.insert(font_key.clone(), font_ids);
-                lock.font_ids_by_font_key[&font_key].as_ref()
-            };
-
-            let candidate_properties = candidates
-                .iter()
-                .map(|font_id| {
-                    let font = &lock.fonts[font_id.0];
-                    let mut properties = font.properties();
-                    properties.weight =
-                        css_weight_of_trait(font.native_font().all_traits().normalized_weight());
-                    properties
-                })
-                .collect::<SmallVec<[_; 4]>>();
-
-            let ix = font_kit::matching::find_best_match(
-                &candidate_properties,
-                &font_kit::properties::Properties {
-                    style: fontkit_style(font.style),
-                    weight: fontkit_weight(font.weight),
-                    stretch: Default::default(),
-                },
-            )?;
-
-            let font_id = candidates[ix];
-            lock.font_selections.insert(font.clone(), font_id);
-            Ok(font_id)
+            if lock.lists.takes(font) {
+                return gpui::resolve_listed_font(&mut *lock, font)
+                    .ok_or_else(|| anyhow!("no family of {:?} resolves", font.family));
+            }
+            lock.plain_font_id(font)
         }
+    }
+
+    fn set_composed_families(&self, families: Vec<(SharedString, gpui::FamilyComposer)>) {
+        let mut state = self.0.write();
+        state.lists.set_composed_families(families);
+        let AppleTextSystemState {
+            lists,
+            font_selections,
+            ..
+        } = &mut *state;
+        font_selections.retain(|font, _| !lists.takes(font));
     }
 
     fn font_metrics(&self, font_id: FontId) -> FontMetrics {
@@ -301,8 +284,71 @@ fn font_smoothing_allowed_by_user() -> bool {
     })
 }
 
+impl gpui::FontListHost for AppleTextSystemState {
+    fn plain_font(&mut self, font: &Font) -> Option<FontId> {
+        self.plain_font_id(font).ok()
+    }
+
+    fn alias_font(&mut self, of: FontId) -> FontId {
+        let font_id = FontId(self.fonts.len());
+        self.fonts.push(self.fonts[of.0].clone());
+        if let Some(name) = self.postscript_names_by_font_id.get(&of).cloned() {
+            self.postscript_names_by_font_id.insert(font_id, name);
+        }
+        font_id
+    }
+
+    fn font_lists(&mut self) -> &mut gpui::FontLists {
+        &mut self.lists
+    }
+}
+
 impl AppleTextSystemState {
+    fn plain_font_id(&mut self, font: &Font) -> Result<FontId> {
+        if let Some(font_id) = self.font_selections.get(font) {
+            return Ok(*font_id);
+        }
+        let font_key = FontKey {
+            font_family: font.family.clone(),
+            font_features: font.features.clone(),
+            font_fallbacks: font.fallbacks.clone(),
+        };
+        let candidates = if let Some(font_ids) = self.font_ids_by_font_key.get(&font_key) {
+            font_ids.as_slice()
+        } else {
+            let font_ids =
+                self.load_family(&font.family, &font.features, font.fallbacks.as_ref())?;
+            self.font_ids_by_font_key.insert(font_key.clone(), font_ids);
+            self.font_ids_by_font_key[&font_key].as_ref()
+        };
+
+        let candidate_properties = candidates
+            .iter()
+            .map(|font_id| {
+                let font = &self.fonts[font_id.0];
+                let mut properties = font.properties();
+                properties.weight =
+                    css_weight_of_trait(font.native_font().all_traits().normalized_weight());
+                properties
+            })
+            .collect::<SmallVec<[_; 4]>>();
+
+        let ix = font_kit::matching::find_best_match(
+            &candidate_properties,
+            &font_kit::properties::Properties {
+                style: fontkit_style(font.style),
+                weight: fontkit_weight(font.weight),
+                stretch: Default::default(),
+            },
+        )?;
+
+        let font_id = candidates[ix];
+        self.font_selections.insert(font.clone(), font_id);
+        Ok(font_id)
+    }
+
     fn add_fonts(&mut self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
+        self.lists.clear_resolved();
         let fonts = fonts
             .into_iter()
             .map(|bytes| match bytes {
@@ -332,10 +378,14 @@ impl AppleTextSystemState {
 
         let mut font_ids = SmallVec::new();
         let mut postscript_names_seen = HashSet::default();
-        let family = self
-            .memory_source
-            .select_family_by_name(name)
-            .or_else(|_| self.system_source.select_family_by_name(name))?;
+        let added = self.memory_source.select_family_by_name(name).ok();
+        // vue-native fork: a font the app added (a web font's `unicode-range` subset) is asked
+        // for by name and draws only the characters it has.
+        let needs_m = added.is_none();
+        let family = match added {
+            Some(family) => family,
+            None => self.system_source.select_family_by_name(name)?,
+        };
         for font in family.fonts() {
             let mut font = font.load()?;
 
@@ -355,7 +405,7 @@ impl AppleTextSystemState {
                 // the Storybook (on macOS).
                 let is_segoe_fluent_icons = font.full_name() == "Segoe Fluent Icons";
 
-                if !has_m_glyph && !is_segoe_fluent_icons {
+                if needs_m && !has_m_glyph && !is_segoe_fluent_icons {
                     // I spent far too long trying to track down why a font missing the 'm'
                     // character wasn't loading. This log statement will hopefully save
                     // someone else from suffering the same fate.
@@ -593,6 +643,11 @@ impl AppleTextSystemState {
     }
 
     fn layout_line(&mut self, text: &str, font_size: Pixels, font_runs: &[FontRun]) -> LineLayout {
+        let fonts = &self.fonts;
+        let split = self.lists.split_runs(text, font_runs, |font_id, c| {
+            fonts[font_id.0].glyph_for_char(c).is_some()
+        });
+        let font_runs: &[FontRun] = &split;
         // Construct the attributed string, converting UTF8 ranges to UTF16 ranges.
         let mut string = CFMutableAttributedString::new();
         let mut max_ascent = 0.0f32;
@@ -687,14 +742,87 @@ impl AppleTextSystemState {
             }
         }
         let typographic_bounds = line.get_typographic_bounds();
+        let notdef_shift = self.draw_last_resort_as_notdef(&mut runs, font_runs, font_size);
         LineLayout {
             runs,
             font_size,
-            width: typographic_bounds.width.into(),
+            width: px(typographic_bounds.width as f32 + notdef_shift),
             ascent: max_ascent.into(),
             descent: max_descent.into(),
             len: text.len(),
         }
+    }
+}
+
+impl AppleTextSystemState {
+    /// vue-native fork: Core Text draws a character no font has with LastResort's symbol for its
+    /// block; DirectWrite and cosmic-text draw the first font's glyph 0 (.notdef), as browsers
+    /// do. Each LastResort glyph becomes glyph 0 of the font its run asked for, and what follows
+    /// moves by the difference of their advances. Returns how much wider the line became.
+    fn draw_last_resort_as_notdef(
+        &self,
+        runs: &mut Vec<ShapedRun>,
+        font_runs: &[FontRun],
+        font_size: Pixels,
+    ) -> f32 {
+        let is_last_resort = |state: &Self, font_id: FontId| {
+            state
+                .postscript_names_by_font_id
+                .get(&font_id)
+                .is_some_and(|name| name == "LastResort")
+        };
+        if !runs.iter().any(|run| is_last_resort(self, run.font_id)) {
+            return 0.;
+        }
+        let advance = |state: &Self, font_id: FontId, glyph_id: GlyphId| {
+            let font = &state.fonts[font_id.0];
+            let units = font.advance(glyph_id.0).map_or(0., |advance| advance.x());
+            units * f32::from(font_size) / font.metrics().units_per_em as f32
+        };
+        let asked_at = |index: usize| {
+            let mut end = 0;
+            font_runs
+                .iter()
+                .find(|run| {
+                    end += run.len;
+                    index < end
+                })
+                .or(font_runs.last())
+                .map(|run| run.font_id)
+        };
+
+        // (x, growth) of each glyph replaced, so a glyph moves by the growth of those left of it.
+        let mut replaced = Vec::new();
+        let mut out: Vec<ShapedRun> = Vec::with_capacity(runs.len());
+        for run in runs.drain(..) {
+            let last_resort = is_last_resort(self, run.font_id);
+            for mut glyph in run.glyphs {
+                let mut font_id = run.font_id;
+                if last_resort && let Some(asked) = asked_at(glyph.index) {
+                    let growth =
+                        advance(self, asked, GlyphId(0)) - advance(self, font_id, glyph.id);
+                    replaced.push((glyph.position.x, growth));
+                    glyph.id = GlyphId(0);
+                    glyph.is_emoji = false;
+                    font_id = asked;
+                }
+                match out.last_mut() {
+                    Some(last) if last.font_id == font_id => last.glyphs.push(glyph),
+                    _ => out.push(ShapedRun::new(font_id, vec![glyph])),
+                }
+            }
+        }
+        for glyph in out.iter_mut().flat_map(|run| run.glyphs.iter_mut()) {
+            let x = glyph.position.x;
+            let shift: f32 = replaced
+                .iter()
+                .filter(|(at, _)| *at < x)
+                .map(|(_, growth)| growth)
+                .sum();
+            glyph.position.x += px(shift);
+        }
+        *runs = out;
+        replaced.iter().map(|(_, growth)| growth).sum()
     }
 }
 
@@ -1028,6 +1156,119 @@ mod tests {
         // Runs of different fonts that both fall back to Geeza Pro for Arabic.
         assert_eq!(glyphs("لا", &[(helvetica, 4)]).len(), 1, "لا as one run");
         assert_eq!(glyphs("لا", &[(helvetica, 2), (times, 2)]).len(), 2);
+    }
+
+    fn lilex_lists() -> AppleTextSystem {
+        let fonts = AppleTextSystem::new();
+        fonts
+            .add_fonts(vec![
+                include_bytes!("../../../assets/fonts/lilex/Lilex-Regular.ttf")
+                    .to_vec()
+                    .into(),
+            ])
+            .unwrap();
+        let digits: gpui::FamilyComposer = Arc::new(|_, _| {
+            vec![gpui::ComposedFace {
+                family: "Lilex".into(),
+                ranges: Arc::from([(0x30, 0x39)]),
+            }]
+        });
+        let wide: gpui::FamilyComposer = Arc::new(|_, _| {
+            vec![gpui::ComposedFace {
+                family: "Lilex".into(),
+                ranges: Arc::from([]),
+            }]
+        });
+        fonts.set_composed_families(vec![("VN Digits".into(), digits), ("VN Wide".into(), wide)]);
+        fonts
+    }
+
+    fn listed(family: &str, fallbacks: &[&str]) -> gpui::Font {
+        let mut listed = font(family);
+        listed.fallbacks = Some(FontFallbacks::from_fonts(
+            fallbacks.iter().map(|f| f.to_string()).collect(),
+        ));
+        listed
+    }
+
+    /// Each glyph's character, font, glyph and x.
+    fn drawn_with(
+        fonts: &AppleTextSystem,
+        text: &str,
+        font: &gpui::Font,
+    ) -> Vec<(char, FontId, GlyphId, f32)> {
+        let font_id = fonts.font_id(font).unwrap();
+        let layout = fonts.layout_line(
+            text,
+            px(16.),
+            &[FontRun {
+                font_id,
+                len: text.len(),
+                tracking: px(0.),
+                word_spacing: px(0.),
+            }],
+        );
+        layout
+            .runs
+            .iter()
+            .flat_map(|run| {
+                run.glyphs.iter().map(|glyph| {
+                    (
+                        text[glyph.index..].chars().next().unwrap(),
+                        run.font_id,
+                        glyph.id,
+                        f32::from(glyph.position.x),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_each_character_takes_the_first_listed_family_that_covers_it() {
+        let fonts = lilex_lists();
+        let helvetica = fonts.font_id(&font("Helvetica")).unwrap();
+        let lilex = fonts.font_id(&font("Lilex")).unwrap();
+        let drawn = drawn_with(&fonts, "a1", &listed("VN Digits", &["Helvetica"]));
+        let drawn_fonts: Vec<_> = drawn.iter().map(|d| (d.0, d.1)).collect();
+        assert_eq!(drawn_fonts, vec![('a', helvetica), ('1', lilex)]);
+
+        // A character the face's range covers but that it has no glyph for goes to the next
+        // family.
+        let lilex_lacks = ('\u{a0}'..'\u{3000}')
+            .find(|&c| {
+                fonts.glyph_for_char(lilex, c).is_none()
+                    && fonts.glyph_for_char(helvetica, c).is_some()
+            })
+            .expect("a character Helvetica has and Lilex lacks");
+        let text = format!("a{lilex_lacks}");
+        let drawn = drawn_with(&fonts, &text, &listed("VN Wide", &["Helvetica"]));
+        let drawn_fonts: Vec<_> = drawn.iter().map(|d| (d.0, d.1)).collect();
+        assert_eq!(drawn_fonts, vec![('a', lilex), (lilex_lacks, helvetica)]);
+    }
+
+    #[test]
+    fn test_a_character_no_font_has_is_the_first_familys_notdef() {
+        let fonts = lilex_lists();
+        let helvetica = fonts.font_id(&font("Helvetica")).unwrap();
+        let notdef = {
+            let state = fonts.0.read();
+            let font = &state.fonts[helvetica.0];
+            font.advance(0).unwrap().x() * 16. / font.metrics().units_per_em as f32
+        };
+        for asked in [font("Helvetica"), listed("Helvetica", &["VN Wide"])] {
+            let drawn = drawn_with(&fonts, "a\u{10FFFD}b", &asked);
+            assert_eq!(drawn.len(), 3);
+            assert_eq!(drawn[0].1, helvetica);
+            assert_eq!(
+                (drawn[1].0, drawn[1].1, drawn[1].2),
+                ('\u{10FFFD}', helvetica, GlyphId(0))
+            );
+            assert!(
+                (drawn[2].3 - drawn[1].3 - notdef).abs() < 0.01,
+                "{drawn:?}, .notdef {notdef}"
+            );
+        }
     }
 
     #[test]

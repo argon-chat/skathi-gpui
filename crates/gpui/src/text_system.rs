@@ -1,18 +1,25 @@
 mod composed_family;
+mod dilated_raster;
 mod experiment;
 mod font_fallbacks;
 mod font_features;
+mod font_list;
 mod line;
 mod line_layout;
 mod line_wrapper;
 
 pub use composed_family::*;
+pub use dilated_raster::{
+    CoverageMask, GlyphOutline, HintMetrics, TextRendering, VerticalHint, dilation_amount,
+    dilation_level, rasterize_dilated, set_text_rendering, text_rendering,
+};
 pub(crate) use experiment::{GlyphTransform, TextSettle, quantize_shifted_glyph_origin};
 pub use experiment::{
     TextExperiment, quantize_glyph_origin, subpixel_variant_offset, text_experiment,
 };
 pub use font_fallbacks::*;
 pub use font_features::*;
+pub use font_list::*;
 pub use line::*;
 pub use line_layout::*;
 pub use line_wrapper::*;
@@ -647,6 +654,77 @@ impl TextSystem {
         }
     }
 
+    /// vue-native fork: how far CSS `line-height: normal` of `font_id` at `font_size` reaches
+    /// above and below the baseline: the rounded ascent and descent with half the rounded line
+    /// gap on each, as Blink unites a fallback font's box with the line's; under `snapped`, the
+    /// snapped box.
+    pub fn normal_line_extent(
+        &self,
+        font_id: FontId,
+        font_size: Pixels,
+        metrics: crate::LineMetrics,
+    ) -> (Pixels, Pixels) {
+        if metrics == crate::LineMetrics::Snapped {
+            return self.line_extent(font_id, font_size, metrics);
+        }
+        self.read_metrics(font_id, |m| {
+            let em = font_size.0 / m.units_per_em as f32;
+            let half_gap = (m.line_gap.max(0.0) * em).round() / 2.;
+            (
+                px((m.ascent.abs() * em).round() + half_gap),
+                px((m.descent.abs() * em).round() + half_gap),
+            )
+        })
+    }
+
+    /// vue-native fork: CSS `font-size-adjust`'s aspect value of `font_id`: its `aspect` metric per
+    /// em, or what CSS assumes where the font lacks it (0.5 for the x-height and the "0", the ascent
+    /// for the cap height, 1 for the ideograph).
+    pub fn font_aspect(&self, font_id: FontId, aspect: crate::FontAspect) -> f32 {
+        use crate::FontAspect;
+        let (em, x_height, cap_height, ascent) = self.read_metrics(font_id, |m| {
+            (
+                m.units_per_em as f32,
+                m.x_height,
+                m.cap_height,
+                m.ascent.abs(),
+            )
+        });
+        let advance = |ch: char| {
+            self.advance(font_id, px(1.), ch)
+                .ok()
+                .map(|size| size.width.0)
+                .filter(|width| *width > 0.)
+        };
+        match aspect {
+            FontAspect::ExHeight if x_height > 0. => x_height / em,
+            FontAspect::ExHeight => 0.5,
+            FontAspect::CapHeight if cap_height > 0. => cap_height / em,
+            FontAspect::CapHeight => ascent / em,
+            FontAspect::ChWidth => advance('0').unwrap_or(0.5),
+            FontAspect::IcWidth => advance('\u{6C34}').unwrap_or(1.),
+        }
+    }
+
+    /// vue-native fork: the size `font` is drawn at for text of `font_size` under CSS
+    /// `font-size-adjust`. Only a number changes the first font's size.
+    pub fn adjusted_font_size(
+        &self,
+        font: &Font,
+        font_size: Pixels,
+        adjust: crate::FontSizeAdjust,
+    ) -> Pixels {
+        let crate::FontSizeAdjust::Ratio(aspect, ratio) = adjust else {
+            return font_size;
+        };
+        let own = self.font_aspect(self.resolve_font(font), aspect);
+        if own > 0. {
+            font_size * (ratio / own)
+        } else {
+            font_size
+        }
+    }
+
     fn read_metrics<T>(&self, font_id: FontId, read: impl FnOnce(&FontMetrics) -> T) -> T {
         let lock = self.font_metrics.upgradable_read();
 
@@ -713,6 +791,11 @@ impl TextSystem {
     /// Returns the dilation level to use for a glyph painted in the given color.
     pub(crate) fn glyph_dilation_for_color(&self, color: Hsla) -> u8 {
         self.platform_text_system.glyph_dilation_for_color(color)
+    }
+
+    /// Whether glyph masks are linear coverage, to be blended without gamma or contrast.
+    pub(crate) fn linear_glyph_coverage(&self) -> bool {
+        self.platform_text_system.linear_glyph_coverage()
     }
 
     /// Returns the text rendering mode recommended by the platform for the given font and size.

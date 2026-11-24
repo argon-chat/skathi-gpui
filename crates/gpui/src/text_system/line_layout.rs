@@ -1,6 +1,6 @@
 use crate::{
-    FontId, GlyphId, Hyphens, LineLeading, LineMetrics, Pixels, Point, SharedString, Size, TabSize,
-    TextSystem, TextWrap, WordBreak, point, px,
+    FontAspect, FontId, GlyphId, Hyphens, LineBoxRules, LineLeading, LineMetrics, Pixels, Point,
+    SharedString, Size, TabSize, TextSystem, TextWrap, WordBreak, point, px,
 };
 use collections::{FxHashMap, FxHashSet};
 use icu_segmenter::{
@@ -80,8 +80,28 @@ pub struct ShapedRun {
     pub descent: Pixels,
     /// vue-native fork: the run holds the place of an [`InlineBox`]; its one glyph is not painted.
     pub inline_box: bool,
+    /// vue-native fork: set for a run in a font other than the one its text asked for, when that
+    /// changes the line: see [`FallbackPlace`]. The layout cache fills it in.
+    pub fallback: Option<FallbackPlace>,
     /// The glyphs that make up this run
     pub glyphs: Vec<ShapedGlyph>,
+}
+
+/// vue-native fork: the place in its line of a run drawn with a fallback font. The run stands where
+/// the font its text asked for would, at the size the text asked for, and under CSS
+/// `line-height: normal` reaches as much further as its own font's box does.
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct FallbackPlace {
+    /// The size the text asked for. The run's own `font_size` differs under `font-size-adjust`.
+    pub size: Pixels,
+    /// The asked font's ascent at `size`.
+    pub ascent: Pixels,
+    /// The asked font's descent at `size`.
+    pub descent: Pixels,
+    /// How much further than the asked font the run's own font reaches above the baseline.
+    pub grow_above: Pixels,
+    /// How much further than the asked font the run's own font reaches below the baseline.
+    pub grow_below: Pixels,
 }
 
 impl ShapedRun {
@@ -93,6 +113,7 @@ impl ShapedRun {
             ascent: px(0.),
             descent: px(0.),
             inline_box: false,
+            fallback: None,
             glyphs,
         }
     }
@@ -104,6 +125,7 @@ impl ShapedRun {
             ascent: self.ascent,
             descent: self.descent,
             inline_box: self.inline_box,
+            fallback: self.fallback,
             glyphs,
         }
     }
@@ -174,6 +196,30 @@ fn line_extent(
         }
         LineLeading::Above => (line_height - descent, descent),
     }
+}
+
+/// vue-native fork: the font `runs` ask for at byte `index`.
+fn asked_font(runs: &[FontRun], index: usize) -> FontId {
+    let mut end = 0;
+    for run in runs {
+        end += run.len;
+        if index < end {
+            return run.font_id;
+        }
+    }
+    runs.last().map_or(FontId(0), |run| run.font_id)
+}
+
+/// vue-native fork: the size `spans` ask for at byte `index`, `font_size` without spans.
+fn asked_size(spans: &[LayoutSpan], font_size: Pixels, index: usize) -> Pixels {
+    let mut end = 0;
+    for span in spans {
+        end += span.len;
+        if index < end {
+            return span.font_size;
+        }
+    }
+    spans.last().map_or(font_size, |span| span.font_size)
 }
 
 /// The visual lines of a layout: all alike unless its runs differ in size or hold inline boxes.
@@ -307,12 +353,12 @@ impl LineLayout {
         None
     }
 
-    /// vue-native fork: whether a run differs from the line in font size or is an inline box,
-    /// which makes each visual line as tall as what it holds.
+    /// vue-native fork: whether a run differs from the line in font size, is an inline box or
+    /// holds a fallback font's place, which makes each visual line as tall as what it holds.
     pub fn has_mixed_runs(&self) -> bool {
         self.runs
             .iter()
-            .any(|run| run.inline_box || run.font_size != self.font_size)
+            .any(|run| run.inline_box || run.fallback.is_some() || run.font_size != self.font_size)
     }
 
     /// vue-native fork: the visual lines of this layout broken at `wrap_boundaries`, for
@@ -381,12 +427,19 @@ impl LineLayout {
         if run.inline_box {
             return (run.ascent, run.descent);
         }
-        let run_line_height = if self.font_size > px(0.) {
-            line_height * (run.font_size / self.font_size)
-        } else {
-            line_height
+        let scaled = |size: Pixels| {
+            if self.font_size > px(0.) {
+                line_height * (size / self.font_size)
+            } else {
+                line_height
+            }
         };
-        line_extent(run_line_height, run.ascent, run.descent, leading)
+        if let Some(place) = run.fallback {
+            let (above, below) =
+                line_extent(scaled(place.size), place.ascent, place.descent, leading);
+            return (above + place.grow_above, below + place.grow_below);
+        }
+        line_extent(scaled(run.font_size), run.ascent, run.descent, leading)
     }
 
     /// Split this layout at a byte index, returning `(prefix, suffix)`.
@@ -1000,6 +1053,8 @@ pub(crate) struct LineLayoutCache {
     state: RefCell<LineLayoutCacheState>,
     wrap_scratch: RefCell<WrapScratch>,
     text_system: Arc<TextSystem>,
+    /// vue-native fork: [`Self::asked_extent`] by font and size.
+    asked_extents: RefCell<FxHashMap<(FontId, u32), (Pixels, Pixels)>>,
     /// Advances when [`TextSystem::add_fonts`] successfully changes the font database.
     font_generation: Arc<AtomicUsize>,
     /// Records the generation represented by both frame caches.
@@ -1040,6 +1095,7 @@ impl LineLayoutCache {
             state: RefCell::default(),
             wrap_scratch: RefCell::default(),
             text_system,
+            asked_extents: RefCell::default(),
             font_generation,
             cached_font_generation: AtomicUsize::new(cached_font_generation),
         }
@@ -1269,15 +1325,8 @@ impl LineLayoutCache {
         } else {
             drop(state);
             let text = SharedString::from(text);
-            let unwrapped_layout = self.layout_line_with::<&SharedString>(
-                &text,
-                font_size,
-                runs,
-                spans,
-                None,
-                rules.tab_size,
-                rules.line_box.metrics,
-            );
+            let unwrapped_layout =
+                self.layout_line_with::<&SharedString>(&text, font_size, runs, spans, None, rules);
             let wrapping = if let Some(wrap_width) = wrap_width {
                 let hyphen_width = self.hyphen_width(&text, font_size, runs, rules);
                 unwrapped_layout.wrap(
@@ -1338,13 +1387,13 @@ impl LineLayoutCache {
             runs,
             spans,
             force_width,
-            TabSize::INITIAL,
-            LineMetrics::Auto,
+            TextWrap::default(),
         )
     }
 
-    /// vue-native fork: [`Self::layout_line`] with tabs advancing to stops `tab_size` apart, and
-    /// each run's box under `metrics`.
+    /// vue-native fork: [`Self::layout_line`] under `rules`: tabs advancing to stops `tab_size`
+    /// apart, each run's box under `line_box`, fallback fonts sized by `font_size_adjust`. The
+    /// breaking rules are not read.
     pub fn layout_line_with<Text>(
         &self,
         text: Text,
@@ -1352,19 +1401,20 @@ impl LineLayoutCache {
         runs: &[FontRun],
         spans: &[LayoutSpan],
         force_width: Option<Pixels>,
-        tab_size: TabSize,
-        metrics: LineMetrics,
+        rules: TextWrap,
     ) -> Arc<LineLayout>
     where
         Text: AsRef<str>,
         SharedString: From<Text>,
     {
         let _font_generation = self.clear_if_font_generation_changed();
-        let mut wrap = TextWrap {
-            tab_size,
+        let wrap = TextWrap {
+            tab_size: rules.tab_size,
+            line_box: rules.line_box,
+            font_size_adjust: rules.font_size_adjust,
             ..TextWrap::default()
         };
-        wrap.line_box.metrics = metrics;
+        let (tab_size, metrics) = (rules.tab_size, rules.line_box.metrics);
         let key = &CacheKeyRef {
             text: text.as_ref(),
             font_size,
@@ -1408,6 +1458,12 @@ impl LineLayoutCache {
             } else {
                 self.layout_spans(&text, font_size, runs, spans)
             };
+            if let Some(aspect) = rules.font_size_adjust
+                && let Some(adjusted) =
+                    self.adjust_fallback_sizes(&text, font_size, runs, spans, &layout, aspect)
+            {
+                layout = adjusted;
+            }
             count_shape(shaping);
 
             // Spacing first: `force_width` assigns each cluster an ABSOLUTE
@@ -1423,6 +1479,7 @@ impl LineLayoutCache {
             if metrics == LineMetrics::Snapped {
                 self.snap_extents(&mut layout, font_size, runs);
             }
+            self.place_fallback_runs(&mut layout, font_size, runs, spans, rules.line_box);
 
             let key = Arc::new(CacheKey {
                 text,
@@ -1485,6 +1542,7 @@ impl LineLayoutCache {
                     ascent: inline_box.ascent,
                     descent: inline_box.descent,
                     inline_box: true,
+                    fallback: None,
                     glyphs: vec![ShapedGlyph {
                         id: GlyphId(0),
                         position: point(layout.width, px(0.)),
@@ -1549,6 +1607,190 @@ impl LineLayoutCache {
         layout.descent = descent;
     }
 
+    /// vue-native fork: `layout` shaped again with each stretch a fallback font draws at the size
+    /// that gives the font the asked font's `aspect` (CSS `font-size-adjust`). `None` when no
+    /// stretch changes size.
+    fn adjust_fallback_sizes(
+        &self,
+        text: &str,
+        font_size: Pixels,
+        runs: &[FontRun],
+        spans: &[LayoutSpan],
+        layout: &LineLayout,
+        aspect: FontAspect,
+    ) -> Option<LineLayout> {
+        let mut factors: SmallVec<[(usize, f32); 8]> = SmallVec::new();
+        for run in &layout.runs {
+            let Some(start) = run.glyphs.iter().map(|glyph| glyph.index).min() else {
+                continue;
+            };
+            let asked = asked_font(runs, start);
+            let factor = if run.inline_box || run.font_id == asked {
+                1.
+            } else {
+                let own = self.text_system.font_aspect(run.font_id, aspect);
+                let wanted = self.text_system.font_aspect(asked, aspect);
+                if own > 0. && wanted > 0. {
+                    wanted / own
+                } else {
+                    1.
+                }
+            };
+            factors.push((start, factor));
+        }
+        if factors
+            .iter()
+            .all(|&(_, factor)| (factor - 1.).abs() < 1e-3)
+        {
+            return None;
+        }
+        factors.sort_by_key(|&(start, _)| start);
+
+        let whole = [LayoutSpan {
+            len: text.len(),
+            font_size,
+            inline_box: None,
+        }];
+        let base = if spans.is_empty() { &whole[..] } else { spans };
+        let mut adjusted: Vec<LayoutSpan> = Vec::with_capacity(base.len() + factors.len());
+        let mut span_start = 0;
+        for span in base {
+            let span_end = (span_start + span.len).min(text.len());
+            if span.inline_box.is_some() {
+                adjusted.push(*span);
+                span_start = span_end;
+                continue;
+            }
+            let mut at = span_start;
+            while at < span_end {
+                let next = factors.partition_point(|&(start, _)| start <= at);
+                let factor = next.checked_sub(1).map_or(1., |ix| factors[ix].1);
+                let end = factors
+                    .get(next)
+                    .map_or(span_end, |&(start, _)| start.min(span_end));
+                let size = span.font_size * factor;
+                match adjusted.last_mut() {
+                    Some(last) if last.inline_box.is_none() && last.font_size == size => {
+                        last.len += end - at;
+                    }
+                    _ => adjusted.push(LayoutSpan {
+                        len: end - at,
+                        font_size: size,
+                        inline_box: None,
+                    }),
+                }
+                at = end;
+            }
+            span_start = span_end;
+        }
+        Some(self.layout_spans(text, font_size, runs, &adjusted))
+    }
+
+    /// vue-native fork: a [`FallbackPlace`] for each run drawn with a font its text did not ask
+    /// for, where that changes the line: under `line-height: normal` when the font's box reaches
+    /// past the asked font's, and when `font-size-adjust` shaped it at another size. The other text
+    /// runs of such a line take the asked font's own extent, not the one the platform reports for
+    /// the whole line, which already counts the fallback font.
+    fn place_fallback_runs(
+        &self,
+        layout: &mut LineLayout,
+        font_size: Pixels,
+        runs: &[FontRun],
+        spans: &[LayoutSpan],
+        line_box: LineBoxRules,
+    ) {
+        let metrics = line_box.metrics;
+        let mut placed = false;
+        for ix in 0..layout.runs.len() {
+            let run = &layout.runs[ix];
+            if run.inline_box {
+                continue;
+            }
+            let Some(start) = run.glyphs.iter().map(|glyph| glyph.index).min() else {
+                continue;
+            };
+            let asked = asked_font(runs, start);
+            let size = asked_size(spans, font_size, start);
+            if run.font_id == asked && run.font_size == size {
+                continue;
+            }
+            let (mut grow_above, mut grow_below) = (px(0.), px(0.));
+            if let Some(line_height) = line_box.normal
+                && run.font_id != asked
+            {
+                let line_height = if font_size > px(0.) {
+                    line_height * (size / font_size)
+                } else {
+                    line_height
+                };
+                let (own_above, own_below) =
+                    self.text_system
+                        .normal_line_extent(run.font_id, run.font_size, metrics);
+                let (_, asked_below) = self.text_system.normal_line_extent(asked, size, metrics);
+                grow_above = (own_above - (line_height - asked_below)).max(px(0.));
+                grow_below = (own_below - asked_below).max(px(0.));
+            }
+            if grow_above == px(0.) && grow_below == px(0.) && run.font_size == size {
+                continue;
+            }
+            let (ascent, descent) = self.asked_extent(asked, size, metrics);
+            layout.runs[ix].fallback = Some(FallbackPlace {
+                size,
+                ascent,
+                descent,
+                grow_above,
+                grow_below,
+            });
+            placed = true;
+        }
+        if !placed || metrics == LineMetrics::Snapped {
+            return;
+        }
+        for ix in 0..layout.runs.len() {
+            let run = &layout.runs[ix];
+            if run.inline_box || run.fallback.is_some() {
+                continue;
+            }
+            let Some(start) = run.glyphs.iter().map(|glyph| glyph.index).min() else {
+                continue;
+            };
+            let (ascent, descent) =
+                self.asked_extent(asked_font(runs, start), run.font_size, metrics);
+            let run = &mut layout.runs[ix];
+            (run.ascent, run.descent) = (ascent, descent);
+        }
+    }
+
+    /// vue-native fork: how far a line of `font_id` alone reaches above and below the baseline,
+    /// as the platform lays it out (`snapped`: the font's snapped box).
+    fn asked_extent(
+        &self,
+        font_id: FontId,
+        font_size: Pixels,
+        metrics: LineMetrics,
+    ) -> (Pixels, Pixels) {
+        if metrics == LineMetrics::Snapped {
+            return self.text_system.line_extent(font_id, font_size, metrics);
+        }
+        let key = (font_id, f32::from(font_size).to_bits());
+        if let Some(extent) = self.asked_extents.borrow().get(&key) {
+            return *extent;
+        }
+        let line = self.text_system.platform_text_system.layout_line(
+            " ",
+            font_size,
+            &[FontRun {
+                len: 1,
+                font_id,
+                tracking: px(0.),
+                word_spacing: px(0.),
+            }],
+        );
+        let extent = (line.ascent, line.descent);
+        self.asked_extents.borrow_mut().insert(key, extent);
+        extent
+    }
+
     fn clear_if_font_generation_changed(&self) -> usize {
         let font_generation = self.font_generation.load(Ordering::Acquire);
         if self.cached_font_generation.load(Ordering::Acquire) == font_generation {
@@ -1561,6 +1803,7 @@ impl LineLayoutCache {
         }
 
         *state = LineLayoutCacheState::default();
+        self.asked_extents.borrow_mut().clear();
         self.cached_font_generation
             .store(font_generation, Ordering::Release);
         font_generation
@@ -1996,7 +2239,11 @@ pub(super) mod tests {
         let text_system = system_font(None);
         let font = font(".ZedMono");
         let rules = |metrics, leading| TextWrap {
-            line_box: crate::LineBoxRules { metrics, leading },
+            line_box: crate::LineBoxRules {
+                metrics,
+                leading,
+                normal: None,
+            },
             ..TextWrap::default()
         };
         let boxes = |text: &str, runs: &[TextRun], line_height: f32, rules: TextWrap| {
@@ -2037,6 +2284,237 @@ pub(super) mod tests {
         assert_eq!((ascent, descent), (px(12.), px(5.)));
         let (ascent, _) = text_system.line_extent(FontId(1), px(16.), LineMetrics::Auto);
         assert_close(ascent, 16. * 1980. / 2048., "ascent");
+    }
+
+    /// Font 1, asked for: 800 / 200 per 1000, x-height 500, a glyph half the size wide. Characters
+    /// from U+3000 fall back to font 2 (1100 / 300, x-height 400, a glyph the size wide), or to
+    /// font 3 (700 / 200) when `small_fallback`. A line reaches as far as the fonts it uses, as
+    /// DirectWrite and CoreText report it.
+    struct FallbackTextSystem {
+        small_fallback: bool,
+    }
+
+    impl FallbackTextSystem {
+        fn metrics(font_id: FontId) -> (f32, f32, f32) {
+            match font_id.0 {
+                2 => (1100., 300., 400.),
+                3 => (700., 200., 500.),
+                _ => (800., 200., 500.),
+            }
+        }
+
+        fn font_for(&self, ch: char, asked: FontId) -> FontId {
+            match ch {
+                _ if ch < '\u{3000}' => asked,
+                _ if self.small_fallback => FontId(3),
+                _ => FontId(2),
+            }
+        }
+    }
+
+    impl PlatformTextSystem for FallbackTextSystem {
+        fn add_fonts(&self, _: Vec<std::borrow::Cow<'static, [u8]>>) -> Result<()> {
+            Ok(())
+        }
+
+        fn all_font_names(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn font_id(&self, _: &Font) -> Result<FontId> {
+            Ok(FontId(1))
+        }
+
+        fn font_metrics(&self, font_id: FontId) -> FontMetrics {
+            let (ascent, descent, x_height) = Self::metrics(font_id);
+            FontMetrics {
+                units_per_em: 1000,
+                ascent,
+                descent: -descent,
+                line_gap: 0.,
+                x_height,
+                ..NoopTextSystem.font_metrics(font_id)
+            }
+        }
+
+        fn typographic_bounds(&self, font_id: FontId, glyph_id: GlyphId) -> Result<Bounds<f32>> {
+            NoopTextSystem.typographic_bounds(font_id, glyph_id)
+        }
+
+        fn advance(&self, font_id: FontId, glyph_id: GlyphId) -> Result<Size<f32>> {
+            NoopTextSystem.advance(font_id, glyph_id)
+        }
+
+        fn glyph_for_char(&self, font_id: FontId, ch: char) -> Option<GlyphId> {
+            NoopTextSystem.glyph_for_char(font_id, ch)
+        }
+
+        fn glyph_raster_bounds(&self, _: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
+            Ok(Default::default())
+        }
+
+        fn rasterize_glyph(
+            &self,
+            _: &RenderGlyphParams,
+            bounds: Bounds<DevicePixels>,
+        ) -> Result<(Size<DevicePixels>, Vec<u8>)> {
+            Ok((bounds.size, Vec::new()))
+        }
+
+        fn layout_line(&self, text: &str, font_size: Pixels, font_runs: &[FontRun]) -> LineLayout {
+            let mut layout = LineLayout {
+                font_size,
+                len: text.len(),
+                ..Default::default()
+            };
+            for (index, ch) in text.char_indices() {
+                let font_id = self.font_for(ch, asked_font(font_runs, index));
+                let (ascent, descent, _) = Self::metrics(font_id);
+                layout.ascent = layout.ascent.max(font_size * (ascent / 1000.));
+                layout.descent = layout.descent.max(font_size * (descent / 1000.));
+                let glyph = ShapedGlyph {
+                    id: GlyphId(1),
+                    position: point(layout.width, px(0.)),
+                    index,
+                    is_emoji: false,
+                };
+                layout.width += font_size * if font_id == FontId(2) { 1. } else { 0.5 };
+                match layout.runs.last_mut() {
+                    Some(run) if run.font_id == font_id => run.glyphs.push(glyph),
+                    _ => layout.runs.push(ShapedRun::new(font_id, vec![glyph])),
+                }
+            }
+            layout
+        }
+
+        fn recommended_rendering_mode(&self, _: FontId, _: Pixels) -> crate::TextRenderingMode {
+            crate::TextRenderingMode::Grayscale
+        }
+    }
+
+    fn with_fallback(small_fallback: bool) -> WindowTextSystem {
+        WindowTextSystem::new(Arc::new(TextSystem::new(Arc::new(FallbackTextSystem {
+            small_fallback,
+        }))))
+    }
+
+    fn fallback_lines(
+        text_system: &WindowTextSystem,
+        text: &str,
+        wrap_width: Option<f32>,
+        rules: TextWrap,
+    ) -> (SmallVec<[LineBox; 1]>, Arc<WrappedLineLayout>) {
+        let runs = [TextRun {
+            len: text.len(),
+            font: font("Asked"),
+            ..Default::default()
+        }];
+        let lines = text_system
+            .shape_text_with(
+                text.to_owned().into(),
+                px(10.),
+                &runs,
+                wrap_width.map(px),
+                None,
+                rules,
+            )
+            .unwrap();
+        let layout = lines[0].layout.clone();
+        (layout.line_boxes(px(10.)), layout)
+    }
+
+    fn normal(metrics: LineMetrics) -> TextWrap {
+        TextWrap {
+            line_box: crate::LineBoxRules {
+                metrics,
+                normal: Some(px(10.)),
+                ..Default::default()
+            },
+            ..TextWrap::default()
+        }
+    }
+
+    #[test]
+    fn under_line_height_normal_a_taller_fallback_font_grows_its_line() {
+        let text_system = with_fallback(false);
+        // The asked font's normal line is 8 + 2 at 10 px; the fallback font's box is 11 + 3.
+        let (boxes, _) =
+            fallback_lines(&text_system, "ab\u{6F22}", None, normal(LineMetrics::Auto));
+        assert_box(boxes[0], 0., 14., 11.);
+
+        // Wrapped, only the line that holds the fallback glyph grows.
+        let (boxes, layout) = fallback_lines(
+            &text_system,
+            "ab \u{6F22}",
+            Some(16.),
+            normal(LineMetrics::Auto),
+        );
+        assert_eq!(layout.wrap_boundaries.len(), 1);
+        assert_box(boxes[0], 0., 10., 8.);
+        assert_box(boxes[1], 10., 14., 11.);
+
+        // Snapped: the same boxes in whole pixels.
+        let (boxes, _) = fallback_lines(
+            &text_system,
+            "ab\u{6F22}",
+            None,
+            normal(LineMetrics::Snapped),
+        );
+        assert_box(boxes[0], 0., 14., 11.);
+    }
+
+    #[test]
+    fn lines_without_a_taller_fallback_font_keep_the_asked_fonts_height() {
+        let text_system = with_fallback(false);
+        let (boxes, layout) = fallback_lines(&text_system, "abc", None, normal(LineMetrics::Auto));
+        assert!(!layout.unwrapped_layout.has_mixed_runs());
+        assert_box(boxes[0], 0., 10., 8.);
+
+        // A declared line height is the line's, whatever font draws its glyphs.
+        let (boxes, layout) = fallback_lines(&text_system, "ab\u{6F22}", None, TextWrap::default());
+        assert!(!layout.unwrapped_layout.has_mixed_runs());
+        assert_eq!(boxes[0].height, px(10.));
+
+        // A fallback font that fits in the asked font's box changes nothing.
+        let (boxes, layout) = fallback_lines(
+            &with_fallback(true),
+            "ab\u{6F22}",
+            None,
+            normal(LineMetrics::Auto),
+        );
+        assert!(!layout.unwrapped_layout.has_mixed_runs());
+        assert_box(boxes[0], 0., 10., 8.);
+    }
+
+    #[test]
+    fn font_size_adjust_sizes_a_fallback_font_to_the_asked_fonts_x_height() {
+        let text_system = with_fallback(false);
+        let rules = TextWrap {
+            font_size_adjust: Some(FontAspect::ExHeight),
+            ..TextWrap::default()
+        };
+        let (boxes, layout) = fallback_lines(&text_system, "ab\u{6F22}c", None, rules);
+        let runs = &layout.unwrapped_layout.runs;
+        let sizes: Vec<_> = runs
+            .iter()
+            .map(|run| (run.font_id, run.font_size))
+            .collect();
+        // 500 / 400 of 10 px.
+        assert_eq!(
+            sizes,
+            vec![
+                (FontId(1), px(10.)),
+                (FontId(2), px(12.5)),
+                (FontId(1), px(10.))
+            ]
+        );
+        assert_close(
+            runs[2].glyphs[0].position.x,
+            10. + 12.5,
+            "after the fallback glyph",
+        );
+        // The adjusted run keeps the line's height.
+        assert_box(boxes[0], 0., 10., 8.);
     }
 
     #[test]
@@ -2305,6 +2783,7 @@ pub(super) mod tests {
                 ascent: px(12.0),
                 descent: px(4.0),
                 inline_box: false,
+                fallback: None,
                 font_id: FontId(0),
                 glyphs,
             }],
@@ -2521,6 +3000,7 @@ pub(super) mod tests {
             hyphens,
             tab_size: crate::TabSize::INITIAL,
             line_box: Default::default(),
+            font_size_adjust: None,
         }
     }
 
@@ -2532,7 +3012,9 @@ pub(super) mod tests {
         line_box: crate::LineBoxRules {
             metrics: LineMetrics::Auto,
             leading: LineLeading::Split,
+            normal: None,
         },
+        font_size_adjust: None,
     };
 
     /// Where `text` breaks at `width`, and how wide its widest overflowing line is.

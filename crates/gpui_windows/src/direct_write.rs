@@ -65,17 +65,7 @@ struct FontInfo {
 
 /// vue-native fork: the members of a composed family's font, as resolved for
 /// its weight and style.
-#[derive(Debug)]
-struct Composite {
-    /// In the order they are tried for a character.
-    faces: Vec<ComposedFace>,
-    /// `faces[i]`'s font.
-    ids: Vec<FontId>,
-    /// What draws a character no member covers: the next family of the
-    /// font's `fallbacks`, else the face that stands for the family (whose
-    /// own DirectWrite fallback takes what it has no glyph for).
-    rest: FontId,
-}
+type Composite = FontList;
 
 pub(crate) struct DirectWriteTextSystem {
     components: DirectWriteComponents,
@@ -263,6 +253,18 @@ impl PlatformTextSystem for DirectWriteTextSystem {
             TextRenderingMode::Grayscale
         }
     }
+
+    fn glyph_dilation_for_color(&self, color: Hsla) -> u8 {
+        if crate::skathi_raster::enabled() {
+            crate::skathi_raster::dilation_for_color(color)
+        } else {
+            0
+        }
+    }
+
+    fn linear_glyph_coverage(&self) -> bool {
+        crate::skathi_raster::enabled()
+    }
 }
 
 impl DirectWriteState {
@@ -273,6 +275,15 @@ impl DirectWriteState {
     ) -> Option<FontId> {
         if let Some(composer) = self.composed.get(&font.family.to_lowercase()).cloned() {
             let font_id = self.select_composed_font(components, font, &composer)?;
+            self.font_to_font_id.insert(font.clone(), font_id);
+            return Some(font_id);
+        }
+        if font
+            .fallbacks
+            .as_ref()
+            .is_some_and(|fallbacks| !fallbacks.fallback_list().is_empty())
+        {
+            let font_id = self.select_listed_font(components, font)?;
             self.font_to_font_id.insert(font.clone(), font_id);
             return Some(font_id);
         }
@@ -409,17 +420,7 @@ impl DirectWriteState {
                 ids.push(font_id);
             }
         }
-        let next = font.fallbacks.as_ref().and_then(|fallbacks| {
-            let (first, rest) = fallbacks.fallback_list().split_first()?;
-            let next = Font {
-                family: first.clone().into(),
-                features: font.features.clone(),
-                fallbacks: (!rest.is_empty()).then(|| FontFallbacks::from_fonts(rest.to_vec())),
-                weight: font.weight,
-                style: font.style,
-            };
-            self.resolve_font(components, &next)
-        });
+        let next = self.resolve_next_family(components, font);
         let spacer = faces
             .iter()
             .position(|face| face.covers(' '))
@@ -427,75 +428,82 @@ impl DirectWriteState {
         let stands_for = spacer.or(next).or_else(|| ids.first().copied())?;
         let rest = next.unwrap_or(stands_for);
         let mut info = self.fonts[stands_for.0].clone();
-        info.composite = Some(Arc::new(Composite { faces, ids, rest }));
+        info.composite = Some(Arc::new(Composite {
+            faces,
+            ids,
+            rest,
+            primary: stands_for,
+        }));
         let font_id = FontId(self.fonts.len());
         self.fonts.push(info);
         Some(font_id)
     }
 
-    /// vue-native fork: `runs` with every run of a composed family's font
-    /// replaced by runs of its members, split by character
-    /// ([`gpui::split_by_face`]). A character no member covers goes to the
-    /// font's `rest`, split again if that is composed too. Pieces of one run
-    /// that land in the same font are one run; runs are never merged across
-    /// the runs given, which may differ in spacing.
-    fn split_composed_runs(&self, text: &str, runs: &[FontRun]) -> Vec<FontRun> {
-        fn split(
-            state: &DirectWriteState,
-            text: &str,
-            run: &FontRun,
-            font_id: FontId,
-            depth: usize,
-            out: &mut Vec<FontRun>,
-        ) {
-            match &state.fonts[font_id.0].composite {
-                // Each level is one family of a `fallbacks` list; the bound
-                // is only against a list that names itself.
-                Some(composite) if depth < 16 => {
-                    let mut at = 0;
-                    for (len, face) in split_by_face(text, &composite.faces) {
-                        let piece = &text[at..at + len];
-                        at += len;
-                        match face {
-                            Some(i) => out.push(FontRun {
-                                len,
-                                font_id: composite.ids[i],
-                                ..*run
-                            }),
-                            None => split(state, piece, run, composite.rest, depth + 1, out),
-                        }
-                    }
-                }
-                // A composed font shapes as the face that stands for it.
-                _ => out.push(FontRun {
-                    len: text.len(),
-                    font_id,
-                    ..*run
-                }),
-            }
-        }
+    /// vue-native fork: the font of an installed family followed by `font.fallbacks`, as CSS's
+    /// `font-family` list draws it: each character with the first family that has a glyph for
+    /// it, and one no family has with this family, by DirectWrite's own fallback. A family of the
+    /// list may be composed. When this family does not resolve, the rest of the list stands
+    /// for it.
+    fn select_listed_font(
+        &mut self,
+        components: &DirectWriteComponents,
+        font: &Font,
+    ) -> Option<FontId> {
+        let own = Font {
+            fallbacks: None,
+            ..font.clone()
+        };
+        let own = self.resolve_font(components, &own);
+        let next = self.resolve_next_family(components, font);
+        let (Some(own), Some(next)) = (own, next) else {
+            return own.or(next);
+        };
+        let mut info = self.fonts[own.0].clone();
+        info.composite = Some(Arc::new(Composite {
+            faces: vec![ComposedFace {
+                family: font.family.clone(),
+                ranges: Arc::from([]),
+            }],
+            ids: vec![own],
+            rest: next,
+            primary: own,
+        }));
+        let font_id = FontId(self.fonts.len());
+        self.fonts.push(info);
+        Some(font_id)
+    }
 
-        let mut out: Vec<FontRun> = Vec::with_capacity(runs.len() + 2);
-        let mut pieces = Vec::new();
-        let mut offset = 0;
-        for run in runs {
-            let piece = &text[offset..offset + run.len];
-            offset += run.len;
-            pieces.clear();
-            split(self, piece, run, run.font_id, 0, &mut pieces);
-            let start = out.len();
-            for piece in pieces.drain(..) {
-                if out.len() > start
-                    && let Some(last) = out.last_mut()
-                    && last.font_id == piece.font_id
-                {
-                    last.len += piece.len;
-                } else {
-                    out.push(piece);
-                }
-            }
-        }
-        out
+    /// vue-native fork: the first family of `font.fallbacks`, with the others as its own.
+    fn resolve_next_family(
+        &mut self,
+        components: &DirectWriteComponents,
+        font: &Font,
+    ) -> Option<FontId> {
+        let (first, rest) = font.fallbacks.as_ref()?.fallback_list().split_first()?;
+        let next = Font {
+            family: first.clone().into(),
+            features: font.features.clone(),
+            fallbacks: (!rest.is_empty()).then(|| FontFallbacks::from_fonts(rest.to_vec())),
+            weight: font.weight,
+            style: font.style,
+        };
+        self.resolve_font(components, &next)
+    }
+
+    /// vue-native fork: whether `font_id`'s face has a glyph for `c`.
+    fn has_glyph(&self, font_id: FontId, c: char) -> bool {
+        unsafe { self.fonts[font_id.0].font_face.HasCharacter(c as u32) }.as_bool()
+    }
+
+    /// vue-native fork: `runs` with every run of a composed or listed font replaced by runs of
+    /// its members ([`gpui::split_font_runs`]).
+    fn split_composed_runs(&self, text: &str, runs: &[FontRun]) -> Vec<FontRun> {
+        split_font_runs(
+            text,
+            runs,
+            |font_id| self.fonts[font_id.0].composite.as_deref(),
+            |font_id, c| self.has_glyph(font_id, c),
+        )
     }
 
     fn add_fonts(
@@ -1191,6 +1199,9 @@ impl DirectWriteState {
         components: &DirectWriteComponents,
         params: &RenderGlyphParams,
     ) -> Result<Bounds<DevicePixels>> {
+        if crate::skathi_raster::enabled() && !params.is_emoji {
+            return crate::skathi_raster::raster_bounds(self.shaping_face(params), params);
+        }
         let color_layers = if params.is_emoji {
             self.color_layers(components, params)
                 .context("Failed to measure color glyph layers")
@@ -1254,6 +1265,11 @@ impl DirectWriteState {
     ) -> Result<(Size<DevicePixels>, Vec<u8>)> {
         if glyph_bounds.size.width.0 == 0 || glyph_bounds.size.height.0 == 0 {
             anyhow::bail!("glyph bounds are empty");
+        }
+        if crate::skathi_raster::enabled() && !params.is_emoji {
+            let face = self.shaping_face(params);
+            let mask = crate::skathi_raster::rasterize(face, params, glyph_bounds)?;
+            return Ok((glyph_bounds.size, mask));
         }
 
         let bitmap_data = if params.is_emoji {
@@ -2384,6 +2400,10 @@ fn font_table<T>(
         Some(value)
     }
 }
+
+#[cfg(test)]
+#[path = "direct_write_fallback_tests.rs"]
+mod fallback_tests;
 
 #[cfg(test)]
 mod tests {

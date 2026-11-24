@@ -61,6 +61,8 @@ struct CosmicTextSystemState {
     missing_glyph_sink: Option<Arc<dyn MissingGlyphSink>>,
     /// Lines laid out since cosmic-text's shape-run cache was last trimmed.
     shaped_lines: u32,
+    /// vue-native fork: `font-family` lists and composed families.
+    lists: gpui::FontLists,
 }
 
 /// cosmic-text shapes a word whose glyph no font has once with every installed face, so without
@@ -150,6 +152,7 @@ impl CosmicTextSystem {
             system_font_fallback: system_font_fallback.to_string(),
             missing_glyph_sink: None,
             shaped_lines: 0,
+            lists: gpui::FontLists::default(),
         }))
     }
 
@@ -170,6 +173,7 @@ impl CosmicTextSystem {
             system_font_fallback: system_font_fallback.to_string(),
             missing_glyph_sink: None,
             shaped_lines: 0,
+            lists: gpui::FontLists::default(),
         }))
     }
 }
@@ -177,6 +181,10 @@ impl CosmicTextSystem {
 impl PlatformTextSystem for CosmicTextSystem {
     fn add_fonts(&self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
         self.0.write().add_fonts(fonts)
+    }
+
+    fn set_composed_families(&self, families: Vec<(SharedString, gpui::FamilyComposer)>) {
+        self.0.write().lists.set_composed_families(families);
     }
 
     fn set_missing_glyph_sink(&self, sink: Option<Arc<dyn MissingGlyphSink>>) {
@@ -199,23 +207,11 @@ impl PlatformTextSystem for CosmicTextSystem {
 
     fn font_id(&self, font: &Font) -> Result<FontId> {
         let mut state = self.0.write();
-        let key = FontKey::new(
-            font.family.clone(),
-            font.features.clone(),
-            font.fallbacks.clone(),
-        );
-        let candidates = if let Some(font_ids) = state.font_ids_by_family_cache.get(&key) {
-            font_ids.as_slice()
-        } else {
-            let font_ids =
-                state.load_family(&font.family, &font.features, font.fallbacks.as_ref())?;
-            state.font_ids_by_family_cache.insert(key.clone(), font_ids);
-            state.font_ids_by_family_cache[&key].as_ref()
-        };
-
-        let ix = find_best_match(font, candidates, &state)?;
-
-        Ok(candidates[ix])
+        if state.lists.takes(font) {
+            return gpui::resolve_listed_font(&mut *state, font)
+                .with_context(|| format!("no family of {:?} resolves", font.family));
+        }
+        state.plain_font_id(font)
     }
 
     fn prewarm_fonts(&self, font_ids: &[FontId]) {
@@ -295,11 +291,65 @@ impl PlatformTextSystem for CosmicTextSystem {
     ) -> TextRenderingMode {
         TextRenderingMode::Subpixel
     }
+
+    fn glyph_dilation_for_color(&self, color: gpui::Hsla) -> u8 {
+        if crate::skathi_raster::enabled() {
+            crate::skathi_raster::dilation_for_color(color)
+        } else {
+            0
+        }
+    }
+
+    fn linear_glyph_coverage(&self) -> bool {
+        crate::skathi_raster::enabled()
+    }
+}
+
+impl gpui::FontListHost for CosmicTextSystemState {
+    fn plain_font(&mut self, font: &Font) -> Option<FontId> {
+        self.plain_font_id(font).ok()
+    }
+
+    fn alias_font(&mut self, of: FontId) -> FontId {
+        let of = &self.loaded_fonts[of.0];
+        let alias = LoadedFont {
+            font: of.font.clone(),
+            features: of.features.clone(),
+            is_known_emoji_font: of.is_known_emoji_font,
+            user_fallback_chain: Arc::from(Vec::new()),
+        };
+        self.loaded_fonts.push(alias);
+        FontId(self.loaded_fonts.len() - 1)
+    }
+
+    fn font_lists(&mut self) -> &mut gpui::FontLists {
+        &mut self.lists
+    }
 }
 
 impl CosmicTextSystemState {
     fn loaded_font(&self, font_id: FontId) -> &LoadedFont {
         &self.loaded_fonts[font_id.0]
+    }
+
+    fn plain_font_id(&mut self, font: &Font) -> Result<FontId> {
+        let key = FontKey::new(
+            font.family.clone(),
+            font.features.clone(),
+            font.fallbacks.clone(),
+        );
+        let candidates = if let Some(font_ids) = self.font_ids_by_family_cache.get(&key) {
+            font_ids.as_slice()
+        } else {
+            let font_ids =
+                self.load_family(&font.family, &font.features, font.fallbacks.as_ref())?;
+            self.font_ids_by_family_cache.insert(key.clone(), font_ids);
+            self.font_ids_by_family_cache[&key].as_ref()
+        };
+
+        let ix = find_best_match(font, candidates, self)?;
+
+        Ok(candidates[ix])
     }
 
     fn font_match_properties(&self, font_id: FontId) -> Option<FontMatchProperties> {
@@ -342,6 +392,7 @@ impl CosmicTextSystemState {
     #[profiling::function]
     fn add_fonts(&mut self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
         self.font_ids_by_family_cache.clear();
+        self.lists.clear_resolved();
         // A new face may cover what a cached run fell back for.
         self.font_system.shape_run_cache = cosmic_text::ShapeRunCache::default();
         let db = self.font_system.db_mut();
@@ -439,13 +490,16 @@ impl CosmicTextSystemState {
             .db()
             .faces()
             .filter(|face| face.families.iter().any(|family| *name == family.0))
-            .map(|face| (face.id, face.post_script_name.clone()))
+            .map(|face| {
+                let added = matches!(face.source, cosmic_text::fontdb::Source::Binary(_));
+                (face.id, face.post_script_name.clone(), added)
+            })
             .collect::<SmallVec<[_; 4]>>();
 
         let cosmic_features = cosmic_font_features(features)?;
 
         let mut loaded_font_ids = SmallVec::new();
-        for (database_id, postscript_name) in families {
+        for (database_id, postscript_name, added) in families {
             let key = LoadedFontKey {
                 database_id,
                 font: loaded_font_key.clone(),
@@ -475,7 +529,10 @@ impl CosmicTextSystemState {
             // and emoji fonts often have no Latin glyphs, and they are exactly
             // what cosmic-text falls back to when the primary font lacks a
             // glyph.
-            if font.as_swash().charmap().map('m') == 0
+            // vue-native fork: a font the app added (a web font's `unicode-range` subset) is
+            // asked for by name and draws only the characters it has.
+            if !added
+                && font.as_swash().charmap().map('m') == 0
                 && !allowed_bad_font_names.contains(&postscript_name.as_str())
             {
                 continue;
@@ -513,6 +570,14 @@ impl CosmicTextSystemState {
     }
 
     fn raster_bounds(&mut self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
+        if crate::skathi_raster::enabled() && !params.is_emoji {
+            let font = self.loaded_fonts[params.font_id.0].font.as_swash();
+            return crate::skathi_raster::raster_bounds(
+                font,
+                &mut self.swash_scale_context,
+                params,
+            );
+        }
         let image = self.render_glyph_image(params)?;
         let bounds = Bounds {
             origin: point(image.placement.left.into(), (-image.placement.top).into()),
@@ -532,6 +597,12 @@ impl CosmicTextSystemState {
     ) -> Result<(Size<DevicePixels>, Vec<u8>)> {
         if glyph_bounds.size.width.0 == 0 || glyph_bounds.size.height.0 == 0 {
             anyhow::bail!("glyph bounds are empty");
+        }
+        if crate::skathi_raster::enabled() && !params.is_emoji {
+            let font = self.loaded_fonts[params.font_id.0].font.as_swash();
+            let context = &mut self.swash_scale_context;
+            let mask = crate::skathi_raster::rasterize(font, context, params, glyph_bounds)?;
+            return Ok((glyph_bounds.size, mask));
         }
 
         let mut image = match self.pending_glyph_images.remove(params) {
@@ -649,10 +720,14 @@ impl CosmicTextSystemState {
             self.shaped_lines = 0;
             self.font_system.shape_run_cache.trim(SHAPE_RUN_KEEP);
         }
+        let loaded_fonts = &self.loaded_fonts;
+        let font_runs = self.lists.split_runs(text, font_runs, |id, ch| {
+            charmap_covers(loaded_fonts, id, ch)
+        });
         if contains_paragraph_separator(text) {
-            self.layout_line_with_separators(text, font_size, font_runs)
+            self.layout_line_with_separators(text, font_size, &font_runs)
         } else {
-            self.layout_line_no_separators(text, font_size, font_runs)
+            self.layout_line_no_separators(text, font_size, &font_runs)
         }
     }
 
@@ -2047,6 +2122,107 @@ mod tests {
         let metrics = system.font_metrics(id);
         let ratio = metrics.x_height / metrics.units_per_em as f32;
         assert!((0.5..0.6).contains(&ratio), "{ratio}");
+        Ok(())
+    }
+
+    fn listed(family: &str, fallbacks: &[&str]) -> Font {
+        Font {
+            fallbacks: Some(FontFallbacks::from_fonts(
+                fallbacks.iter().map(|f| f.to_string()).collect(),
+            )),
+            ..gpui::font(family)
+        }
+    }
+
+    /// "VN Digits": Lilex for the ASCII digits. "VN Wide": Lilex for every code point.
+    fn listing_text_system() -> Result<CosmicTextSystem> {
+        let text_system = text_system()?;
+        text_system.add_fonts(vec![Cow::Borrowed(LILEX)])?;
+        let digits: gpui::FamilyComposer = Arc::new(|_, _| {
+            vec![gpui::ComposedFace {
+                family: "Lilex".into(),
+                ranges: Arc::from([(0x30, 0x39)]),
+            }]
+        });
+        let wide: gpui::FamilyComposer = Arc::new(|_, _| {
+            vec![gpui::ComposedFace {
+                family: "Lilex".into(),
+                ranges: Arc::from([]),
+            }]
+        });
+        text_system
+            .set_composed_families(vec![("VN Digits".into(), digits), ("VN Wide".into(), wide)]);
+        Ok(text_system)
+    }
+
+    /// The font and glyph each character of `text` was drawn with.
+    fn drawn_with(
+        text_system: &CosmicTextSystem,
+        text: &str,
+        font: &Font,
+    ) -> Result<Vec<(char, FontId, GlyphId)>> {
+        let font_id = text_system.font_id(font)?;
+        let layout = text_system.layout_line(
+            text,
+            gpui::px(16.),
+            &[FontRun {
+                len: text.len(),
+                font_id,
+                tracking: gpui::px(0.),
+                word_spacing: gpui::px(0.),
+            }],
+        );
+        Ok(layout
+            .runs
+            .iter()
+            .flat_map(|run| {
+                run.glyphs.iter().map(|glyph| {
+                    (
+                        text[glyph.index..].chars().next().unwrap(),
+                        run.font_id,
+                        glyph.id,
+                    )
+                })
+            })
+            .collect())
+    }
+
+    #[test]
+    fn each_character_takes_the_first_listed_family_whose_range_and_glyphs_cover_it() -> Result<()>
+    {
+        let text_system = listing_text_system()?;
+        let plex = text_system.font_id(&gpui::font("IBM Plex Sans"))?;
+        let lilex = text_system.font_id(&gpui::font("Lilex"))?;
+        let drawn = drawn_with(&text_system, "a1", &listed("VN Digits", &["IBM Plex Sans"]))?;
+        let fonts = drawn.iter().map(|d| (d.0, d.1)).collect::<Vec<_>>();
+        assert_eq!(fonts, vec![('a', plex), ('1', lilex)]);
+
+        // A character Lilex has no glyph for goes on to the next family, though the face's range
+        // covers it.
+        let lilex_lacks = ('\u{a0}'..'\u{3000}')
+            .find(|&c| {
+                text_system.glyph_for_char(lilex, c).is_none()
+                    && text_system.glyph_for_char(plex, c).is_some()
+            })
+            .expect("a character IBM Plex Sans has and Lilex lacks");
+        let text = format!("a{lilex_lacks}");
+        let drawn = drawn_with(&text_system, &text, &listed("VN Wide", &["IBM Plex Sans"]))?;
+        let fonts = drawn.iter().map(|d| (d.0, d.1)).collect::<Vec<_>>();
+        assert_eq!(fonts, vec![('a', lilex), (lilex_lacks, plex)]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_character_no_font_has_is_the_first_familys_missing_glyph() -> Result<()> {
+        let text_system = listing_text_system()?;
+        let plex = text_system.font_id(&gpui::font("IBM Plex Sans"))?;
+        let drawn = drawn_with(
+            &text_system,
+            "a\u{10FFFD}",
+            &listed("IBM Plex Sans", &["VN Wide"]),
+        )?;
+        assert_eq!(drawn[0].1, plex);
+        assert_eq!(drawn[1], ('\u{10FFFD}', plex, GlyphId(0)));
         Ok(())
     }
 }

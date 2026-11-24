@@ -1097,6 +1097,47 @@ pub struct LineBoxRules {
     pub metrics: LineMetrics,
     /// CSS `line-leading`.
     pub leading: LineLeading,
+    /// The line height when it is CSS `normal`: a line then grows to fit the box of a fallback
+    /// font taller than the first one.
+    pub normal: Option<Pixels>,
+}
+
+/// vue-native fork: the font metric CSS `font-size-adjust` keeps in proportion to the font size.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(JsonSchema))]
+pub enum FontAspect {
+    /// The x-height.
+    #[default]
+    ExHeight,
+    /// The height of a capital letter.
+    CapHeight,
+    /// The advance of "0".
+    ChWidth,
+    /// The advance of "水", a CJK ideograph.
+    IcWidth,
+}
+
+/// vue-native fork: CSS `font-size-adjust`.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(JsonSchema))]
+pub enum FontSizeAdjust {
+    /// `none`.
+    #[default]
+    None,
+    /// `from-font`: every other font is sized so that its metric matches the first font's.
+    FromFont(FontAspect),
+    /// A number: every font is sized so that its metric is this fraction of the font size.
+    Ratio(FontAspect, f32),
+}
+
+impl FontSizeAdjust {
+    /// The metric the fonts of a text are matched by, unless `none`.
+    pub fn aspect(self) -> Option<FontAspect> {
+        match self {
+            Self::None => None,
+            Self::FromFont(aspect) | Self::Ratio(aspect, _) => Some(aspect),
+        }
+    }
 }
 
 impl Default for TabSize {
@@ -1130,6 +1171,9 @@ pub struct TextWrap {
     pub tab_size: TabSize,
     /// CSS `line-metrics` and `line-leading`. Not breaking rules either: they build each line's box.
     pub line_box: LineBoxRules,
+    /// The metric of CSS `font-size-adjust`: a fallback font is shaped at the size that matches
+    /// it to the first font's.
+    pub font_size_adjust: Option<FontAspect>,
 }
 
 impl TextWrap {
@@ -1145,7 +1189,9 @@ impl TextWrap {
         line_box: LineBoxRules {
             metrics: LineMetrics::Auto,
             leading: LineLeading::Split,
+            normal: None,
         },
+        font_size_adjust: None,
     };
 
     /// May a word that does not fit be broken where it overflows?
@@ -1354,6 +1400,12 @@ pub struct TextStyle {
 
     /// vue-native fork: CSS `line-leading`.
     pub line_leading: LineLeading,
+
+    /// vue-native fork: CSS `font-size-adjust`.
+    pub font_size_adjust: FontSizeAdjust,
+
+    /// vue-native fork: `line_height` was CSS `normal`, resolved by [`crate::Window::text_style`].
+    pub line_height_was_normal: bool,
 }
 
 impl Default for TextStyle {
@@ -1388,6 +1440,8 @@ impl Default for TextStyle {
             will_change_transform: false,
             line_metrics: LineMetrics::Auto,
             line_leading: LineLeading::Split,
+            font_size_adjust: FontSizeAdjust::None,
+            line_height_was_normal: false,
         }
     }
 }
@@ -1401,6 +1455,7 @@ impl TextStyle {
             hyphens: self.hyphens,
             tab_size: self.tab_size,
             line_box: self.line_box(),
+            font_size_adjust: None,
         }
     }
 
@@ -1409,6 +1464,7 @@ impl TextStyle {
         LineBoxRules {
             metrics: self.line_metrics,
             leading: self.line_leading,
+            normal: None,
         }
     }
 

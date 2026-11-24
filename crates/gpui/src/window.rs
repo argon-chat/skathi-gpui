@@ -3708,13 +3708,13 @@ impl Window {
     pub fn text_style(&self) -> TextStyle {
         let mut style = self.vn_text_style_unresolved();
         if style.line_height == crate::line_height_normal() {
+            style.line_height_was_normal = true;
             let size = style.font_size.to_pixels(self.rem_size());
             if size > Pixels::ZERO {
-                let normal = self.text_system().normal_line_height_with(
-                    &style.font(),
-                    size,
-                    style.line_metrics,
-                );
+                let font = style.font();
+                let text_system = self.text_system();
+                let used = text_system.adjusted_font_size(&font, size, style.font_size_adjust);
+                let normal = text_system.normal_line_height_with(&font, used, style.line_metrics);
                 style.line_height = crate::relative(f32::from(normal) / f32::from(size));
             } else {
                 style.line_height = crate::relative(0.0);
@@ -8096,9 +8096,10 @@ impl Window {
                     transformation,
                 });
             } else {
+                let raw_coverage = self.text_system().linear_glyph_coverage();
                 self.next_frame.scene.insert_primitive(MonochromeSprite {
                     order: 0,
-                    raw_coverage: false.into(),
+                    raw_coverage: raw_coverage.into(),
                     animation: SpriteAnimationId::NONE,
                     pad: contrast,
                     bounds,
@@ -8310,7 +8311,9 @@ impl Window {
     fn should_use_subpixel_rendering(&self, font_id: FontId, font_size: Pixels) -> bool {
         // Checked first because it's cheap, while some platforms lock the window to read its
         // background appearance, and this runs for every glyph.
-        if !self.platform_window.is_subpixel_rendering_supported() {
+        if !self.platform_window.is_subpixel_rendering_supported()
+            || self.text_system().linear_glyph_coverage()
+        {
             return false;
         }
         // vue-native fork: an isolated layer starts transparent, and

@@ -1966,6 +1966,11 @@ pub trait PlatformTextSystem: Send + Sync {
     fn glyph_dilation_for_color(&self, _color: Hsla) -> u8 {
         0
     }
+    /// Whether glyph masks are linear coverage, to be blended without gamma or contrast, and
+    /// never subpixel.
+    fn linear_glyph_coverage(&self) -> bool {
+        false
+    }
 }
 
 #[expect(missing_docs)]

@@ -67,12 +67,22 @@ pub fn continues_cluster(c: char) -> bool {
 /// with the same answer are one piece; a [`continues_cluster`] character
 /// stays with the piece before it.
 pub fn split_by_face(text: &str, faces: &[ComposedFace]) -> Vec<(usize, Option<usize>)> {
+    split_by_face_with(text, faces.len(), |i, c| faces[i].covers(c))
+}
+
+/// [`split_by_face`] over `count` faces, face `i` drawing `c` when `covers(i, c)`: for a face that
+/// also needs a glyph for the character, as CSS asks of one whose `unicode-range` covers it.
+pub fn split_by_face_with(
+    text: &str,
+    count: usize,
+    covers: impl Fn(usize, char) -> bool,
+) -> Vec<(usize, Option<usize>)> {
     let mut out: Vec<(usize, Option<usize>)> = Vec::new();
     for c in text.chars() {
         let len = c.len_utf8();
         let face = match out.last() {
             Some(&(_, prev)) if continues_cluster(c) => prev,
-            _ => faces.iter().position(|f| f.covers(c)),
+            _ => (0..count).find(|&i| covers(i, c)),
         };
         match out.last_mut() {
             Some(last) if last.1 == face => last.0 += len,

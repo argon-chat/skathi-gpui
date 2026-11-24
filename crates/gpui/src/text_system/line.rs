@@ -1203,6 +1203,7 @@ mod tests {
                     ascent: px(12.0),
                     descent: px(4.0),
                     inline_box: false,
+                    fallback: None,
                     font_id: FontId(0),
                     glyphs: shaped_glyphs,
                 }],
@@ -2146,6 +2147,7 @@ mod tests {
                         ascent: px(12.0),
                         descent: px(4.0),
                         inline_box: false,
+                        fallback: None,
                         font_id: FontId(0),
                         glyphs: vec![
                             ShapedGlyph {
@@ -2173,6 +2175,7 @@ mod tests {
                         ascent: px(12.0),
                         descent: px(4.0),
                         inline_box: false,
+                        fallback: None,
                         font_id: FontId(1),
                         glyphs: vec![
                             ShapedGlyph {
@@ -2403,6 +2406,7 @@ mod tests {
                         ascent: px(12.0),
                         descent: px(4.0),
                         inline_box: false,
+                        fallback: None,
                         font_id: FontId(3),
                         glyphs: vec![
                             ShapedGlyph {
@@ -2430,6 +2434,7 @@ mod tests {
                         ascent: px(12.0),
                         descent: px(4.0),
                         inline_box: false,
+                        fallback: None,
                         font_id: FontId(8),
                         glyphs: vec![
                             ShapedGlyph {
