@@ -54,6 +54,9 @@ struct FontInfo {
     /// Does the font declare an `opsz` (optical size) axis? Only such a font
     /// needs — or notices — the treatment in [`DirectWriteState::axes_for`].
     has_optical_size: bool,
+    /// vue-native fork: the face is a variable font instanced at the weight asked for, which
+    /// only its axis values name to DirectWrite.
+    weight_instance: bool,
     /// vue-native fork: set for a font of a composed family
     /// ([`gpui::FamilyComposer`]). Such a font is never shaped itself: a run
     /// of it is split into runs of its members first
@@ -358,6 +361,7 @@ impl DirectWriteState {
             axis_values,
             font_resource,
             has_optical_size,
+            weight_instance: false,
             composite: None,
         });
         Some(font_id)
@@ -412,7 +416,7 @@ impl DirectWriteState {
                 family: face.family.clone(),
                 features: font.features.clone(),
                 fallbacks: None,
-                weight: font.weight,
+                weight: face.weight.unwrap_or(font.weight),
                 style: font.style,
             };
             if let Some(font_id) = self.resolve_font(components, &member) {
@@ -463,6 +467,7 @@ impl DirectWriteState {
             faces: vec![ComposedFace {
                 family: font.family.clone(),
                 ranges: Arc::from([]),
+                weight: None,
             }],
             ids: vec![own],
             rest: next,
@@ -662,6 +667,8 @@ impl DirectWriteState {
                 // correction possible later, when the size is known.
                 let (axis_values, font_resource, has_optical_size) =
                     unsafe { read_variations(&font_face) };
+                let (font_face, axis_values, weight_instance) =
+                    unsafe { at_weight(font_face, axis_values, font_resource.as_ref(), weight) };
                 let font_info = FontInfo {
                     font_family_h: font_family_h.clone(),
                     font_face,
@@ -671,6 +678,7 @@ impl DirectWriteState {
                     axis_values,
                     font_resource,
                     has_optical_size,
+                    weight_instance,
                     composite: None,
                 };
                 Some(font_info)
@@ -836,11 +844,13 @@ impl DirectWriteState {
         // CSS `font-optical-sizing: auto` — the initial value, and what every
         // browser does — instantiates a variable font's `opsz` axis at the USED
         // font size. Nothing below is entered unless some font on this line
-        // actually has that axis, so a line of Segoe UI or Consolas takes the
-        // exact code path it took before, allocating nothing.
-        let optical = font_runs
-            .iter()
-            .any(|run| self.fonts[run.font_id.0].has_optical_size);
+        // actually has that axis or is a weight instance, so a line of Segoe UI
+        // or Consolas takes the exact code path it took before, allocating
+        // nothing.
+        let optical = font_runs.iter().any(|run| {
+            let info = &self.fonts[run.font_id.0];
+            info.has_optical_size || info.weight_instance
+        });
         if optical {
             for run in font_runs {
                 self.instance_optical_face(run.font_id, font_size.as_f32());
@@ -2107,6 +2117,55 @@ unsafe fn read_variations(
     }
 }
 
+/// `face` instanced at `weight`, clamped to its resource's `wght` range, with its axis values
+/// and whether it is a new instance. A font set holds a variable font's named instances only,
+/// so a weight between two of them matched the nearer one.
+unsafe fn at_weight(
+    face: IDWriteFontFace3,
+    values: Vec<DWRITE_FONT_AXIS_VALUE>,
+    resource: Option<&IDWriteFontResource>,
+    weight: FontWeight,
+) -> (IDWriteFontFace3, Vec<DWRITE_FONT_AXIS_VALUE>, bool) {
+    let Some(resource) = resource else {
+        return (face, values, false);
+    };
+    let range = unsafe {
+        let mut ranges =
+            vec![DWRITE_FONT_AXIS_RANGE::default(); resource.GetFontAxisCount() as usize];
+        resource
+            .GetFontAxisRanges(&mut ranges)
+            .log_err()
+            .and_then(|()| {
+                ranges.into_iter().find(|range| {
+                    range.axisTag == DWRITE_FONT_AXIS_TAG_WEIGHT && range.minValue < range.maxValue
+                })
+            })
+    };
+    let Some(range) = range else {
+        return (face, values, false);
+    };
+    let wght = weight.0.clamp(range.minValue, range.maxValue);
+    let mut instanced = values.clone();
+    match instanced
+        .iter_mut()
+        .find(|axis| axis.axisTag == DWRITE_FONT_AXIS_TAG_WEIGHT)
+    {
+        Some(axis) if (axis.value - wght).abs() < 0.01 => return (face, values, false),
+        Some(axis) => axis.value = wght,
+        None => instanced.push(DWRITE_FONT_AXIS_VALUE {
+            axisTag: DWRITE_FONT_AXIS_TAG_WEIGHT,
+            value: wght,
+        }),
+    }
+    match unsafe { resource.CreateFontFace(face.GetSimulations(), &instanced) }
+        .and_then(|instance| instance.cast::<IDWriteFontFace3>())
+        .log_err()
+    {
+        Some(instance) => (instance, instanced, true),
+        None => (face, values, false),
+    }
+}
+
 fn font_style_to_dwrite(style: FontStyle) -> DWRITE_FONT_STYLE {
     match style {
         FontStyle::Normal => DWRITE_FONT_STYLE_NORMAL,
@@ -2404,6 +2463,10 @@ fn font_table<T>(
 #[cfg(test)]
 #[path = "direct_write_fallback_tests.rs"]
 mod fallback_tests;
+
+#[cfg(test)]
+#[path = "direct_write_variable_tests.rs"]
+mod variable_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2912,6 +2975,7 @@ mod composed_tests {
         ComposedFace {
             family: family.to_string().into(),
             ranges: ranges.into(),
+            weight: None,
         }
     }
 

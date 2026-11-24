@@ -63,7 +63,11 @@ struct CosmicTextSystemState {
     shaped_lines: u32,
     /// vue-native fork: `font-family` lists and composed families.
     lists: gpui::FontLists,
+    /// vue-native fork: variable fonts instanced at a `wght`, by the default instance's font.
+    weight_instances: HashMap<(FontId, u16), FontId>,
 }
+
+const WGHT: swash::Tag = swash::tag_from_bytes(b"wght");
 
 /// cosmic-text shapes a word whose glyph no font has once with every installed face, so without
 /// its run cache each CJK character or emoji that no face covers costs a shape per face, every time.
@@ -78,6 +82,10 @@ struct LoadedFont {
     /// resolved at load time so `layout_line` shares one chain across faces.
     /// `Arc` keeps clone cheap on the per-run hot path.
     user_fallback_chain: Arc<[(FontId, SharedString)]>,
+    /// vue-native fork: the `wght` a variable font is instanced at, which shaping asks
+    /// cosmic-text for, and the normalized coordinates swash measures and draws it with.
+    weight: Option<Weight>,
+    coords: Arc<[swash::NormalizedCoord]>,
 }
 
 struct FontMatchProperties {
@@ -153,6 +161,7 @@ impl CosmicTextSystem {
             missing_glyph_sink: None,
             shaped_lines: 0,
             lists: gpui::FontLists::default(),
+            weight_instances: HashMap::default(),
         }))
     }
 
@@ -174,6 +183,7 @@ impl CosmicTextSystem {
             missing_glyph_sink: None,
             shaped_lines: 0,
             lists: gpui::FontLists::default(),
+            weight_instances: HashMap::default(),
         }))
     }
 }
@@ -220,14 +230,15 @@ impl PlatformTextSystem for CosmicTextSystem {
 
     fn font_metrics(&self, font_id: FontId) -> FontMetrics {
         let state = self.0.read();
-        let font = state.loaded_font(font_id).font.as_swash();
-        let mut metrics = font.metrics(&[]);
+        let loaded = state.loaded_font(font_id);
+        let font = loaded.font.as_swash();
+        let mut metrics = font.metrics(&loaded.coords);
         // An OS/2 table older than version 2 has no sxHeight or sCapHeight; measure the glyphs.
         if metrics.x_height == 0.0 {
-            metrics.x_height = glyph_top(font, 'x', metrics.units_per_em);
+            metrics.x_height = glyph_top(font, &loaded.coords, 'x', metrics.units_per_em);
         }
         if metrics.cap_height == 0.0 {
-            metrics.cap_height = glyph_top(font, 'H', metrics.units_per_em);
+            metrics.cap_height = glyph_top(font, &loaded.coords, 'H', metrics.units_per_em);
         }
         drop(state);
 
@@ -249,7 +260,8 @@ impl PlatformTextSystem for CosmicTextSystem {
 
     fn typographic_bounds(&self, font_id: FontId, glyph_id: GlyphId) -> Result<Bounds<f32>> {
         let lock = self.0.read();
-        let glyph_metrics = lock.loaded_font(font_id).font.as_swash().glyph_metrics(&[]);
+        let loaded = lock.loaded_font(font_id);
+        let glyph_metrics = loaded.font.as_swash().glyph_metrics(&loaded.coords);
         let glyph_id = glyph_id.0 as u16;
         Ok(Bounds {
             origin: point(0.0, 0.0),
@@ -317,6 +329,8 @@ impl gpui::FontListHost for CosmicTextSystemState {
             features: of.features.clone(),
             is_known_emoji_font: of.is_known_emoji_font,
             user_fallback_chain: Arc::from(Vec::new()),
+            weight: of.weight,
+            coords: of.coords.clone(),
         };
         self.loaded_fonts.push(alias);
         FontId(self.loaded_fonts.len() - 1)
@@ -348,8 +362,53 @@ impl CosmicTextSystemState {
         };
 
         let ix = find_best_match(font, candidates, self)?;
+        let font_id = candidates[ix];
+        Ok(self.at_weight(font_id, font.weight.0))
+    }
 
-        Ok(candidates[ix])
+    /// `font_id` instanced at `weight`, clamped to its `wght` axis; `font_id` itself when it has
+    /// none. fontdb lists a variable font once, at its default instance.
+    fn at_weight(&mut self, font_id: FontId, weight: f32) -> FontId {
+        let loaded = &self.loaded_fonts[font_id.0];
+        if loaded.weight.is_some() {
+            return font_id;
+        }
+        let Some(axis) = loaded
+            .font
+            .as_swash()
+            .variations()
+            .find_by_tag(WGHT)
+            .filter(|axis| axis.min_value() < axis.max_value())
+        else {
+            return font_id;
+        };
+        let wght = weight
+            .clamp(axis.min_value(), axis.max_value())
+            .round()
+            .clamp(1.0, u16::MAX as f32) as u16;
+        if let Some(&instance) = self.weight_instances.get(&(font_id, wght)) {
+            return instance;
+        }
+        let Some(font) = self.font_system.get_font(loaded.font.id(), Weight(wght)) else {
+            return font_id;
+        };
+        let coords = font
+            .as_swash()
+            .variations()
+            .normalized_coords([(WGHT, wght as f32)])
+            .collect();
+        let instance = LoadedFont {
+            font,
+            features: loaded.features.clone(),
+            is_known_emoji_font: loaded.is_known_emoji_font,
+            user_fallback_chain: Arc::clone(&loaded.user_fallback_chain),
+            weight: Some(Weight(wght)),
+            coords,
+        };
+        let instance_id = FontId(self.loaded_fonts.len());
+        self.loaded_fonts.push(instance);
+        self.weight_instances.insert((font_id, wght), instance_id);
+        instance_id
     }
 
     fn font_match_properties(&self, font_id: FontId) -> Option<FontMatchProperties> {
@@ -367,7 +426,7 @@ impl CosmicTextSystemState {
             primary_family_name: first_family.0.clone().into(),
             stretch: face.stretch,
             style: face.style,
-            weight: face.weight,
+            weight: loaded_font.weight.unwrap_or(face.weight),
             features: loaded_font.features.clone(),
             fallback_chain: Arc::clone(&loaded_font.user_fallback_chain),
         })
@@ -545,6 +604,8 @@ impl CosmicTextSystemState {
                 features: cosmic_features.clone(),
                 is_known_emoji_font: check_is_known_emoji_font(&postscript_name),
                 user_fallback_chain: Arc::clone(&user_fallback_chain),
+                weight: None,
+                coords: Arc::from([]),
             });
             self.loaded_font_ids_by_key.insert(key, font_id);
         }
@@ -553,7 +614,8 @@ impl CosmicTextSystemState {
     }
 
     fn advance(&self, font_id: FontId, glyph_id: GlyphId) -> Result<Size<f32>> {
-        let glyph_metrics = self.loaded_font(font_id).font.as_swash().glyph_metrics(&[]);
+        let loaded = self.loaded_font(font_id);
+        let glyph_metrics = loaded.font.as_swash().glyph_metrics(&loaded.coords);
         Ok(Size {
             width: glyph_metrics.advance_width(glyph_id.0 as u16),
             height: glyph_metrics.advance_height(glyph_id.0 as u16),
@@ -571,9 +633,10 @@ impl CosmicTextSystemState {
 
     fn raster_bounds(&mut self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
         if crate::skathi_raster::enabled() && !params.is_emoji {
-            let font = self.loaded_fonts[params.font_id.0].font.as_swash();
+            let loaded = &self.loaded_fonts[params.font_id.0];
             return crate::skathi_raster::raster_bounds(
-                font,
+                loaded.font.as_swash(),
+                &loaded.coords,
                 &mut self.swash_scale_context,
                 params,
             );
@@ -599,9 +662,15 @@ impl CosmicTextSystemState {
             anyhow::bail!("glyph bounds are empty");
         }
         if crate::skathi_raster::enabled() && !params.is_emoji {
-            let font = self.loaded_fonts[params.font_id.0].font.as_swash();
+            let loaded = &self.loaded_fonts[params.font_id.0];
             let context = &mut self.swash_scale_context;
-            let mask = crate::skathi_raster::rasterize(font, context, params, glyph_bounds)?;
+            let mask = crate::skathi_raster::rasterize(
+                loaded.font.as_swash(),
+                &loaded.coords,
+                context,
+                params,
+                glyph_bounds,
+            )?;
             return Ok((glyph_bounds.size, mask));
         }
 
@@ -647,6 +716,7 @@ impl CosmicTextSystemState {
             .builder(font_ref)
             .size(pixel_size * params.scale_factor)
             .hint(true)
+            .normalized_coords(loaded_font.coords.iter())
             .build();
 
         let sources: &[Source] = if params.is_emoji {
@@ -683,11 +753,20 @@ impl CosmicTextSystemState {
     /// `LoadedFont.features`, as it will have an arbitrarily chosen or empty value. The only
     /// current use of this field is for the *input* of `layout_line`, and so it's fine to use
     /// `font_id_for_cosmic_id` when computing the *output* of `layout_line`.
-    fn font_id_for_cosmic_id(&mut self, id: cosmic_text::fontdb::ID) -> Result<FontId> {
+    fn font_id_for_cosmic_id(
+        &mut self,
+        id: cosmic_text::fontdb::ID,
+        weight: Weight,
+    ) -> Result<FontId> {
+        let base = self.base_font_id_for_cosmic_id(id)?;
+        Ok(self.at_weight(base, weight.0 as f32))
+    }
+
+    fn base_font_id_for_cosmic_id(&mut self, id: cosmic_text::fontdb::ID) -> Result<FontId> {
         if let Some(ix) = self
             .loaded_fonts
             .iter()
-            .position(|loaded_font| loaded_font.font.id() == id)
+            .position(|loaded_font| loaded_font.font.id() == id && loaded_font.weight.is_none())
         {
             Ok(FontId(ix))
         } else {
@@ -707,6 +786,8 @@ impl CosmicTextSystemState {
                 features: CosmicFontFeatures::new(),
                 is_known_emoji_font: check_is_known_emoji_font(&face.post_script_name),
                 user_fallback_chain: Arc::from(Vec::new()),
+                weight: None,
+                coords: Arc::from([]),
             });
 
             Ok(font_id)
@@ -921,7 +1002,7 @@ impl CosmicTextSystemState {
             let mut font_id = FontId(glyph.metadata);
             let mut loaded_font = self.loaded_font(font_id);
             if loaded_font.font.id() != glyph.font_id {
-                match self.font_id_for_cosmic_id(glyph.font_id) {
+                match self.font_id_for_cosmic_id(glyph.font_id, glyph.font_weight) {
                     std::result::Result::Ok(resolved_id) => {
                         font_id = resolved_id;
                         loaded_font = self.loaded_font(font_id);
@@ -1270,7 +1351,12 @@ fn pick_covering_slot(
 }
 
 /// The top of `ch`'s outline above the baseline, in font units; 0 without the glyph.
-fn glyph_top(font: swash::FontRef, ch: char, units_per_em: u16) -> f32 {
+fn glyph_top(
+    font: swash::FontRef,
+    coords: &[swash::NormalizedCoord],
+    ch: char,
+    units_per_em: u16,
+) -> f32 {
     let glyph = font.charmap().map(ch);
     if glyph == 0 {
         return 0.0;
@@ -1278,6 +1364,7 @@ fn glyph_top(font: swash::FontRef, ch: char, units_per_em: u16) -> f32 {
     ScaleContext::new()
         .builder(font)
         .size(units_per_em as f32)
+        .normalized_coords(coords)
         .build()
         .scale_outline(glyph)
         .map_or(0.0, |outline| outline.bounds().max.y.max(0.0))
@@ -2099,8 +2186,8 @@ mod tests {
         assert!(stated.x_height > 0.0 && stated.cap_height > 0.0);
         let state = system.0.read();
         let font = state.loaded_font(id).font.as_swash();
-        let x = glyph_top(font, 'x', stated.units_per_em as u16);
-        let h = glyph_top(font, 'H', stated.units_per_em as u16);
+        let x = glyph_top(font, &[], 'x', stated.units_per_em as u16);
+        let h = glyph_top(font, &[], 'H', stated.units_per_em as u16);
         assert!((x - stated.x_height).abs() <= 0.02 * stated.x_height, "{x}");
         assert!(
             (h - stated.cap_height).abs() <= 0.02 * stated.cap_height,
@@ -2142,12 +2229,14 @@ mod tests {
             vec![gpui::ComposedFace {
                 family: "Lilex".into(),
                 ranges: Arc::from([(0x30, 0x39)]),
+                weight: None,
             }]
         });
         let wide: gpui::FamilyComposer = Arc::new(|_, _| {
             vec![gpui::ComposedFace {
                 family: "Lilex".into(),
                 ranges: Arc::from([]),
+                weight: None,
             }]
         });
         text_system
@@ -2223,6 +2312,171 @@ mod tests {
         )?;
         assert_eq!(drawn[0].1, plex);
         assert_eq!(drawn[1], ('\u{10FFFD}', plex, GlyphId(0)));
+        Ok(())
+    }
+
+    /// A variable font is shaped, measured and drawn at the weight asked for, in both rendering
+    /// modes: the line cosmic-text sets and the masks swash draws with `wght` set explicitly.
+    #[test]
+    fn a_variable_font_is_drawn_at_the_weight_asked_for() -> Result<()> {
+        const MANROPE: &[u8] =
+            include_bytes!("../../../assets/fonts/manrope/Manrope-latin-wght.ttf");
+        const TEXT: &str = "Hamburgefonstiv";
+        use gpui::px;
+        const SIZE: f32 = 20.0;
+        let weights = [200.0f32, 300.0, 400.0, 450.0, 600.0, 800.0];
+
+        let text_system = CosmicTextSystem::new_without_system_fonts("IBM Plex Sans");
+        text_system.add_fonts(vec![Cow::Borrowed(MANROPE)])?;
+        let family = text_system
+            .all_font_names()
+            .into_iter()
+            .find(|name| name.starts_with("Manrope"))
+            .context("the fixture's family")?;
+        let explicit = swash::FontRef::from_index(MANROPE, 0).context("the fixture")?;
+        let mut reference_context = ScaleContext::new();
+        let mut reference_fonts = FontSystem::new_with_locale_and_db(
+            "en-US".to_string(),
+            cosmic_text::fontdb::Database::new(),
+        );
+        reference_fonts
+            .db_mut()
+            .load_font_source(cosmic_text::fontdb::Source::Binary(Arc::new(MANROPE)));
+
+        let mut rows = Vec::new();
+        for weight in weights {
+            let font_id = text_system.font_id(&Font {
+                family: family.clone().into(),
+                weight: gpui::FontWeight(weight),
+                ..Default::default()
+            })?;
+            let run = FontRun {
+                len: TEXT.len(),
+                font_id,
+                tracking: px(0.),
+                word_spacing: px(0.),
+            };
+            let layout = text_system.layout_line(TEXT, px(SIZE), &[run]);
+            let reference_width = {
+                let attrs = Attrs::new()
+                    .family(Family::Name(&family))
+                    .weight(Weight(weight as u16));
+                let line = ShapeLine::new(
+                    &mut reference_fonts,
+                    TEXT,
+                    &AttrsList::new(&attrs),
+                    cosmic_text::Shaping::Advanced,
+                    4,
+                );
+                let mut lines = Vec::new();
+                line.layout_to_buffer(
+                    &mut ShapeBuffer::default(),
+                    SIZE,
+                    None,
+                    cosmic_text::Wrap::None,
+                    Ellipsize::None,
+                    None,
+                    &mut lines,
+                    None,
+                    cosmic_text::Hinting::Disabled,
+                );
+                lines[0].w
+            };
+
+            let wght = [swash::Setting {
+                tag: WGHT,
+                value: weight,
+            }];
+            let reference_coords: Vec<swash::NormalizedCoord> =
+                explicit.variations().normalized_coords(wght).collect();
+            let (mut ink, mut reference_ink, mut skathi_ink, mut skathi_reference_ink) =
+                (0u64, 0u64, 0u64, 0u64);
+            let mut mismatched = 0;
+            let mut state = text_system.0.write();
+            for run in &layout.runs {
+                for glyph in &run.glyphs {
+                    let params = RenderGlyphParams {
+                        font_id: run.font_id,
+                        glyph_id: glyph.id,
+                        font_size: px(SIZE),
+                        subpixel_variant: Default::default(),
+                        scale_factor: 1.0,
+                        is_emoji: false,
+                        subpixel_rendering: false,
+                        dilation: 0,
+                    };
+                    let ours = state.render_glyph_image(&params)?;
+                    let theirs = Render::new(&[Source::Outline])
+                        .format(Format::Alpha)
+                        .render(
+                            &mut reference_context
+                                .builder(explicit)
+                                .size(SIZE)
+                                .hint(true)
+                                .variations(wght)
+                                .build(),
+                            glyph.id.0 as u16,
+                        )
+                        .context("a reference glyph")?;
+                    ink += ours.data.iter().map(|&v| v as u64).sum::<u64>();
+                    reference_ink += theirs.data.iter().map(|&v| v as u64).sum::<u64>();
+                    let placed = |p: &swash::zeno::Placement| (p.left, p.top, p.width, p.height);
+                    mismatched += (placed(&ours.placement) != placed(&theirs.placement)
+                        || ours.data != theirs.data) as usize;
+
+                    let loaded = state.loaded_fonts[run.font_id.0].font.clone();
+                    let coords = state.loaded_fonts[run.font_id.0].coords.clone();
+                    let mut skathi = |font: swash::FontRef,
+                                      coords: &[swash::NormalizedCoord],
+                                      params: &RenderGlyphParams|
+                     -> Result<u64> {
+                        let context = &mut state.swash_scale_context;
+                        let bounds =
+                            crate::skathi_raster::raster_bounds(font, coords, context, params)?;
+                        if bounds.size.width.0 == 0 {
+                            return Ok(0);
+                        }
+                        let mask =
+                            crate::skathi_raster::rasterize(font, coords, context, params, bounds)?;
+                        Ok(mask.iter().map(|&v| v as u64).sum())
+                    };
+                    skathi_ink += skathi(loaded.as_swash(), &coords, &params)?;
+                    let reference_params = RenderGlyphParams {
+                        font_id: FontId(usize::MAX - weight as usize),
+                        ..params
+                    };
+                    skathi_reference_ink += skathi(explicit, &reference_coords, &reference_params)?;
+                }
+            }
+            drop(state);
+            eprintln!(
+                "wght {weight:>4} | width {:8.3} (wght set {reference_width:8.3}) | ink {ink:7} ({reference_ink:7}) | skathi-mode {skathi_ink:7} ({skathi_reference_ink:7}) | masks off {mismatched}",
+                layout.width.as_f32()
+            );
+            rows.push((
+                layout.width.as_f32(),
+                reference_width,
+                ink,
+                skathi_ink,
+                skathi_reference_ink,
+                mismatched,
+            ));
+        }
+        for pair in rows.windows(2) {
+            assert!(pair[1].0 > pair[0].0, "widths do not grow with the weight");
+            assert!(pair[1].2 > pair[0].2, "ink does not grow with the weight");
+            assert!(pair[1].3 > pair[0].3, "skathi-mode ink does not grow");
+        }
+        for (weight, row) in weights.iter().zip(&rows) {
+            assert!(
+                (row.0 - row.1).abs() < 0.01,
+                "{weight}: width {} against {}",
+                row.0,
+                row.1
+            );
+            assert_eq!(row.5, 0, "{weight}: masks differ from the instance's");
+            assert_eq!(row.3, row.4, "{weight}: skathi-mode");
+        }
         Ok(())
     }
 }

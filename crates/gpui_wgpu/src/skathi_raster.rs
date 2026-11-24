@@ -10,7 +10,7 @@ use gpui::{
     TextRendering, VerticalHint,
 };
 use swash::{
-    FontRef,
+    FontRef, NormalizedCoord,
     scale::ScaleContext,
     zeno::{Command, PathData},
 };
@@ -43,10 +43,11 @@ pub(crate) fn dilation_for_color(color: gpui::Hsla) -> u8 {
 
 pub(crate) fn raster_bounds(
     font: FontRef,
+    coords: &[NormalizedCoord],
     context: &mut ScaleContext,
     params: &RenderGlyphParams,
 ) -> Result<Bounds<DevicePixels>> {
-    let mask = mask(font, context, params)?;
+    let mask = mask(font, coords, context, params)?;
     let bounds = mask.bounds;
     CACHE.with_borrow_mut(|cache| cache.last = Some((params.clone(), mask)));
     Ok(bounds)
@@ -54,6 +55,7 @@ pub(crate) fn raster_bounds(
 
 pub(crate) fn rasterize(
     font: FontRef,
+    coords: &[NormalizedCoord],
     context: &mut ScaleContext,
     params: &RenderGlyphParams,
     bounds: Bounds<DevicePixels>,
@@ -67,7 +69,7 @@ pub(crate) fn rasterize(
     });
     let mask = match cached {
         Some(mask) => mask,
-        None => mask(font, context, params)?,
+        None => mask(font, coords, context, params)?,
     };
     anyhow::ensure!(
         mask.bounds == bounds,
@@ -79,6 +81,7 @@ pub(crate) fn rasterize(
 
 fn mask(
     font: FontRef,
+    coords: &[NormalizedCoord],
     context: &mut ScaleContext,
     params: &RenderGlyphParams,
 ) -> Result<CoverageMask> {
@@ -98,7 +101,7 @@ fn mask(
                     cache.outlines.clear();
                 }
                 let outline = Rc::new(
-                    fetch_outline(font, context, glyph, ppem)
+                    fetch_outline(font, coords, context, glyph, ppem)
                         .with_context(|| format!("no outline for {params:?}"))?,
                 );
                 cache.outlines.insert((face_key, glyph), outline.clone());
@@ -109,7 +112,7 @@ fn mask(
             *cache
                 .hints
                 .entry(params.font_id)
-                .or_insert_with(|| hint_metrics(font, context))
+                .or_insert_with(|| hint_metrics(font, coords, context))
         } else {
             None
         };
@@ -133,6 +136,7 @@ fn mask(
 /// font units and scaled here: swash scales TrueType outlines on a 1/64 px grid.
 fn fetch_outline(
     font: FontRef,
+    coords: &[NormalizedCoord],
     context: &mut ScaleContext,
     glyph: u16,
     size: f32,
@@ -140,6 +144,7 @@ fn fetch_outline(
     let unscaled = context
         .builder(font)
         .hint(false)
+        .normalized_coords(coords)
         .build()
         .scale_outline(glyph)?;
     let scale = size / font.metrics(&[]).units_per_em as f32;
@@ -170,12 +175,17 @@ fn fetch_outline(
     Some(outline)
 }
 
-fn hint_metrics(font: FontRef, context: &mut ScaleContext) -> Option<HintMetrics> {
+fn hint_metrics(
+    font: FontRef,
+    coords: &[NormalizedCoord],
+    context: &mut ScaleContext,
+) -> Option<HintMetrics> {
     let units_per_em = font.metrics(&[]).units_per_em;
     let mut scaler = context
         .builder(font)
         .size(units_per_em as f32)
         .hint(false)
+        .normalized_coords(coords)
         .build();
     let mut top = |ch: char| {
         let glyph = font.charmap().map(ch);

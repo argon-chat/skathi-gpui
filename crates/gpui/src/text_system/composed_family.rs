@@ -24,6 +24,9 @@ pub struct ComposedFace {
     pub family: SharedString,
     /// Inclusive code point ranges; empty means every code point.
     pub ranges: Arc<[(u32, u32)]>,
+    /// The weight the face is asked for instead of the run's: the run's weight clamped to the
+    /// face's declared range. `None` asks for the run's weight.
+    pub weight: Option<FontWeight>,
 }
 
 impl ComposedFace {

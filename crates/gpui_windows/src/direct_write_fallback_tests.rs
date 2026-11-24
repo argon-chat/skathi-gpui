@@ -31,12 +31,14 @@ fn text_systems() -> Result<(Arc<TextSystem>, WindowTextSystem)> {
         vec![ComposedFace {
             family: "SimSun".into(),
             ranges: Arc::from([(0x4E00, 0x9FFF)]),
+            weight: None,
         }]
     });
     let wide: FamilyComposer = Arc::new(|_, _| {
         vec![ComposedFace {
             family: "Consolas".into(),
             ranges: Arc::from([]),
+            weight: None,
         }]
     });
     text_system.set_composed_families(vec![("VN Han".into(), han), ("VN Wide".into(), wide)]);

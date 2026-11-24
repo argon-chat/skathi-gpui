@@ -124,7 +124,7 @@ fn resolve(host: &mut impl FontListHost, font: &Font, depth: usize) -> Option<Fo
                 family: face.family.clone(),
                 features: font.features.clone(),
                 fallbacks: None,
-                weight: font.weight,
+                weight: face.weight.unwrap_or(font.weight),
                 style: font.style,
             };
             if let Some(font_id) = host.plain_font(&member) {
@@ -141,6 +141,7 @@ fn resolve(host: &mut impl FontListHost, font: &Font, depth: usize) -> Option<Fo
             faces.push(ComposedFace {
                 family: font.family.clone(),
                 ranges: Arc::from([]),
+                weight: None,
             });
             ids.push(font_id);
         }
@@ -288,6 +289,7 @@ mod tests {
         families: Vec<(&'static str, fn(char) -> bool)>,
         aliases: Vec<FontId>,
         lists: FontLists,
+        asked: Vec<(SharedString, FontWeight)>,
     }
 
     impl Host {
@@ -303,6 +305,7 @@ mod tests {
                 ],
                 aliases: Vec::new(),
                 lists: FontLists::default(),
+                asked: Vec::new(),
             }
         }
 
@@ -344,6 +347,7 @@ mod tests {
 
     impl FontListHost for Host {
         fn plain_font(&mut self, font: &Font) -> Option<FontId> {
+            self.asked.push((font.family.clone(), font.weight));
             let i = self.families.iter().position(|f| font.family == f.0)?;
             Some(FontId(i))
         }
@@ -406,10 +410,12 @@ mod tests {
                 ComposedFace {
                     family: "Digits".into(),
                     ranges: Arc::from([(0x30, 0x35)]),
+                    weight: None,
                 },
                 ComposedFace {
                     family: "Kana".into(),
                     ranges: Arc::from([(0x3040, 0x30FF)]),
+                    weight: None,
                 },
             ]
         });
@@ -426,5 +432,49 @@ mod tests {
                 ("か".into(), host.id("Kana")),
             ]
         );
+    }
+
+    #[test]
+    fn each_composed_face_is_asked_for_at_its_own_weight() {
+        let mut host = Host::new();
+        let subsets: FamilyComposer = Arc::new(|weight: FontWeight, _: FontStyle| {
+            let clamped = Some(FontWeight(weight.0.clamp(300.0, 900.0)));
+            vec![
+                ComposedFace {
+                    family: "Latin".into(),
+                    ranges: Arc::from([(0x0, 0xFF)]),
+                    weight: clamped,
+                },
+                ComposedFace {
+                    family: "Kana".into(),
+                    ranges: Arc::from([(0x3040, 0x30FF)]),
+                    weight: clamped,
+                },
+                ComposedFace {
+                    family: "Digits".into(),
+                    ranges: Arc::from([]),
+                    weight: None,
+                },
+            ]
+        });
+        host.lists
+            .set_composed_families(vec![("Web".into(), subsets)]);
+        for (asked, drawn) in [(600.0, 600.0), (200.0, 300.0)] {
+            host.asked.clear();
+            let font = Font {
+                family: "Web".into(),
+                weight: FontWeight(asked),
+                ..Default::default()
+            };
+            resolve_listed_font(&mut host, &font).unwrap();
+            assert_eq!(
+                host.asked,
+                vec![
+                    ("Latin".into(), FontWeight(drawn)),
+                    ("Kana".into(), FontWeight(drawn)),
+                    ("Digits".into(), FontWeight(asked)),
+                ]
+            );
+        }
     }
 }

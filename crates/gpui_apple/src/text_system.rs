@@ -3,22 +3,24 @@ use collections::{HashMap, HashSet};
 use core_foundation::{
     array::{CFArray, CFArrayRef},
     attributed_string::CFMutableAttributedString,
-    base::{CFRange, TCFType},
+    base::{CFRange, CFType, TCFType},
+    dictionary::{CFDictionary, CFDictionaryRef},
     number::CFNumber,
-    string::CFString,
+    string::{CFString, CFStringRef},
 };
 use core_graphics::{
     base::{CGFloat, CGGlyph, kCGImageAlphaPremultipliedLast},
     color_space::CGColorSpace,
     context::{CGContext, CGTextDrawingMode},
-    geometry::CGPoint,
+    geometry::{CGAffineTransform, CGPoint},
 };
 use core_text::{
-    font::CTFont,
+    font::{CTFont, CTFontRef},
     font_collection::CTFontCollectionRef,
     font_descriptor::{
-        CTFontDescriptor, TraitAccessors as _, kCTFontDefaultOrientation, kCTFontSlantTrait,
-        kCTFontSymbolicTrait, kCTFontWeightTrait, kCTFontWidthTrait,
+        CTFontDescriptor, CTFontDescriptorRef, TraitAccessors as _, kCTFontDefaultOrientation,
+        kCTFontSlantTrait, kCTFontSymbolicTrait, kCTFontVariationAttribute, kCTFontWeightTrait,
+        kCTFontWidthTrait,
     },
     line::CTLine,
     string_attributes::kCTFontAttributeName,
@@ -48,7 +50,6 @@ use std::{borrow::Cow, char, convert::TryFrom, sync::Arc};
 
 #[cfg(target_os = "macos")]
 use {
-    core_foundation::base::CFType,
     gpui::{Hsla, Rgba},
     std::sync::OnceLock,
 };
@@ -79,6 +80,15 @@ struct AppleTextSystemState {
     /// vue-native fork: `font-family` lists and composed families, which Core Text's cascade
     /// cannot draw: it does not see fonts added from memory.
     lists: gpui::FontLists,
+    /// vue-native fork: the fonts added from memory. A variable one is drawn at the weight
+    /// asked for ([`AppleTextSystemState::at_weight`]); installed families keep Core Text's own
+    /// instances.
+    memory_fonts: HashSet<FontId>,
+    /// Instances of a font at a `wght`, by the font and the coordinate's bits.
+    weight_instances: HashMap<(FontId, u32), FontId>,
+    /// The same instances by PostScript name, with their `wght` in hundredths, for the fonts of
+    /// the runs Core Text shapes: an instance can share its name with another.
+    instance_ids: HashMap<String, Vec<(i64, FontId)>>,
 }
 
 impl AppleTextSystem {
@@ -93,6 +103,9 @@ impl AppleTextSystem {
             font_ids_by_font_key: HashMap::default(),
             postscript_names_by_font_id: HashMap::default(),
             lists: gpui::FontLists::default(),
+            memory_fonts: HashSet::default(),
+            weight_instances: HashMap::default(),
+            instance_ids: HashMap::default(),
         }))
     }
 }
@@ -342,9 +355,45 @@ impl AppleTextSystemState {
             },
         )?;
 
-        let font_id = candidates[ix];
+        let mut font_id = candidates[ix];
+        if self.memory_fonts.contains(&font_id) {
+            font_id = self.at_weight(font_id, font.weight);
+        }
         self.font_selections.insert(font.clone(), font_id);
         Ok(font_id)
+    }
+
+    /// `font_id` instanced at `weight`, clamped to its `wght` axis; `font_id` itself when it has
+    /// no such axis or is that instance already. Shaping, metrics and glyphs all come from the
+    /// instance's CTFont.
+    fn at_weight(&mut self, font_id: FontId, weight: FontWeight) -> FontId {
+        let native = self.fonts[font_id.0].native_font();
+        let Some(axis) = weight_axis(&native) else {
+            return font_id;
+        };
+        let wght = (weight.0 as f64).clamp(axis.min, axis.max);
+        if (variation_value(&native, WGHT).unwrap_or(axis.default) - wght).abs() < 0.01 {
+            return font_id;
+        }
+        let key = (font_id, (wght as f32).to_bits());
+        if let Some(&instance) = self.weight_instances.get(&key) {
+            return instance;
+        }
+        let Some(instance) = with_variation(&native, WGHT, wght) else {
+            return font_id;
+        };
+        let instance_id = FontId(self.fonts.len());
+        // SAFETY: `instance` is a valid CTFont, retained by the font-kit font.
+        self.fonts
+            .push(unsafe { FontKitFont::from_native_font(&instance) });
+        let name = instance.postscript_name();
+        self.instance_ids
+            .entry(name.clone())
+            .or_default()
+            .push((wght_key(wght), instance_id));
+        self.postscript_names_by_font_id.insert(instance_id, name);
+        self.weight_instances.insert(key, instance_id);
+        instance_id
     }
 
     fn add_fonts(&mut self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
@@ -382,6 +431,7 @@ impl AppleTextSystemState {
         // vue-native fork: a font the app added (a web font's `unicode-range` subset) is asked
         // for by name and draws only the characters it has.
         let needs_m = added.is_none();
+        let from_memory = added.is_some();
         let family = match added {
             Some(family) => family,
             None => self.system_source.select_family_by_name(name)?,
@@ -472,6 +522,9 @@ impl AppleTextSystemState {
             }
             let font_id = FontId(self.fonts.len());
             font_ids.push(font_id);
+            if from_memory {
+                self.memory_fonts.insert(font_id);
+            }
             self.font_ids_by_postscript_name
                 .insert(postscript_name.clone(), font_id);
             self.postscript_names_by_font_id
@@ -493,6 +546,12 @@ impl AppleTextSystemState {
 
     fn id_for_native_font(&mut self, requested_font: CTFont) -> FontId {
         let postscript_name = requested_font.postscript_name();
+        if let Some(instances) = self.instance_ids.get(&postscript_name)
+            && let Some(wght) = variation_value(&requested_font, WGHT)
+            && let Some(&(_, font_id)) = instances.iter().find(|(at, _)| *at == wght_key(wght))
+        {
+            return font_id;
+        }
         if let Some(font_id) = self.font_ids_by_postscript_name.get(&postscript_name) {
             *font_id
         } else {
@@ -909,6 +968,96 @@ fn size_from_vector2f(vec: Vector2F) -> Size<f32> {
     size(vec.x(), vec.y())
 }
 
+const WGHT: i64 = 0x77676874;
+
+unsafe extern "C" {
+    static kCTFontVariationAxisIdentifierKey: CFStringRef;
+    static kCTFontVariationAxisMinimumValueKey: CFStringRef;
+    static kCTFontVariationAxisMaximumValueKey: CFStringRef;
+    static kCTFontVariationAxisDefaultValueKey: CFStringRef;
+    fn CTFontCopyVariation(font: CTFontRef) -> CFDictionaryRef;
+    fn CTFontCreateCopyWithAttributes(
+        font: CTFontRef,
+        size: CGFloat,
+        matrix: *const CGAffineTransform,
+        attributes: CTFontDescriptorRef,
+    ) -> CTFontRef;
+}
+
+struct VariationAxis {
+    min: f64,
+    max: f64,
+    default: f64,
+}
+
+/// The font's `wght` axis, when it spans more than one weight.
+fn weight_axis(font: &CTFont) -> Option<VariationAxis> {
+    let number = |axis: &CFDictionary<CFString, CFType>, key: CFStringRef| {
+        axis.find(key)?.downcast::<CFNumber>()?.to_f64()
+    };
+    // SAFETY: CoreText's constant keys.
+    let (identifier, min, max, default) = unsafe {
+        (
+            kCTFontVariationAxisIdentifierKey,
+            kCTFontVariationAxisMinimumValueKey,
+            kCTFontVariationAxisMaximumValueKey,
+            kCTFontVariationAxisDefaultValueKey,
+        )
+    };
+    font.get_variation_axes()?.iter().find_map(|axis| {
+        if number(&axis, identifier)? as i64 != WGHT {
+            return None;
+        }
+        let axis = VariationAxis {
+            min: number(&axis, min)?,
+            max: number(&axis, max)?,
+            default: number(&axis, default)?,
+        };
+        (axis.min < axis.max).then_some(axis)
+    })
+}
+
+/// The font's coordinate on `axis`, when it states one.
+fn variation_value(font: &CTFont, axis: i64) -> Option<f64> {
+    // SAFETY: CTFontCopyVariation follows the create rule; null when the font has no variations.
+    let dictionary = unsafe { CTFontCopyVariation(font.as_concrete_TypeRef()) };
+    if dictionary.is_null() {
+        return None;
+    }
+    let dictionary: CFDictionary<CFNumber, CFNumber> =
+        unsafe { CFDictionary::wrap_under_create_rule(dictionary) };
+    dictionary
+        .find(CFNumber::from(axis))
+        .and_then(|value| value.to_f64())
+}
+
+/// `font` with `axis` at `value`, at the same size; `None` when Core Text does not take it.
+fn with_variation(font: &CTFont, axis: i64, value: f64) -> Option<CTFont> {
+    let variation =
+        CFDictionary::from_CFType_pairs(&[(CFNumber::from(axis), CFNumber::from(value))]);
+    // SAFETY: a CoreText constant.
+    let key = unsafe { CFString::wrap_under_get_rule(kCTFontVariationAttribute) };
+    let attributes = CFDictionary::from_CFType_pairs(&[(key, variation.as_CFType())]);
+    let descriptor = core_text::font_descriptor::new_from_attributes(&attributes);
+    // SAFETY: CTFontCreateCopyWithAttributes follows the create rule; size 0 keeps the size.
+    let instance = unsafe {
+        let font = CTFontCreateCopyWithAttributes(
+            font.as_concrete_TypeRef(),
+            0.0,
+            std::ptr::null(),
+            descriptor.as_concrete_TypeRef(),
+        );
+        (!font.is_null()).then(|| CTFont::wrap_under_create_rule(font))?
+    };
+    variation_value(&instance, axis)
+        .is_some_and(|got| (got - value).abs() < 0.01)
+        .then_some(instance)
+}
+
+fn wght_key(wght: f64) -> i64 {
+    (wght * 100.0).round() as i64
+}
+
 /// A CoreText weight trait on the CSS scale, through AppKit's `NSFontWeight` constants (thin
 /// -0.6 … medium 0.23, semibold 0.3, bold 0.4 … black 0.62). font-kit's own table puts medium
 /// above 500, so `font-weight: 500` matched regular.
@@ -1171,12 +1320,14 @@ mod tests {
             vec![gpui::ComposedFace {
                 family: "Lilex".into(),
                 ranges: Arc::from([(0x30, 0x39)]),
+                weight: None,
             }]
         });
         let wide: gpui::FamilyComposer = Arc::new(|_, _| {
             vec![gpui::ComposedFace {
                 family: "Lilex".into(),
                 ranges: Arc::from([]),
+                weight: None,
             }]
         });
         fonts.set_composed_families(vec![("VN Digits".into(), digits), ("VN Wide".into(), wide)]);
@@ -1269,6 +1420,162 @@ mod tests {
                 "{drawn:?}, .notdef {notdef}"
             );
         }
+    }
+
+    /// A variable font added from memory is shaped, measured and drawn at the weight asked for:
+    /// the same line and glyph masks as Core Text gives the font with `wght` set explicitly.
+    #[test]
+    fn test_a_variable_font_is_drawn_at_the_weight_asked_for() {
+        use super::{WGHT, variation_value};
+        use core_foundation::{
+            attributed_string::CFMutableAttributedString,
+            base::{CFRange, TCFType},
+            number::CFNumber,
+            string::CFString,
+        };
+        use core_text::font_descriptor::CTFontDescriptorCreateCopyWithVariation;
+        use core_text::{line::CTLine, string_attributes::kCTFontAttributeName};
+        use font_kit::font::Font as FontKitFont;
+        use gpui::{FontWeight, RenderGlyphParams};
+
+        const MANROPE: &[u8] =
+            include_bytes!("../../../assets/fonts/manrope/Manrope-latin-wght.ttf");
+        const TEXT: &str = "Hamburgefonstiv";
+        const SIZE: f32 = 20.0;
+        let weights = [200.0f32, 300.0, 400.0, 450.0, 600.0, 800.0];
+
+        let fonts = AppleTextSystem::new();
+        fonts.add_fonts(vec![MANROPE.to_vec().into()]).unwrap();
+        let family = fonts
+            .0
+            .read()
+            .memory_source
+            .all_families()
+            .unwrap()
+            .into_iter()
+            .find(|name| name.starts_with("Manrope"))
+            .unwrap();
+        let params = |font_id, glyph, scale: f32| RenderGlyphParams {
+            font_id,
+            glyph_id: glyph,
+            font_size: px(SIZE),
+            subpixel_variant: Default::default(),
+            scale_factor: scale,
+            is_emoji: false,
+            subpixel_rendering: false,
+            dilation: 0,
+        };
+        let mask = |fonts: &AppleTextSystem, params: &RenderGlyphParams| {
+            let bounds = fonts.glyph_raster_bounds(params).unwrap();
+            if bounds.size.width.0 == 0 {
+                return (bounds, Vec::new());
+            }
+            (bounds, fonts.rasterize_glyph(params, bounds).unwrap().1)
+        };
+
+        let mut rows = Vec::new();
+        for weight in weights {
+            let mut asked = font(family.clone());
+            asked.weight = FontWeight(weight);
+            let font_id = fonts.font_id(&asked).unwrap();
+            let layout = fonts.layout_line(
+                TEXT,
+                px(SIZE),
+                &[FontRun {
+                    font_id,
+                    len: TEXT.len(),
+                    tracking: px(0.),
+                    word_spacing: px(0.),
+                }],
+            );
+
+            let explicit = {
+                let data = core_text::font_manager::create_font_descriptor(MANROPE).unwrap();
+                let descriptor = unsafe {
+                    core_text::font_descriptor::CTFontDescriptor::wrap_under_create_rule(
+                        CTFontDescriptorCreateCopyWithVariation(
+                            data.as_concrete_TypeRef(),
+                            CFNumber::from(WGHT).as_concrete_TypeRef(),
+                            weight as f64,
+                        ),
+                    )
+                };
+                core_text::font::new_from_descriptor(&descriptor, SIZE as f64)
+            };
+            let reference = AppleTextSystem::new();
+            reference
+                .0
+                .write()
+                .fonts
+                .push(unsafe { FontKitFont::from_native_font(&explicit) });
+            let reference_width = {
+                let mut string = CFMutableAttributedString::new();
+                string.replace_str(&CFString::new(TEXT), CFRange::init(0, 0));
+                let range = CFRange::init(0, string.char_len());
+                unsafe { string.set_attribute(range, kCTFontAttributeName, &explicit) };
+                CTLine::new_with_attributed_string(string.as_concrete_TypeRef())
+                    .get_typographic_bounds()
+                    .width as f32
+            };
+
+            let (mut ink, mut reference_ink, mut mismatched) = (0u64, 0u64, 0);
+            let mut drawn_wght = None;
+            for run in &layout.runs {
+                drawn_wght =
+                    variation_value(&fonts.0.read().fonts[run.font_id.0].native_font(), WGHT);
+                for glyph in &run.glyphs {
+                    for scale in [1.0, 2.0] {
+                        let ours = mask(&fonts, &params(run.font_id, glyph.id, scale));
+                        let theirs = mask(&reference, &params(FontId(0), glyph.id, scale));
+                        ink += ours.1.iter().map(|&v| v as u64).sum::<u64>();
+                        reference_ink += theirs.1.iter().map(|&v| v as u64).sum::<u64>();
+                        mismatched += (ours != theirs) as usize;
+                    }
+                }
+            }
+            eprintln!(
+                "wght {weight:>4}: drawn at {drawn_wght:?} | width {:8.3} (Core Text, wght set: {reference_width:8.3}) | ink {ink:7} ({reference_ink:7}) | masks off {mismatched}",
+                f32::from(layout.width)
+            );
+            rows.push((f32::from(layout.width), reference_width, ink, mismatched));
+        }
+        for pair in rows.windows(2) {
+            assert!(pair[1].0 > pair[0].0, "widths do not grow with the weight");
+            assert!(pair[1].2 > pair[0].2, "ink does not grow with the weight");
+        }
+        for (weight, (width, reference_width, _, mismatched)) in weights.iter().zip(&rows) {
+            assert!(
+                (width - reference_width).abs() < 0.01,
+                "{weight}: width {width} against {reference_width}"
+            );
+            assert_eq!(*mismatched, 0, "{weight}: masks differ from the instance's");
+        }
+
+        // A `unicode-range` subset declared `font-weight: 300 700` draws 800 at 700.
+        let face_family: gpui::SharedString = family.clone().into();
+        let composer: gpui::FamilyComposer = Arc::new(move |weight: FontWeight, _| {
+            vec![gpui::ComposedFace {
+                family: face_family.clone(),
+                ranges: Arc::from([(0x0, 0xFF)]),
+                weight: Some(FontWeight(weight.0.clamp(300.0, 700.0))),
+            }]
+        });
+        fonts.set_composed_families(vec![("VF Web".into(), composer)]);
+        let width = |family: &str, weight: f32| {
+            let mut asked = font(family.to_string());
+            asked.weight = FontWeight(weight);
+            let font_id = fonts.font_id(&asked).unwrap();
+            let run = FontRun {
+                font_id,
+                len: TEXT.len(),
+                tracking: px(0.),
+                word_spacing: px(0.),
+            };
+            f32::from(fonts.layout_line(TEXT, px(SIZE), &[run]).width)
+        };
+        assert_eq!(width("VF Web", 800.0), width(&family, 700.0));
+        assert_eq!(width("VF Web", 450.0), width(&family, 450.0));
+        assert_eq!(width("VF Web", 200.0), width(&family, 300.0));
     }
 
     #[test]
