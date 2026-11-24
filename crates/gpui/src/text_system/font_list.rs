@@ -116,17 +116,11 @@ fn resolve(host: &mut impl FontListHost, font: &Font, depth: usize) -> Option<Fo
     let mut faces = Vec::new();
     let mut ids = Vec::new();
     if let Some(composer) = composer {
-        for face in composer(font.weight, font.style) {
+        for face in composer(font) {
             if face.family.eq_ignore_ascii_case(&font.family) {
                 continue;
             }
-            let member = Font {
-                family: face.family.clone(),
-                features: font.features.clone(),
-                fallbacks: None,
-                weight: face.weight.unwrap_or(font.weight),
-                style: font.style,
-            };
+            let member = face.member(font);
             if let Some(font_id) = host.plain_font(&member) {
                 faces.push(face);
                 ids.push(font_id);
@@ -141,7 +135,7 @@ fn resolve(host: &mut impl FontListHost, font: &Font, depth: usize) -> Option<Fo
             faces.push(ComposedFace {
                 family: font.family.clone(),
                 ranges: Arc::from([]),
-                weight: None,
+                descriptors: Default::default(),
             });
             ids.push(font_id);
         }
@@ -179,8 +173,7 @@ fn next_family(font: &Font) -> Option<Font> {
         family: first.clone().into(),
         features: font.features.clone(),
         fallbacks: (!rest.is_empty()).then(|| FontFallbacks::from_fonts(rest.to_vec())),
-        weight: font.weight,
-        style: font.style,
+        ..font.clone()
     })
 }
 
@@ -282,7 +275,7 @@ pub fn split_font_runs<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{FontStyle, FontWeight, px};
+    use crate::{FaceDescriptors, FontWeight, px};
 
     /// Families by name, each with the characters it has glyphs for.
     struct Host {
@@ -405,17 +398,17 @@ mod tests {
     #[test]
     fn a_composed_face_draws_only_what_its_range_covers_and_it_has_a_glyph_for() {
         let mut host = Host::new();
-        let digits: FamilyComposer = Arc::new(|_: FontWeight, _: FontStyle| {
+        let digits: FamilyComposer = Arc::new(|_: &Font| {
             vec![
                 ComposedFace {
                     family: "Digits".into(),
                     ranges: Arc::from([(0x30, 0x35)]),
-                    weight: None,
+                    descriptors: Default::default(),
                 },
                 ComposedFace {
                     family: "Kana".into(),
                     ranges: Arc::from([(0x3040, 0x30FF)]),
-                    weight: None,
+                    descriptors: Default::default(),
                 },
             ]
         });
@@ -437,23 +430,26 @@ mod tests {
     #[test]
     fn each_composed_face_is_asked_for_at_its_own_weight() {
         let mut host = Host::new();
-        let subsets: FamilyComposer = Arc::new(|weight: FontWeight, _: FontStyle| {
-            let clamped = Some(FontWeight(weight.0.clamp(300.0, 900.0)));
+        let subsets: FamilyComposer = Arc::new(|_: &Font| {
+            let clamped = FaceDescriptors {
+                weight: Some((FontWeight(300.0), FontWeight(900.0))),
+                ..Default::default()
+            };
             vec![
                 ComposedFace {
                     family: "Latin".into(),
                     ranges: Arc::from([(0x0, 0xFF)]),
-                    weight: clamped,
+                    descriptors: clamped.clone(),
                 },
                 ComposedFace {
                     family: "Kana".into(),
                     ranges: Arc::from([(0x3040, 0x30FF)]),
-                    weight: clamped,
+                    descriptors: clamped.clone(),
                 },
                 ComposedFace {
                     family: "Digits".into(),
                     ranges: Arc::from([]),
-                    weight: None,
+                    descriptors: Default::default(),
                 },
             ]
         });

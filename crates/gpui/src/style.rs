@@ -9,9 +9,10 @@ use crate::{
     AbsoluteLength, App, Background, BackgroundTag, BorderStyle, Bounds, ContentMask, CornerShape,
     CornerShapes, Corners, CornersRefinement, CursorStyle, DefiniteLength, DevicePixels, Edges,
     EdgesRefinement, EffectCrossFade, EffectSpec, Font, FontFallbacks, FontFeatures, FontStyle,
-    FontWeight, GridLocation, Hsla, Length, Pixels, Point, PointRefinement, Rgba, SharedString,
-    Size, SizeRefinement, Styled, TextRun, TransformLength, TransformSpec, TransformationMatrix,
-    VnClipOutline, VnFillRule, VnPathVerb, Window, black, phi, point, px, quad, rems, size,
+    FontVariations, FontWeight, FontWidth, GridLocation, Hsla, Length, ObliqueAngle, Pixels, Point,
+    PointRefinement, Rgba, SharedString, Size, SizeRefinement, Styled, TextRun, TransformLength,
+    TransformSpec, TransformationMatrix, VnClipOutline, VnFillRule, VnPathVerb, Window, black, phi,
+    point, px, quad, rems, size,
 };
 use collections::HashSet;
 use refineable::Refineable;
@@ -1342,6 +1343,15 @@ pub struct TextStyle {
     /// The font style, e.g. italic
     pub font_style: FontStyle,
 
+    /// The font width, CSS `font-stretch`
+    pub font_width: FontWidth,
+
+    /// The angle of an oblique font style
+    pub font_oblique_angle: ObliqueAngle,
+
+    /// Variation axis coordinates, CSS `font-variation-settings`
+    pub font_variations: FontVariations,
+
     /// The background color of the text
     pub background_color: Option<Hsla>,
 
@@ -1421,6 +1431,9 @@ impl Default for TextStyle {
             line_height: phi(),
             font_weight: FontWeight::default(),
             font_style: FontStyle::default(),
+            font_width: FontWidth::default(),
+            font_oblique_angle: ObliqueAngle::default(),
+            font_variations: FontVariations::default(),
             background_color: None,
             underline: None,
             strikethrough: None,
@@ -1509,6 +1522,9 @@ impl TextStyle {
             fallbacks: self.font_fallbacks.clone(),
             weight: self.font_weight,
             style: self.font_style,
+            width: self.font_width,
+            oblique_angle: self.font_oblique_angle,
+            variations: self.font_variations.clone(),
         }
     }
 
@@ -1527,6 +1543,9 @@ impl TextStyle {
                 fallbacks: self.font_fallbacks.clone(),
                 weight: self.font_weight,
                 style: self.font_style,
+                width: self.font_width,
+                oblique_angle: self.font_oblique_angle,
+                variations: self.font_variations.clone(),
             },
             color: self.color,
             background_color: self.background_color,

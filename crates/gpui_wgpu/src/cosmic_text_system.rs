@@ -63,11 +63,12 @@ struct CosmicTextSystemState {
     shaped_lines: u32,
     /// vue-native fork: `font-family` lists and composed families.
     lists: gpui::FontLists,
-    /// vue-native fork: variable fonts instanced at a `wght`, by the default instance's font.
-    weight_instances: HashMap<(FontId, u16), FontId>,
+    /// vue-native fork: variable fonts instanced at a coordinate set, by the default instance's font
+    /// and the coordinates.
+    instances: HashMap<(FontId, SmallVec<[(u32, u32); 4]>), FontId>,
 }
 
-const WGHT: swash::Tag = swash::tag_from_bytes(b"wght");
+const WGHT: swash::Tag = gpui::WGHT;
 
 /// cosmic-text shapes a word whose glyph no font has once with every installed face, so without
 /// its run cache each CJK character or emoji that no face covers costs a shape per face, every time.
@@ -82,10 +83,23 @@ struct LoadedFont {
     /// resolved at load time so `layout_line` shares one chain across faces.
     /// `Arc` keeps clone cheap on the per-run hot path.
     user_fallback_chain: Arc<[(FontId, SharedString)]>,
-    /// vue-native fork: the `wght` a variable font is instanced at, which shaping asks
-    /// cosmic-text for, and the normalized coordinates swash measures and draws it with.
+    /// vue-native fork: the `wght` a variable font instance is shaped at by cosmic-text, the
+    /// normalized coordinates swash measures and draws it with, and those of the `wght` alone.
     weight: Option<Weight>,
     coords: Arc<[swash::NormalizedCoord]>,
+    shaped_coords: Arc<[swash::NormalizedCoord]>,
+    advances_differ: bool,
+    /// HarfRust shapers at `coords` and at `shaped_coords`, when they differ.
+    axis_shaping: Option<Arc<AxisShaping>>,
+}
+
+/// What cosmic-text, which shapes at a `wght` only, cannot: how much each glyph moves when the
+/// other axes are set too, kerning included.
+struct AxisShaping {
+    data: harfrust::ShaperData,
+    drawn: harfrust::ShaperInstance,
+    shaped: harfrust::ShaperInstance,
+    index: u32,
 }
 
 struct FontMatchProperties {
@@ -161,7 +175,7 @@ impl CosmicTextSystem {
             missing_glyph_sink: None,
             shaped_lines: 0,
             lists: gpui::FontLists::default(),
-            weight_instances: HashMap::default(),
+            instances: HashMap::default(),
         }))
     }
 
@@ -183,7 +197,7 @@ impl CosmicTextSystem {
             missing_glyph_sink: None,
             shaped_lines: 0,
             lists: gpui::FontLists::default(),
-            weight_instances: HashMap::default(),
+            instances: HashMap::default(),
         }))
     }
 }
@@ -331,6 +345,9 @@ impl gpui::FontListHost for CosmicTextSystemState {
             user_fallback_chain: Arc::from(Vec::new()),
             weight: of.weight,
             coords: of.coords.clone(),
+            shaped_coords: of.shaped_coords.clone(),
+            advances_differ: of.advances_differ,
+            axis_shaping: of.axis_shaping.clone(),
         };
         self.loaded_fonts.push(alias);
         FontId(self.loaded_fonts.len() - 1)
@@ -363,52 +380,180 @@ impl CosmicTextSystemState {
 
         let ix = find_best_match(font, candidates, self)?;
         let font_id = candidates[ix];
-        Ok(self.at_weight(font_id, font.weight.0))
+        Ok(self.at_coordinates(font_id, font))
     }
 
-    /// `font_id` instanced at `weight`, clamped to its `wght` axis; `font_id` itself when it has
-    /// none. fontdb lists a variable font once, at its default instance.
-    fn at_weight(&mut self, font_id: FontId, weight: f32) -> FontId {
+    /// `font_id` instanced at the coordinates `font` asks of its axes
+    /// ([`Font::variation_coordinates`]); `font_id` itself when they are its default instance's.
+    /// fontdb lists a variable font once, at its default instance. cosmic-text shapes at a `wght`
+    /// only, rounded to a whole weight; layout moves glyphs by the advances the other axes change.
+    fn at_coordinates(&mut self, font_id: FontId, font: &Font) -> FontId {
         let loaded = &self.loaded_fonts[font_id.0];
         if loaded.weight.is_some() {
             return font_id;
         }
-        let Some(axis) = loaded
-            .font
-            .as_swash()
-            .variations()
-            .find_by_tag(WGHT)
+        let variations = loaded.font.as_swash().variations();
+        let axes: SmallVec<[gpui::VariationAxis; 8]> = variations
             .filter(|axis| axis.min_value() < axis.max_value())
-        else {
+            .map(|axis| gpui::VariationAxis {
+                tag: axis.tag(),
+                min: axis.min_value(),
+                default: axis.default_value(),
+                max: axis.max_value(),
+            })
+            .collect();
+        if axes.is_empty() {
             return font_id;
-        };
-        let wght = weight
-            .clamp(axis.min_value(), axis.max_value())
-            .round()
-            .clamp(1.0, u16::MAX as f32) as u16;
-        if let Some(&instance) = self.weight_instances.get(&(font_id, wght)) {
+        }
+        let mut coords = font.variation_coordinates(&axes);
+        let mut wght = None;
+        for (tag, value) in &mut coords {
+            if *tag == WGHT {
+                *value = value.round().clamp(1.0, u16::MAX as f32);
+                wght = Some(*value as u16);
+            }
+        }
+        let at_default = coords.iter().all(|(tag, value)| {
+            axes.iter()
+                .any(|axis| axis.tag == *tag && (axis.default - value).abs() < 0.01)
+        });
+        if at_default {
+            return font_id;
+        }
+        let key: SmallVec<[(u32, u32); 4]> = coords
+            .iter()
+            .map(|(tag, value)| (*tag, value.to_bits()))
+            .collect();
+        if let Some(&instance) = self.instances.get(&(font_id, key.clone())) {
             return instance;
         }
-        let Some(font) = self.font_system.get_font(loaded.font.id(), Weight(wght)) else {
+        let database_id = loaded.font.id();
+        let weight = match wght {
+            Some(wght) => Weight(wght),
+            None => match self.font_system.db().face(database_id) {
+                Some(face) => face.weight,
+                None => return font_id,
+            },
+        };
+        let Some(shaped) = self.font_system.get_font(database_id, weight) else {
             return font_id;
         };
-        let coords = font
-            .as_swash()
-            .variations()
-            .normalized_coords([(WGHT, wght as f32)])
+        let loaded = &self.loaded_fonts[font_id.0];
+        let variations = shaped.as_swash().variations();
+        let normalized: Arc<[swash::NormalizedCoord]> = variations
+            .normalized_coords(coords.iter().copied())
             .collect();
+        let shaped_coords: Arc<[swash::NormalizedCoord]> = variations
+            .normalized_coords([(WGHT, weight.0 as f32)])
+            .collect();
+        let advances_differ = normalized != shaped_coords;
+        let index = self
+            .font_system
+            .db()
+            .face(database_id)
+            .map_or(0, |face| face.index);
+        let axis_shaping = advances_differ
+            .then(|| {
+                let font = harfrust::FontRef::from_index(shaped.data(), index).ok()?;
+                let location = |tags: &mut dyn Iterator<Item = (u32, f32)>| {
+                    harfrust::ShaperInstance::from_variations(
+                        &font,
+                        tags.map(|(tag, value)| harfrust::Variation {
+                            tag: harfrust::Tag::from_u32(tag),
+                            value,
+                        })
+                        .collect::<SmallVec<[_; 4]>>(),
+                    )
+                };
+                Some(Arc::new(AxisShaping {
+                    data: harfrust::ShaperData::new(&font),
+                    drawn: location(&mut coords.iter().copied()),
+                    shaped: location(&mut std::iter::once((WGHT, weight.0 as f32))),
+                    index,
+                }))
+            })
+            .flatten();
         let instance = LoadedFont {
-            font,
+            font: shaped,
             features: loaded.features.clone(),
             is_known_emoji_font: loaded.is_known_emoji_font,
             user_fallback_chain: Arc::clone(&loaded.user_fallback_chain),
-            weight: Some(Weight(wght)),
-            coords,
+            weight: Some(weight),
+            advances_differ,
+            coords: normalized,
+            shaped_coords,
+            axis_shaping,
         };
         let instance_id = FontId(self.loaded_fonts.len());
         self.loaded_fonts.push(instance);
-        self.weight_instances.insert((font_id, wght), instance_id);
+        self.instances.insert((font_id, key), instance_id);
         instance_id
+    }
+
+    /// How much farther each glyph of a run drawn on more axes than its `wght` advances than
+    /// cosmic-text shaped it, by the glyph's byte index and id. A run whose glyphs the two
+    /// locations do not agree on is left out.
+    fn axis_deltas(
+        &self,
+        text: &str,
+        font_runs: &[FontRun],
+        font_size: Pixels,
+    ) -> HashMap<(usize, u16), SmallVec<[f32; 1]>> {
+        let mut deltas: HashMap<(usize, u16), SmallVec<[f32; 1]>> = HashMap::default();
+        let mut offset = 0;
+        for run in font_runs {
+            let start = offset;
+            offset += run.len;
+            let loaded = &self.loaded_fonts[run.font_id.0];
+            let (Some(shaping), Some(piece)) = (&loaded.axis_shaping, text.get(start..offset))
+            else {
+                continue;
+            };
+            let Some(font) = harfrust::FontRef::from_index(loaded.font.data(), shaping.index).ok()
+            else {
+                continue;
+            };
+            let features: SmallVec<[harfrust::Feature; 4]> = loaded
+                .features
+                .features
+                .iter()
+                .map(|f| harfrust::Feature::new(harfrust::Tag::new(f.tag.as_bytes()), f.value, ..))
+                .collect();
+            let shape = |instance: &harfrust::ShaperInstance| {
+                let shaper = shaping.data.shaper(&font).instance(Some(instance)).build();
+                let mut buffer = harfrust::UnicodeBuffer::new();
+                buffer.push_str(piece);
+                buffer.guess_segment_properties();
+                shaper.shape(buffer, &features)
+            };
+            let (drawn, shaped) = (shape(&shaping.drawn), shape(&shaping.shaped));
+            let same = drawn.len() == shaped.len()
+                && drawn
+                    .glyph_infos()
+                    .iter()
+                    .zip(shaped.glyph_infos())
+                    .all(|(a, b)| a.glyph_id == b.glyph_id && a.cluster == b.cluster);
+            if !same {
+                continue;
+            }
+            let scale =
+                f32::from(font_size) / loaded.font.as_swash().metrics(&[]).units_per_em as f32;
+            for ((info, a), b) in drawn
+                .glyph_infos()
+                .iter()
+                .zip(drawn.glyph_positions())
+                .zip(shaped.glyph_positions())
+            {
+                deltas
+                    .entry((start + info.cluster as usize, info.glyph_id as u16))
+                    .or_default()
+                    .push((a.x_advance - b.x_advance) as f32 * scale);
+            }
+        }
+        for list in deltas.values_mut() {
+            list.reverse();
+        }
+        deltas
     }
 
     fn font_match_properties(&self, font_id: FontId) -> Option<FontMatchProperties> {
@@ -606,6 +751,9 @@ impl CosmicTextSystemState {
                 user_fallback_chain: Arc::clone(&user_fallback_chain),
                 weight: None,
                 coords: Arc::from([]),
+                shaped_coords: Arc::from([]),
+                advances_differ: false,
+                axis_shaping: None,
             });
             self.loaded_font_ids_by_key.insert(key, font_id);
         }
@@ -759,7 +907,11 @@ impl CosmicTextSystemState {
         weight: Weight,
     ) -> Result<FontId> {
         let base = self.base_font_id_for_cosmic_id(id)?;
-        Ok(self.at_weight(base, weight.0 as f32))
+        let font = Font {
+            weight: gpui::FontWeight(weight.0 as f32),
+            ..Default::default()
+        };
+        Ok(self.at_coordinates(base, &font))
     }
 
     fn base_font_id_for_cosmic_id(&mut self, id: cosmic_text::fontdb::ID) -> Result<FontId> {
@@ -788,6 +940,9 @@ impl CosmicTextSystemState {
                 user_fallback_chain: Arc::from(Vec::new()),
                 weight: None,
                 coords: Arc::from([]),
+                shaped_coords: Arc::from([]),
+                advances_differ: false,
+                axis_shaping: None,
             });
 
             Ok(font_id)
@@ -997,7 +1152,16 @@ impl CosmicTextSystemState {
             )
         });
 
+        let mut axis_deltas = if font_runs
+            .iter()
+            .any(|run| self.loaded_fonts[run.font_id.0].axis_shaping.is_some())
+        {
+            self.axis_deltas(text, font_runs, font_size)
+        } else {
+            HashMap::default()
+        };
         let mut runs: Vec<ShapedRun> = Vec::new();
+        let mut shift = 0.0;
         for glyph in &layout.glyphs {
             let mut font_id = FontId(glyph.metadata);
             let mut loaded_font = self.loaded_font(font_id);
@@ -1023,10 +1187,30 @@ impl CosmicTextSystemState {
                 continue;
             }
 
+            let x = glyph.x + shift;
+            if loaded_font.advances_differ {
+                shift += match axis_deltas
+                    .get_mut(&(glyph.start, glyph.glyph_id))
+                    .and_then(|list| list.pop())
+                {
+                    Some(delta) => delta,
+                    None => {
+                        let font = loaded_font.font.as_swash();
+                        let size = f32::from(font_size);
+                        let advance = |coords: &[swash::NormalizedCoord]| {
+                            font.glyph_metrics(coords)
+                                .scale(size)
+                                .advance_width(glyph.glyph_id)
+                        };
+                        advance(&loaded_font.coords) - advance(&loaded_font.shaped_coords)
+                    }
+                };
+            }
+
             let shaped_glyph = ShapedGlyph {
                 id: GlyphId(glyph.glyph_id as u32),
                 position: point(
-                    (glyph.x + glyph.x_offset * f32::from(font_size)).into(),
+                    (x + glyph.x_offset * f32::from(font_size)).into(),
                     (glyph.y - glyph.y_offset * f32::from(font_size)).into(),
                 ),
                 index: glyph.start,
@@ -1049,7 +1233,7 @@ impl CosmicTextSystemState {
 
         LineLayout {
             font_size,
-            width: layout.w.into(),
+            width: (layout.w + shift).into(),
             ascent: layout.max_ascent.into(),
             descent: layout.max_descent.into(),
             runs,
@@ -1236,7 +1420,8 @@ fn find_best_match(
         );
         let style_penalty: u32 = if is_italic == target_italic { 0 } else { 1000 };
         let weight_diff = (face_info.weight.0 as i32 - target_weight as i32).unsigned_abs();
-        let score = style_penalty + weight_diff;
+        let width_diff = ((stretch_percent(face_info.stretch) - font.width.0).abs() * 100.0) as u32;
+        let score = width_diff + style_penalty + weight_diff;
 
         if score < best_score {
             best_score = score;
@@ -1401,7 +1586,7 @@ fn font_into_properties(font: &gpui::Font) -> font_kit::properties::Properties {
             gpui::FontStyle::Oblique => font_kit::properties::Style::Oblique,
         },
         weight: font_kit::properties::Weight(font.weight.0),
-        stretch: Default::default(),
+        stretch: font_kit::properties::Stretch(font.width.0 / 100.0),
     }
 }
 
@@ -1427,6 +1612,21 @@ fn face_info_into_properties(
             cosmic_text::Stretch::UltraCondensed => font_kit::properties::Stretch::ULTRA_CONDENSED,
             cosmic_text::Stretch::UltraExpanded => font_kit::properties::Stretch::ULTRA_EXPANDED,
         },
+    }
+}
+
+#[cfg(not(feature = "font-kit"))]
+fn stretch_percent(stretch: Stretch) -> f32 {
+    match stretch {
+        Stretch::UltraCondensed => 50.,
+        Stretch::ExtraCondensed => 62.5,
+        Stretch::Condensed => 75.,
+        Stretch::SemiCondensed => 87.5,
+        Stretch::Normal => 100.,
+        Stretch::SemiExpanded => 112.5,
+        Stretch::Expanded => 125.,
+        Stretch::ExtraExpanded => 150.,
+        Stretch::UltraExpanded => 200.,
     }
 }
 
@@ -2225,18 +2425,18 @@ mod tests {
     fn listing_text_system() -> Result<CosmicTextSystem> {
         let text_system = text_system()?;
         text_system.add_fonts(vec![Cow::Borrowed(LILEX)])?;
-        let digits: gpui::FamilyComposer = Arc::new(|_, _| {
+        let digits: gpui::FamilyComposer = Arc::new(|_: &Font| {
             vec![gpui::ComposedFace {
                 family: "Lilex".into(),
                 ranges: Arc::from([(0x30, 0x39)]),
-                weight: None,
+                descriptors: Default::default(),
             }]
         });
-        let wide: gpui::FamilyComposer = Arc::new(|_, _| {
+        let wide: gpui::FamilyComposer = Arc::new(|_: &Font| {
             vec![gpui::ComposedFace {
                 family: "Lilex".into(),
                 ranges: Arc::from([]),
-                weight: None,
+                descriptors: Default::default(),
             }]
         });
         text_system
@@ -2477,6 +2677,328 @@ mod tests {
             assert_eq!(row.5, 0, "{weight}: masks differ from the instance's");
             assert_eq!(row.3, row.4, "{weight}: skathi-mode");
         }
+        Ok(())
+    }
+
+    /// Every axis follows the font asked for: the line HarfRust shapes and the masks swash draws
+    /// with the axes set explicitly.
+    #[test]
+    fn each_axis_of_a_variable_font_follows_the_font_asked_for() -> Result<()> {
+        const FLEX: &[u8] = include_bytes!("../../../assets/fonts/roboto-flex/RobotoFlex-axes.ttf");
+        const TEXT: &str = "Hamburgefonstiv";
+        use gpui::{
+            FaceDescriptors, FontStyle, FontVariations, FontWidth, ObliqueAngle, axis_tag, px,
+        };
+        const SIZE: f32 = 20.0;
+
+        let text_system = CosmicTextSystem::new_without_system_fonts("IBM Plex Sans");
+        text_system.add_fonts(vec![Cow::Borrowed(FLEX)])?;
+        let family: SharedString = text_system
+            .all_font_names()
+            .into_iter()
+            .find(|name| name.starts_with("Roboto Flex Axes"))
+            .context("the fixture's family")?
+            .into();
+        let explicit = swash::FontRef::from_index(FLEX, 0).context("the fixture")?;
+        let shaping = harfrust::FontRef::new(FLEX)?;
+        let shaper_data = harfrust::ShaperData::new(&shaping);
+        let upem = explicit.metrics(&[]).units_per_em as f32;
+        let mut reference_context = ScaleContext::new();
+
+        struct Row {
+            width: f32,
+            reference_width: f32,
+            ink: u64,
+            skathi_ink: u64,
+            skathi_reference_ink: u64,
+            mismatched: usize,
+            lean: f32,
+        }
+        let lean = |image: &swash::scale::image::Image| {
+            let (w, h) = (
+                image.placement.width as usize,
+                image.placement.height as usize,
+            );
+            let centroid = |rows: std::ops::Range<usize>| {
+                let (mut sum, mut total) = (0.0, 0.0);
+                for y in rows {
+                    for x in 0..w {
+                        let v = image.data[y * w + x] as f32;
+                        sum += v * x as f32;
+                        total += v;
+                    }
+                }
+                sum / f32::max(total, 1.0)
+            };
+            centroid(0..h / 3) - centroid(h - h / 3..h)
+        };
+        let mut drawn = |font: &Font, axes: [(&[u8; 4], f32); 4], slot: usize| -> Result<Row> {
+            let font_id = text_system.font_id(font)?;
+            let run = FontRun {
+                len: TEXT.len(),
+                font_id,
+                tracking: px(0.),
+                word_spacing: px(0.),
+            };
+            let layout = text_system.layout_line(TEXT, px(SIZE), &[run]);
+            let settings: Vec<swash::Setting<f32>> = axes
+                .iter()
+                .map(|(tag, value)| swash::Setting {
+                    tag: axis_tag(tag),
+                    value: *value,
+                })
+                .collect();
+            let reference_width = {
+                let instance = harfrust::ShaperInstance::from_variations(
+                    &shaping,
+                    axes.iter().map(|(tag, value)| harfrust::Variation {
+                        tag: harfrust::Tag::new(tag),
+                        value: *value,
+                    }),
+                );
+                let shaper = shaper_data
+                    .shaper(&shaping)
+                    .instance(Some(&instance))
+                    .build();
+                let mut buffer = harfrust::UnicodeBuffer::new();
+                buffer.push_str(TEXT);
+                buffer.guess_segment_properties();
+                let glyphs = shaper.shape(buffer, &[]);
+                glyphs
+                    .glyph_positions()
+                    .iter()
+                    .map(|p| p.x_advance as f32)
+                    .sum::<f32>()
+                    * SIZE
+                    / upem
+            };
+            let reference_coords: Vec<swash::NormalizedCoord> = explicit
+                .variations()
+                .normalized_coords(settings.iter().copied())
+                .collect();
+            let mut row = Row {
+                width: layout.width.as_f32(),
+                reference_width,
+                ink: 0,
+                skathi_ink: 0,
+                skathi_reference_ink: 0,
+                mismatched: 0,
+                lean: f32::NAN,
+            };
+            let mut state = text_system.0.write();
+            for run in &layout.runs {
+                for glyph in &run.glyphs {
+                    let params = RenderGlyphParams {
+                        font_id: run.font_id,
+                        glyph_id: glyph.id,
+                        font_size: px(SIZE),
+                        subpixel_variant: Default::default(),
+                        scale_factor: 1.0,
+                        is_emoji: false,
+                        subpixel_rendering: false,
+                        dilation: 0,
+                    };
+                    let ours = state.render_glyph_image(&params)?;
+                    let theirs = Render::new(&[Source::Outline])
+                        .format(Format::Alpha)
+                        .render(
+                            &mut reference_context
+                                .builder(explicit)
+                                .size(SIZE)
+                                .hint(true)
+                                .variations(settings.iter().copied())
+                                .build(),
+                            glyph.id.0 as u16,
+                        )
+                        .context("a reference glyph")?;
+                    if row.lean.is_nan() {
+                        row.lean = lean(&ours);
+                    }
+                    row.ink += ours.data.iter().map(|&v| v as u64).sum::<u64>();
+                    let placed = |p: &swash::zeno::Placement| (p.left, p.top, p.width, p.height);
+                    row.mismatched += (placed(&ours.placement) != placed(&theirs.placement)
+                        || ours.data != theirs.data) as usize;
+
+                    let loaded = state.loaded_fonts[run.font_id.0].font.clone();
+                    let coords = state.loaded_fonts[run.font_id.0].coords.clone();
+                    let mut skathi = |font: swash::FontRef,
+                                      coords: &[swash::NormalizedCoord],
+                                      params: &RenderGlyphParams|
+                     -> Result<u64> {
+                        let context = &mut state.swash_scale_context;
+                        let bounds =
+                            crate::skathi_raster::raster_bounds(font, coords, context, params)?;
+                        if bounds.size.width.0 == 0 {
+                            return Ok(0);
+                        }
+                        let mask =
+                            crate::skathi_raster::rasterize(font, coords, context, params, bounds)?;
+                        Ok(mask.iter().map(|&v| v as u64).sum())
+                    };
+                    row.skathi_ink += skathi(loaded.as_swash(), &coords, &params)?;
+                    let reference_params = RenderGlyphParams {
+                        font_id: FontId(usize::MAX - slot),
+                        ..params
+                    };
+                    row.skathi_reference_ink +=
+                        skathi(explicit, &reference_coords, &reference_params)?;
+                }
+            }
+            Ok(row)
+        };
+        let check = |label: &str, row: &Row| {
+            eprintln!(
+                "{label} | width {:8.3} (axes set {:8.3}) | ink {:7} | skathi-mode {:7} ({:7}) | masks off {} | lean {:.2}",
+                row.width,
+                row.reference_width,
+                row.ink,
+                row.skathi_ink,
+                row.skathi_reference_ink,
+                row.mismatched,
+                row.lean
+            );
+            assert!(
+                (row.width - row.reference_width).abs() < 0.01,
+                "{label}: width {} against {}",
+                row.width,
+                row.reference_width
+            );
+            assert_eq!(
+                row.mismatched, 0,
+                "{label}: masks differ from the instance's"
+            );
+            assert_eq!(
+                row.skathi_ink, row.skathi_reference_ink,
+                "{label}: skathi-mode"
+            );
+        };
+
+        let base = Font {
+            family: family.clone(),
+            ..Default::default()
+        };
+        let at = |wght: f32, wdth: f32, slnt: f32, grad: f32| {
+            [
+                (b"wght", wght),
+                (b"wdth", wdth),
+                (b"slnt", slnt),
+                (b"GRAD", grad),
+            ]
+        };
+        let oblique = |angle: f32| Font {
+            style: FontStyle::Oblique,
+            oblique_angle: ObliqueAngle(angle),
+            ..base.clone()
+        };
+        let wide = |width: f32| Font {
+            width: FontWidth(width),
+            ..base.clone()
+        };
+        let set = |settings: &[(&[u8; 4], f32)], font: Font| Font {
+            variations: FontVariations::new(settings.iter().map(|(t, v)| (axis_tag(t), *v))),
+            ..font
+        };
+        let cases = vec![
+            ("normal", base.clone(), at(400., 100., 0., 0.)),
+            ("condensed", wide(75.), at(400., 75., 0., 0.)),
+            ("expanded", wide(125.), at(400., 125., 0., 0.)),
+            ("10% clamps to the axis", wide(10.), at(400., 25., 0., 0.)),
+            ("oblique 8deg", oblique(8.), at(400., 100., -8., 0.)),
+            (
+                "italic through slnt",
+                Font {
+                    style: FontStyle::Italic,
+                    ..base.clone()
+                },
+                at(400., 100., -10., 0.),
+            ),
+            ("oblique -5deg clamps", oblique(-5.), at(400., 100., 0., 0.)),
+            (
+                "GRAD 150",
+                set(&[(b"GRAD", 150.)], base.clone()),
+                at(400., 100., 0., 150.),
+            ),
+            (
+                "wght setting over bold",
+                set(
+                    &[(b"wght", 300.)],
+                    Font {
+                        weight: gpui::FontWeight::BOLD,
+                        ..base.clone()
+                    },
+                ),
+                at(300., 100., 0., 0.),
+            ),
+            (
+                "wdth setting over expanded",
+                set(&[(b"wdth", 60.)], wide(125.)),
+                at(400., 60., 0., 0.),
+            ),
+        ];
+        let mut rows = Vec::new();
+        for (i, (label, font, axes)) in cases.iter().enumerate() {
+            let row = drawn(font, *axes, 100 + i)?;
+            check(label, &row);
+            rows.push(row);
+        }
+        let [
+            normal,
+            condensed,
+            expanded,
+            clamped,
+            oblique8,
+            italic,
+            backward,
+            grad,
+            wght,
+            wdth,
+        ] = &rows[..]
+        else {
+            unreachable!()
+        };
+        assert!(condensed.width < normal.width && normal.width < expanded.width);
+        assert!(clamped.width < condensed.width);
+        assert!(oblique8.lean > normal.lean + 1.0, "oblique leans forward");
+        assert!(italic.lean > oblique8.lean, "italic is slnt -10");
+        assert_eq!(backward.ink, normal.ink);
+        assert!(grad.ink > normal.ink);
+        assert!(wght.width < normal.width);
+        assert!(wdth.width < condensed.width);
+
+        let face_family = family.clone();
+        let composer: gpui::FamilyComposer = Arc::new(move |_: &Font| {
+            vec![gpui::ComposedFace {
+                family: face_family.clone(),
+                ranges: Arc::from([]),
+                descriptors: FaceDescriptors {
+                    width: Some((FontWidth(75.), FontWidth(100.))),
+                    oblique: Some((ObliqueAngle(0.), ObliqueAngle(5.))),
+                    variations: FontVariations::new([(axis_tag(b"GRAD"), 100.)]),
+                    ..Default::default()
+                },
+            }]
+        });
+        text_system.set_composed_families(vec![("Flex Web".into(), composer)]);
+        let web = |font: Font| Font {
+            family: "Flex Web".into(),
+            ..font
+        };
+        check(
+            "descriptor width",
+            &drawn(&web(wide(125.)), at(400., 100., 0., 100.), 200)?,
+        );
+        check(
+            "descriptor oblique",
+            &drawn(&web(oblique(12.)), at(400., 100., -5., 100.), 201)?,
+        );
+        check(
+            "descriptor settings",
+            &drawn(
+                &web(set(&[(b"GRAD", -100.)], base.clone())),
+                at(400., 100., 0., -100.),
+                202,
+            )?,
+        );
         Ok(())
     }
 }

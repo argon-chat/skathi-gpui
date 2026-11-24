@@ -54,9 +54,9 @@ struct FontInfo {
     /// Does the font declare an `opsz` (optical size) axis? Only such a font
     /// needs — or notices — the treatment in [`DirectWriteState::axes_for`].
     has_optical_size: bool,
-    /// vue-native fork: the face is a variable font instanced at the weight asked for, which
+    /// vue-native fork: the face is a variable font instanced at the coordinates asked for, which
     /// only its axis values name to DirectWrite.
-    weight_instance: bool,
+    instanced: bool,
     /// vue-native fork: set for a font of a composed family
     /// ([`gpui::FamilyComposer`]). Such a font is never shaped itself: a run
     /// of it is split into runs of its members first
@@ -361,7 +361,7 @@ impl DirectWriteState {
             axis_values,
             font_resource,
             has_optical_size,
-            weight_instance: false,
+            instanced: false,
             composite: None,
         });
         Some(font_id)
@@ -406,19 +406,13 @@ impl DirectWriteState {
     ) -> Option<FontId> {
         let mut faces = Vec::new();
         let mut ids = Vec::new();
-        for face in composer(font.weight, font.style) {
+        for face in composer(font) {
             // A member is a family of one file; one named as the family
             // itself would resolve to this very font.
             if face.family.eq_ignore_ascii_case(&font.family) {
                 continue;
             }
-            let member = Font {
-                family: face.family.clone(),
-                features: font.features.clone(),
-                fallbacks: None,
-                weight: face.weight.unwrap_or(font.weight),
-                style: font.style,
-            };
+            let member = face.member(font);
             if let Some(font_id) = self.resolve_font(components, &member) {
                 faces.push(face);
                 ids.push(font_id);
@@ -467,7 +461,7 @@ impl DirectWriteState {
             faces: vec![ComposedFace {
                 family: font.family.clone(),
                 ranges: Arc::from([]),
-                weight: None,
+                descriptors: Default::default(),
             }],
             ids: vec![own],
             rest: next,
@@ -489,8 +483,7 @@ impl DirectWriteState {
             family: first.clone().into(),
             features: font.features.clone(),
             fallbacks: (!rest.is_empty()).then(|| FontFallbacks::from_fonts(rest.to_vec())),
-            weight: font.weight,
-            style: font.style,
+            ..font.clone()
         };
         self.resolve_font(components, &next)
     }
@@ -617,12 +610,14 @@ impl DirectWriteState {
     }
 
     unsafe fn make_font_from_font_collection(
-        &Font {
+        request @ &Font {
             ref family,
             ref features,
             ref fallbacks,
             weight,
             style,
+            width,
+            ..
         }: &Font,
         collection: &IDWriteFontCollection1,
         factory: &IDWriteFactory5,
@@ -642,7 +637,7 @@ impl DirectWriteState {
                 .GetMatchingFonts(
                     &font_family_h,
                     font_weight_to_dwrite(weight),
-                    DWRITE_FONT_STRETCH_NORMAL,
+                    font_width_to_dwrite(width),
                     font_style_to_dwrite(style),
                 )
                 .log_err()?
@@ -667,8 +662,8 @@ impl DirectWriteState {
                 // correction possible later, when the size is known.
                 let (axis_values, font_resource, has_optical_size) =
                     unsafe { read_variations(&font_face) };
-                let (font_face, axis_values, weight_instance) =
-                    unsafe { at_weight(font_face, axis_values, font_resource.as_ref(), weight) };
+                let (font_face, axis_values, instanced) =
+                    unsafe { at_axes(font_face, axis_values, font_resource.as_ref(), request) };
                 let font_info = FontInfo {
                     font_family_h: font_family_h.clone(),
                     font_face,
@@ -678,7 +673,7 @@ impl DirectWriteState {
                     axis_values,
                     font_resource,
                     has_optical_size,
-                    weight_instance,
+                    instanced,
                     composite: None,
                 };
                 Some(font_info)
@@ -849,7 +844,7 @@ impl DirectWriteState {
         // nothing.
         let optical = font_runs.iter().any(|run| {
             let info = &self.fonts[run.font_id.0];
-            info.has_optical_size || info.weight_instance
+            info.has_optical_size || info.instanced
         });
         if optical {
             for run in font_runs {
@@ -874,7 +869,7 @@ impl DirectWriteState {
                         collection,
                         font_info.font_face.GetWeight(),
                         font_info.font_face.GetStyle(),
-                        DWRITE_FONT_STRETCH_NORMAL,
+                        font_info.font_face.GetStretch(),
                         font_size.as_f32(),
                         &components.locale,
                     )?
@@ -946,6 +941,7 @@ impl DirectWriteState {
                 text_layout.SetFontSize(font_size, text_range)?;
                 text_layout.SetFontStyle(font_info.font_face.GetStyle(), text_range)?;
                 text_layout.SetFontWeight(font_info.font_face.GetWeight(), text_range)?;
+                text_layout.SetFontStretch(font_info.font_face.GetStretch(), text_range)?;
                 text_layout.SetTypography(&font_info.features, text_range)?;
                 // …and once axes are in play, the two calls above are INERT:
                 // axis matching stops consulting a range's weight and style, so
@@ -2117,53 +2113,90 @@ unsafe fn read_variations(
     }
 }
 
-/// `face` instanced at `weight`, clamped to its resource's `wght` range, with its axis values
-/// and whether it is a new instance. A font set holds a variable font's named instances only,
-/// so a weight between two of them matched the nearer one.
-unsafe fn at_weight(
+/// `face` instanced at the coordinates `font` asks of its resource's axes
+/// ([`Font::variation_coordinates`]), with its axis values and whether it is a new instance. A
+/// font set holds a variable font's named instances only, so anything between two of them
+/// matched the nearer one.
+unsafe fn at_axes(
     face: IDWriteFontFace3,
     values: Vec<DWRITE_FONT_AXIS_VALUE>,
     resource: Option<&IDWriteFontResource>,
-    weight: FontWeight,
+    font: &Font,
 ) -> (IDWriteFontFace3, Vec<DWRITE_FONT_AXIS_VALUE>, bool) {
     let Some(resource) = resource else {
         return (face, values, false);
     };
-    let range = unsafe {
+    let axes = unsafe {
         let mut ranges =
             vec![DWRITE_FONT_AXIS_RANGE::default(); resource.GetFontAxisCount() as usize];
-        resource
-            .GetFontAxisRanges(&mut ranges)
-            .log_err()
-            .and_then(|()| {
-                ranges.into_iter().find(|range| {
-                    range.axisTag == DWRITE_FONT_AXIS_TAG_WEIGHT && range.minValue < range.maxValue
-                })
+        if resource.GetFontAxisRanges(&mut ranges).log_err().is_none() {
+            return (face, values, false);
+        }
+        let mut defaults = vec![DWRITE_FONT_AXIS_VALUE::default(); ranges.len()];
+        let defaults_read = resource.GetDefaultFontAxisValues(&mut defaults).is_ok();
+        ranges
+            .iter()
+            .filter(|range| range.minValue < range.maxValue)
+            .map(|range| VariationAxis {
+                tag: range.axisTag.0.swap_bytes(),
+                min: range.minValue,
+                default: defaults
+                    .iter()
+                    .find(|value| defaults_read && value.axisTag == range.axisTag)
+                    .map_or(range.minValue, |value| value.value),
+                max: range.maxValue,
             })
+            .collect::<Vec<_>>()
     };
-    let Some(range) = range else {
-        return (face, values, false);
-    };
-    let wght = weight.0.clamp(range.minValue, range.maxValue);
     let mut instanced = values.clone();
-    match instanced
-        .iter_mut()
-        .find(|axis| axis.axisTag == DWRITE_FONT_AXIS_TAG_WEIGHT)
-    {
-        Some(axis) if (axis.value - wght).abs() < 0.01 => return (face, values, false),
-        Some(axis) => axis.value = wght,
-        None => instanced.push(DWRITE_FONT_AXIS_VALUE {
-            axisTag: DWRITE_FONT_AXIS_TAG_WEIGHT,
-            value: wght,
-        }),
+    let mut changed = false;
+    for (tag, value) in font.variation_coordinates(&axes) {
+        let tag = DWRITE_FONT_AXIS_TAG(tag.swap_bytes());
+        match instanced.iter_mut().find(|axis| axis.axisTag == tag) {
+            Some(axis) if (axis.value - value).abs() < 0.01 => {}
+            Some(axis) => {
+                axis.value = value;
+                changed = true;
+            }
+            None => {
+                instanced.push(DWRITE_FONT_AXIS_VALUE {
+                    axisTag: tag,
+                    value,
+                });
+                changed = true;
+            }
+        }
     }
-    match unsafe { resource.CreateFontFace(face.GetSimulations(), &instanced) }
+    // A font that varies in weight or slant through an axis is not emboldened or obliqued again
+    // by DirectWrite as well.
+    let mut simulations = unsafe { face.GetSimulations() };
+    if axes.iter().any(|axis| axis.tag == WGHT) {
+        simulations.0 &= !DWRITE_FONT_SIMULATIONS_BOLD.0;
+    }
+    if axes.iter().any(|axis| axis.tag == ITAL || axis.tag == SLNT) {
+        simulations.0 &= !DWRITE_FONT_SIMULATIONS_OBLIQUE.0;
+    }
+    if !changed && simulations == unsafe { face.GetSimulations() } {
+        return (face, values, false);
+    }
+    match unsafe { resource.CreateFontFace(simulations, &instanced) }
         .and_then(|instance| instance.cast::<IDWriteFontFace3>())
         .log_err()
     {
         Some(instance) => (instance, instanced, true),
         None => (face, values, false),
     }
+}
+
+/// The DirectWrite stretch class nearest a CSS width percentage.
+fn font_width_to_dwrite(width: FontWidth) -> DWRITE_FONT_STRETCH {
+    const CLASSES: [f32; 9] = [50., 62.5, 75., 87.5, 100., 112.5, 125., 150., 200.];
+    let nearest = CLASSES
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| (*a - width.0).abs().total_cmp(&(*b - width.0).abs()))
+        .map_or(4, |(index, _)| index);
+    DWRITE_FONT_STRETCH(nearest as i32 + 1)
 }
 
 fn font_style_to_dwrite(style: FontStyle) -> DWRITE_FONT_STYLE {
@@ -2239,6 +2272,7 @@ fn font_face_to_font(font_face: &IDWriteFontFace3, locale: &HSTRING) -> Option<F
         weight: font_weight_from_dwrite(weight),
         style: font_style_from_dwrite(style),
         fallbacks: None,
+        ..Default::default()
     })
 }
 
@@ -2975,7 +3009,7 @@ mod composed_tests {
         ComposedFace {
             family: family.to_string().into(),
             ranges: ranges.into(),
-            weight: None,
+            descriptors: Default::default(),
         }
     }
 
@@ -2992,15 +3026,15 @@ mod composed_tests {
     fn composed() -> Result<(Arc<TextSystem>, WindowTextSystem)> {
         let platform = Arc::new(DirectWriteTextSystem::new()?);
         let text_system = Arc::new(TextSystem::new(platform));
-        let composed: FamilyComposer = Arc::new(|weight, _| {
+        let composed: FamilyComposer = Arc::new(|font: &Font| {
             // A composer answers per weight: bold text has no Cyrillic face.
             let mut faces = vec![face("Segoe UI", &[(0x0000, 0x00FF)])];
-            if weight < FontWeight::BOLD {
+            if font.weight < FontWeight::BOLD {
                 faces.insert(0, face("Consolas", &[(0x0400, 0x045F)]));
             }
             faces
         });
-        let digits: FamilyComposer = Arc::new(|_, _| vec![face("Consolas", &[(0x30, 0x39)])]);
+        let digits: FamilyComposer = Arc::new(|_: &Font| vec![face("Consolas", &[(0x30, 0x39)])]);
         text_system.set_composed_families(vec![
             ("VN Composed".into(), composed),
             ("vn digits".into(), digits),

@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use crate::{FontStyle, FontWeight, SharedString};
+use crate::{Font, FontVariations, FontWeight, FontWidth, ObliqueAngle, SharedString};
 
 /// One face of a composed family: the family it is registered under (a family
 /// of its own, holding that one font file) and the characters it draws.
@@ -24,12 +24,47 @@ pub struct ComposedFace {
     pub family: SharedString,
     /// Inclusive code point ranges; empty means every code point.
     pub ranges: Arc<[(u32, u32)]>,
-    /// The weight the face is asked for instead of the run's: the run's weight clamped to the
-    /// face's declared range. `None` asks for the run's weight.
-    pub weight: Option<FontWeight>,
+    /// The face's declared ranges and settings, CSS `@font-face` descriptors.
+    pub descriptors: FaceDescriptors,
+}
+
+/// What a face declares of itself; a range clamps the run's value before the face is asked for
+/// it, `None` leaves it to the font's own axes.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct FaceDescriptors {
+    /// `font-weight`.
+    pub weight: Option<(FontWeight, FontWeight)>,
+    /// `font-stretch`.
+    pub width: Option<(FontWidth, FontWidth)>,
+    /// `font-style: oblique <angle> <angle>`.
+    pub oblique: Option<(ObliqueAngle, ObliqueAngle)>,
+    /// `font-variation-settings`, which the run's own settings override.
+    pub variations: FontVariations,
 }
 
 impl ComposedFace {
+    /// The font the face is asked for when it draws a run of `font`.
+    pub fn member(&self, font: &Font) -> Font {
+        let d = &self.descriptors;
+        let clamp = |v: f32, range: Option<(f32, f32)>| match range {
+            Some((lo, hi)) => v.clamp(lo.min(hi), hi.max(lo)),
+            None => v,
+        };
+        Font {
+            family: self.family.clone(),
+            features: font.features.clone(),
+            fallbacks: None,
+            weight: FontWeight(clamp(font.weight.0, d.weight.map(|(a, b)| (a.0, b.0)))),
+            style: font.style,
+            width: FontWidth(clamp(font.width.0, d.width.map(|(a, b)| (a.0, b.0)))),
+            oblique_angle: ObliqueAngle(clamp(
+                font.oblique_angle.0,
+                d.oblique.map(|(a, b)| (a.0, b.0)),
+            )),
+            variations: d.variations.overridden_by(&font.variations),
+        }
+    }
+
     /// Does the face draw `c`?
     pub fn covers(&self, c: char) -> bool {
         let c = c as u32;
@@ -41,10 +76,10 @@ impl ComposedFace {
     }
 }
 
-/// The faces a composed family draws text of a weight and style with, in the
-/// order they are tried for a character: the first that covers it draws it.
-/// Empty when the family has no face for that text (yet).
-pub type FamilyComposer = Arc<dyn Fn(FontWeight, FontStyle) -> Vec<ComposedFace> + Send + Sync>;
+/// The faces a composed family draws text of a font with, in the order they are
+/// tried for a character: the first that covers it draws it. Empty when the
+/// family has no face for that text (yet).
+pub type FamilyComposer = Arc<dyn Fn(&Font) -> Vec<ComposedFace> + Send + Sync>;
 
 /// Is `c` a character that belongs to the cluster before it, so that it is
 /// drawn with the same face as that character rather than chosen on its own?

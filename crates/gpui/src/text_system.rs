@@ -4,6 +4,7 @@ mod experiment;
 mod font_fallbacks;
 mod font_features;
 mod font_list;
+mod font_variations;
 mod line;
 mod line_layout;
 mod line_wrapper;
@@ -20,6 +21,7 @@ pub use experiment::{
 pub use font_fallbacks::*;
 pub use font_features::*;
 pub use font_list::*;
+pub use font_variations::*;
 pub use line::*;
 pub use line_layout::*;
 pub use line_wrapper::*;
@@ -1649,6 +1651,15 @@ pub struct Font {
 
     /// The font style.
     pub style: FontStyle,
+
+    /// The width, CSS `font-stretch`.
+    pub width: FontWidth,
+
+    /// The angle of an oblique style, and of an italic one drawn through a `slnt` axis.
+    pub oblique_angle: ObliqueAngle,
+
+    /// Axis coordinates set explicitly, CSS `font-variation-settings`.
+    pub variations: FontVariations,
 }
 
 impl Default for Font {
@@ -1665,6 +1676,9 @@ pub fn font(family: impl Into<SharedString>) -> Font {
         weight: FontWeight::default(),
         style: FontStyle::default(),
         fallbacks: None,
+        width: FontWidth::default(),
+        oblique_angle: ObliqueAngle::default(),
+        variations: FontVariations::default(),
     }
 }
 

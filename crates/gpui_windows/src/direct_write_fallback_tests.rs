@@ -27,18 +27,18 @@ fn listed(family: &str, fallbacks: &[&str]) -> Font {
 fn text_systems() -> Result<(Arc<TextSystem>, WindowTextSystem)> {
     let platform = Arc::new(DirectWriteTextSystem::new()?);
     let text_system = Arc::new(TextSystem::new(platform));
-    let han: FamilyComposer = Arc::new(|_, _| {
+    let han: FamilyComposer = Arc::new(|_: &Font| {
         vec![ComposedFace {
             family: "SimSun".into(),
             ranges: Arc::from([(0x4E00, 0x9FFF)]),
-            weight: None,
+            descriptors: Default::default(),
         }]
     });
-    let wide: FamilyComposer = Arc::new(|_, _| {
+    let wide: FamilyComposer = Arc::new(|_: &Font| {
         vec![ComposedFace {
             family: "Consolas".into(),
             ranges: Arc::from([]),
-            weight: None,
+            descriptors: Default::default(),
         }]
     });
     text_system.set_composed_families(vec![("VN Han".into(), han), ("VN Wide".into(), wide)]);

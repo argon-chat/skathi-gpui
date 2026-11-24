@@ -945,6 +945,7 @@ mod tests {
                     fallbacks: None,
                     weight: FontWeight::default(),
                     style: FontStyle::Normal,
+                    ..Default::default()
                 },
                 ..Default::default()
             })
