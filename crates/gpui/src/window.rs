@@ -1766,6 +1766,10 @@ pub struct Window {
     pub(crate) rendered_entity_stack: Vec<EntityId>,
     pub(crate) element_offset_stack: Vec<Point<Pixels>>,
     pub(crate) element_opacity: f32,
+    /// vue-native fork: the opacity the enclosing content-effect groups take
+    /// off their content ([`Window::vn_with_effect_content`] paints it at 1 and
+    /// composites the group at that opacity), multiplied. 1 outside any.
+    vn_group_opacity: f32,
     /// vue-native fork: the colour [`Window::paint_image`] tints with
     /// ([`Window::with_image_tint`]); transparent outside a tint scope.
     element_image_tint: Hsla,
@@ -3149,6 +3153,7 @@ impl Window {
             vn_clip_stack: None,
             vn_capture_records: FxHashMap::default(),
             element_opacity: 1.0,
+            vn_group_opacity: 1.0,
             element_image_tint: Hsla::transparent_black(),
             element_image_headroom: (1.0, false),
             element_transform: TransformationMatrix::unit(),
@@ -6942,6 +6947,14 @@ impl Window {
             .unwrap_or_default()
     }
 
+    /// The opacity the element being painted is shown at: its own and every ancestor's, multiplied.
+    /// For embedders that show something of their own under an element and must fade it with the
+    /// element. Inside a content-effect group (`--shading` reading the content) it includes the
+    /// opacity the group is composited at, which `element_opacity` leaves out. Paint or prepaint only.
+    pub fn vn_element_opacity(&self) -> f32 {
+        self.element_opacity() * self.vn_group_opacity
+    }
+
     /// Obtain the current element opacity. This method should only be called during the
     /// prepaint phase of element drawing.
     #[inline]
@@ -7836,8 +7849,11 @@ impl Window {
             content_mask,
         });
         let outer = mem::replace(&mut self.element_opacity, 1.);
+        let group = self.vn_group_opacity;
+        self.vn_group_opacity = group * opacity;
         let result = f(self, cx);
         self.vn_paint_scope(element, opacity, cx);
+        self.vn_group_opacity = group;
         self.element_opacity = outer;
         self.next_frame.scene.vn_pop_isolation();
         result
