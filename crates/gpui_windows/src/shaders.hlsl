@@ -18,6 +18,10 @@ Texture2D<float4> t_sprite: register(t0);
 SamplerState s_sprite: register(s0);
 // Backdrop blur compositing keeps the unmodified render-target snapshot in t2.
 Texture2D<float4> t_backdrop_original: register(t2);
+// vue-native fork: the snapshot without the underlay sources composited under it
+// (`gpui::VnUnderlay`), what a backdrop reader writes back outside its shape; t2's
+// texture when there are none.
+Texture2D<float4> t_backdrop_page: register(t13);
 // The global sampler at s0 wraps; the blur pyramid taps read outside [0,1] at
 // the screen borders and must clamp instead, or the opposite edge bleeds in.
 SamplerState s_clamp: register(s1);
@@ -1440,7 +1444,7 @@ float4 blur_rect_fragment(BlurRectFragmentInput input): SV_Target {
     float sdf = shaped_quad_sdf(position, blur_rect.bounds, blur_rect.corner_radii, blur_rect.corner_shapes);
     float shape_alpha = saturate(antialias_threshold - sdf);
 
-    float4 original = t_backdrop_original.Sample(s_clamp, texture_position);
+    float4 original = t_backdrop_page.Sample(s_clamp, texture_position);
     float4 blurred = t_sprite.Sample(s_clamp, texture_position);
     float4 tint = hsla_to_rgba(blur_rect.tint);
     // Tint is straight alpha; DirectComposition uses premultiplied alpha.
@@ -2185,6 +2189,23 @@ float4 sample_surface(float2 uv, PolychromeSprite sprite, uint mode) {
     return float4(clamp(sum.rgb / sum.a, low.rgb, high.rgb), alpha);
 }
 
+// An atlas texel as the scene holds it: a half-float tile clamped to the headroom of its
+// sampling word and sRGB-encoded. See PolychromeSprite::sampling_word for the surface tag
+// and legacy HDR word.
+float4 encode_sampled_texel(float4 color, uint word) {
+    bool packed_word = (word & 0x80000000u) != 0u;
+    uint code = word & 0x07ffffffu;
+    uint headroom = packed_word ? (code == 0u ? 0u : code + 0x3f7fffffu) : word;
+    if (headroom != 0u) {
+        float3 light = min(color.rgb, asfloat(headroom));
+        bool signed_hdr = (word & 0xc0000000u) == 0xc0000000u;
+        float3 encoded = signed_hdr ? sign(light) * linear_to_srgb(abs(light))
+                                    : linear_to_srgb(max(light, 0.0));
+        color = float4(encoded, saturate(color.a));
+    }
+    return color;
+}
+
 float4 polychrome_sprite_fragment(PolychromeSpriteFragmentInput input): SV_Target {
     PolychromeSprite sprite = poly_sprites[input.sprite_id];
     float4 tile_clamp = to_tile_clamp(sprite.tile);
@@ -2198,17 +2219,7 @@ float4 polychrome_sprite_fragment(PolychromeSpriteFragmentInput input): SV_Targe
     }
     float distance = shaped_quad_sdf(input.local_position, sprite.bounds, sprite.corner_radii, sprite.corner_shapes);
 
-    float4 color = sample;
-    // See PolychromeSprite::sampling_word for the surface tag and legacy HDR word.
-    uint code = sprite.pad & 0x07ffffffu;
-    uint headroom = packed_word ? (code == 0u ? 0u : code + 0x3f7fffffu) : sprite.pad;
-    if (headroom != 0u) {
-        float3 light = min(color.rgb, asfloat(headroom));
-        bool signed_hdr = (sprite.pad & 0xc0000000u) == 0xc0000000u;
-        float3 encoded = signed_hdr ? sign(light) * linear_to_srgb(abs(light))
-                                    : linear_to_srgb(max(light, 0.0));
-        color = float4(encoded, saturate(color.a));
-    }
+    float4 color = encode_sampled_texel(sample, sprite.pad);
     // vue-native fork: the tint takes the pixels by its alpha, keeping theirs
     // (canvas `source-atop`, in straight alpha).
     if (sprite.tint.a > 0.0) {
@@ -2394,4 +2405,70 @@ float4 vn_layer_fragment(VnLayerFragmentInput input): SV_Target {
     }
     // Premultiplied over premultiplied (the path sprite blend).
     return color * (coverage * layer.opacity);
+}
+
+/*
+**
+**              Underlay sources (vue-native fork)
+**
+*/
+
+// A picture under the page (`gpui::VnUnderlay`), drawn into a backdrop snapshot
+// destination-over: the picture's tile (straight alpha) at t0, mapped onto
+// `content`, inside `bounds` rounded by `corner_radii` and cut by `clip`.
+struct VnUnderlay {
+    uint order;
+    uint sampling;
+    AtlasTile tile;
+    Bounds bounds;
+    Bounds clip;
+    Corners corner_radii;
+    Bounds content;
+    float opacity;
+    uint flags;
+    uint2 key;
+    uint2 pad;
+};
+
+StructuredBuffer<VnUnderlay> vn_underlays: register(t1);
+
+struct VnUnderlayVertexOutput {
+    nointerpolation uint underlay_id: TEXCOORD0;
+    float4 position: SV_Position;
+    float4 clip_distance: SV_ClipDistance;
+};
+
+struct VnUnderlayFragmentInput {
+    nointerpolation uint underlay_id: TEXCOORD0;
+    float4 position: SV_Position;
+};
+
+VnUnderlayVertexOutput vn_underlay_vertex(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
+    float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
+    uint underlay_id = batch_start_index + instance_id;
+    VnUnderlay underlay = vn_underlays[underlay_id];
+
+    VnUnderlayVertexOutput output;
+    output.position = to_device_position(unit_vertex, underlay.bounds);
+    output.underlay_id = underlay_id;
+    output.clip_distance = distance_from_clip_rect(unit_vertex, underlay.bounds, underlay.clip);
+    return output;
+}
+
+float4 vn_underlay_fragment(VnUnderlayFragmentInput input): SV_Target {
+    VnUnderlay underlay = vn_underlays[input.underlay_id];
+    float2 position = input.position.xy;
+    float2 local = (position - underlay.content.origin) / max(underlay.content.size, 1e-3);
+    float2 atlas_size;
+    t_sprite.GetDimensions(atlas_size.x, atlas_size.y);
+    float4 tile_clamp = to_tile_clamp(underlay.tile);
+    float2 uv = (float2(underlay.tile.bounds.origin) + local * float2(underlay.tile.bounds.size)) / atlas_size;
+    float4 color = encode_sampled_texel(
+        t_sprite.SampleLevel(s_clamp, clamp(uv, tile_clamp.xy, tile_clamp.zw), 0.0), underlay.sampling);
+    float2 inset = min(position - underlay.content.origin,
+        underlay.content.origin + underlay.content.size - position);
+    float coverage = saturate(min(inset.x, inset.y) + 0.5) * underlay.opacity *
+        saturate(0.5 - quad_sdf(position, underlay.bounds, underlay.corner_radii));
+    float alpha = saturate(color.a) * coverage;
+    return float4(color.rgb * alpha, alpha);
 }

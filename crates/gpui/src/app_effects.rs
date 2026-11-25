@@ -15,7 +15,7 @@ use parking_lot::{Condvar, Mutex};
 pub const APP_EFFECTS_DIR_ENV: &str = "SK_EFFECTS_DIR";
 
 /// The `effects.json` layout this build understands.
-pub const APP_EFFECTS_SCHEMA: u32 = 12;
+pub const APP_EFFECTS_SCHEMA: u32 = 13;
 
 /// One generated shader of an [`AppEffect`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -597,7 +597,7 @@ mod tests {
     fn the_manifest_resolves_each_effect_to_its_shader_per_target() -> Result<(), String> {
         let app = AppEffects::new(
             "test",
-            r#"{"schema": 12, "kind": "user", "effects": [
+            r#"{"schema": 13, "kind": "user", "effects": [
                 {"name": "ripple", "backdrop": true, "hlsl": "ripple.hlsl", "wgsl": "ripple.wgsl"},
                 {"name": "plain", "backdrop": false, "hlsl": "plain.hlsl"}
             ]}"#,
@@ -625,7 +625,7 @@ mod tests {
         let install = |ripple: &str, plain: &str| -> Result<(), String> {
             reload_app_effects(AppEffects::new(
                 "test",
-                r#"{"schema": 12, "effects": [
+                r#"{"schema": 13, "effects": [
                     {"name": "ripple", "backdrop": true, "wgsl": "ripple.wgsl"},
                     {"name": "plain", "backdrop": false, "wgsl": "plain.wgsl"}
                 ]}"#,

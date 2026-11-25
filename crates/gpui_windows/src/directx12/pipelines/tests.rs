@@ -14,6 +14,7 @@ fn modules() -> impl Iterator<Item = ShaderModule> {
         ShaderModule::SubpixelSprite,
         ShaderModule::PolychromeSprite,
         ShaderModule::VnLayer,
+        ShaderModule::VnUnderlay,
     ]
     .into_iter()
     .chain(EffectShader::ALL.into_iter().map(ShaderModule::Effect))
@@ -187,7 +188,7 @@ fn native_app_effects_are_warmed_before_their_first_frame_and_after_a_reload() -
         gpui::reload_app_effects(
             gpui::AppEffects::new(
                 "test",
-                r#"{"schema": 12, "effects": [
+                r#"{"schema": 13, "effects": [
                     {"name": "tint", "backdrop": false, "history": true, "hlsl": "tint.hlsl"}
                 ]}"#,
                 [(
@@ -307,7 +308,7 @@ fn native_app_effects_are_warmed_only_as_the_prewarm_setting_says() -> Result<()
         gpui::reload_app_effects(
             gpui::AppEffects::new(
                 "test",
-                r#"{"schema": 12, "effects": [
+                r#"{"schema": 13, "effects": [
                     {"name": "tint", "backdrop": false, "hlsl": "tint.hlsl"},
                     {"name": "other", "backdrop": false, "hlsl": "other.hlsl"}
                 ]}"#,

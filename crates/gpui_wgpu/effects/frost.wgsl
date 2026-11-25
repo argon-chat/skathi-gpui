@@ -5,7 +5,7 @@
 //   source:     crates/sk-effects/shaders/frost.slang+wrapper
 //   signature:  frost(<number:strength>, <length:radius>?, <color:tint>?)
 //   slang:      2026.12
-//   schema:     12
+//   schema:     13
 //   src-sha256: 9024d32ca088179a5696533d2e2277f02d429ad8a9b78b9e09f279a3ab5615da
 //   output:     premultiplied RGBA, written with blending disabled (it owns its quad)
 //
@@ -78,7 +78,7 @@ struct SLANG_ParameterGroup_GlobalParams_std140_0
 
 @binding(8) @group(2) var sk_history_0 : texture_2d<f32>;
 
-@binding(2) @group(2) var sk_backdrop_original_0 : texture_2d<f32>;
+@binding(10) @group(2) var sk_backdrop_page_0 : texture_2d<f32>;
 
 struct Frost_0
 {
@@ -219,7 +219,7 @@ fn sk_finish_0( material_0 : Frost_0,  i_1 : EffectInput_0) -> vec4<f32>
     var result_2 : vec4<f32>;
     if(i_1.hasBackdrop_0)
     {
-        result_2 = mix((textureSampleLevel((sk_backdrop_original_0), (sk_clamp_sampler_0), (i_1.uv_0), (0.0f))), shaded_2, vec4<f32>(coverage_1));
+        result_2 = mix((textureSampleLevel((sk_backdrop_page_0), (sk_clamp_sampler_0), (i_1.uv_0), (0.0f))), shaded_2, vec4<f32>(coverage_1));
     }
     else
     {

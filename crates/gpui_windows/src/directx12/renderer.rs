@@ -575,6 +575,8 @@ struct Renderer {
     present_no_wait: bool,
     layers: Vec<Arc<Target>>,
     snapshot: Option<Arc<Target>>,
+    /// vue-native: the snapshot with the underlay sources under it, while the scene has some.
+    underlaid: Option<Arc<Target>>,
     blur: Vec<Arc<Target>>,
     idle_frames: ScratchIdle,
     timings: Option<RendererTimings>,
@@ -734,6 +736,7 @@ impl Renderer {
             present_no_wait: false,
             layers: Vec::new(),
             snapshot: None,
+            underlaid: None,
             blur: Vec::new(),
             idle_frames: ScratchIdle::default(),
             timings: RendererTimings::from_environment(),
@@ -825,6 +828,7 @@ impl Renderer {
         // Every scratch target and snapshot had the old format.
         self.layers.clear();
         self.snapshot = None;
+        self.underlaid = None;
         self.blur.clear();
         self.vn_snapshots.clear();
         self.hdr_scene = None;
@@ -856,6 +860,7 @@ impl Renderer {
         self.swap_chain.take();
         self.layers.clear();
         self.snapshot = None;
+        self.underlaid = None;
         self.blur.clear();
         self.effect_textures.clear();
         let mut replacement = crate::try_to_recover_from_device_lost(|| {
@@ -905,6 +910,7 @@ impl Renderer {
         self.fences = [0; BUFFERS];
         self.layers.clear();
         self.snapshot = None;
+        self.underlaid = None;
         self.blur.clear();
         self.hdr_scene = None;
         Ok(())
@@ -1132,6 +1138,9 @@ impl Renderer {
         if held == 0 {
             self.snapshot = None;
         }
+        if held == 0 || scene.vn_underlays.is_empty() {
+            self.underlaid = None;
+        }
         self.blur.truncate(held.saturating_sub(1));
         let prepare_time = prepare_started
             .map(|started| started.elapsed())
@@ -1206,6 +1215,13 @@ impl Renderer {
                     .iter()
                     .map(|sprite| sprite.tile.texture_id),
             )
+            .chain(
+                scene
+                    .vn_underlays
+                    .iter()
+                    .filter(|underlay| needs_backdrop && underlay.has_picture())
+                    .map(|underlay| underlay.tile.texture_id),
+            )
         {
             if previous.replace(texture_id) == Some(texture_id) {
                 continue;
@@ -1246,11 +1262,13 @@ impl Renderer {
                 work: &mut work,
                 uploads,
                 target: target.clone(),
+                root: target.clone(),
                 format: self.format,
                 width: self.width,
                 height: self.height,
                 layers: &mut self.layers,
                 snapshot: &mut self.snapshot,
+                underlaid: &mut self.underlaid,
                 blur: &mut self.blur,
                 bound: BoundState::default(),
                 clip: full_rect(self.width, self.height),
@@ -1331,6 +1349,7 @@ impl Renderer {
             ),
             (!scene.paths.is_empty(), ShaderModule::PathTile, 1),
             (!scene.vn_layers.is_empty(), ShaderModule::VnLayer, 1),
+            (!scene.vn_underlays.is_empty(), ShaderModule::VnUnderlay, 1),
             (
                 !scene.backdrop_blur_rects.is_empty(),
                 ShaderModule::BlurRect,
@@ -1739,6 +1758,7 @@ struct SceneBuffers {
     layers: GpuAddress,
     clips: GpuAddress,
     text_backgrounds: GpuAddress,
+    underlays: GpuAddress,
 }
 impl SceneBuffers {
     fn new(
@@ -1768,6 +1788,7 @@ impl SceneBuffers {
                 uploads,
                 &scene.vn_text_backgrounds,
             )?,
+            underlays: upload_or_dummy(gpu, retained, dummy, uploads, &scene.vn_underlays)?,
         })
     }
 }
@@ -1960,10 +1981,13 @@ struct Encoding<'a> {
     work: &'a mut RenderWork,
     uploads: &'a mut UploadPool,
     target: Arc<Target>,
+    /// The window's own target, the one backdrop snapshots composite underlays under.
+    root: Arc<Target>,
     width: u32,
     height: u32,
     layers: &'a mut Vec<Arc<Target>>,
     snapshot: &'a mut Option<Arc<Target>>,
+    underlaid: &'a mut Option<Arc<Target>>,
     blur: &'a mut Vec<Arc<Target>>,
     bound: BoundState,
     /// Device pixels of the current window-sized target that can still reach
@@ -1997,7 +2021,7 @@ impl Encoding<'_> {
             sdr_white.to_bits(),
             1,
             3,
-            [Some(&scene.sampled()), None, None, None],
+            [Some(&scene.sampled()), None, None, None, None],
         )
     }
     /// Binds a window-sized target, scissored to the current clip.
@@ -2073,7 +2097,7 @@ impl Encoding<'_> {
             start,
             count,
             vertices,
-            [first, second, None, None],
+            [first, second, None, None, None],
         )
     }
     fn draw_pipeline_textures(
@@ -2383,7 +2407,7 @@ impl Encoding<'_> {
                         *step,
                         1,
                         4,
-                        [None, None, content.as_ref(), history_texture.as_ref()],
+                        [None, None, content.as_ref(), history_texture.as_ref(), None],
                     )?;
                     write.to(self.list, SHADER_READ, self.changes);
                     self.bind_target(&parent)?;
@@ -2401,14 +2425,14 @@ impl Encoding<'_> {
             let Some((pipeline, backdrop)) = found else {
                 continue;
             };
-            let (blurred, original) = if backdrop {
-                let (blurred, original) = self.backdrop(BackdropRequest {
+            let snapshot = if backdrop {
+                Some(self.backdrop(BackdropRequest {
                     kernel_levels: quad.effective_kernel_levels() as usize,
                     samples: None,
-                })?;
-                (Some(blurred), Some(original))
+                    underlays: false,
+                })?)
             } else {
-                (None, None)
+                None
             };
             self.bind_effect_textures(&images)?;
             self.draw_pipeline_textures(
@@ -2418,10 +2442,11 @@ impl Encoding<'_> {
                 1,
                 4,
                 [
-                    blurred.as_ref(),
-                    original.as_ref(),
+                    snapshot.as_ref().map(|s| &s.blurred),
+                    snapshot.as_ref().map(|s| &s.raw),
                     content.as_ref(),
                     history_texture.as_ref(),
+                    snapshot.as_ref().map(|s| &s.page),
                 ],
             )?;
         }
@@ -2595,8 +2620,11 @@ impl Encoding<'_> {
         Ok(())
     }
     /// Snapshots the current target and blurs it as `request` asks, within the
-    /// pixels that can still reach the screen.
-    fn backdrop(&mut self, request: BackdropRequest) -> Result<(AtlasTexture, AtlasTexture)> {
+    /// pixels that can still reach the screen. On the window's own target the
+    /// underlay sources go under a second copy, which the pyramid is built from.
+    fn backdrop(&mut self, request: BackdropRequest) -> Result<Backdrop> {
+        let request = request.on_root(Arc::ptr_eq(&self.target, &self.root));
+        let underlays = request.underlays(self.scene);
         let region = request
             .region()
             .map(|region| intersect(rect_of(region), self.clip));
@@ -2646,14 +2674,24 @@ impl Encoding<'_> {
                 );
             }
         }
-        snapshot.to(self.list, SHADER_READ, self.changes);
+        let page = snapshot.sampled();
+        let raw = if underlays.is_empty() {
+            snapshot.to(self.list, SHADER_READ, self.changes);
+            page.clone()
+        } else {
+            self.underlay(&snapshot, region, &underlays)?
+        };
         let target = self.target.clone();
         self.bind_target(&target)?;
         let levels = levels.min(self.blur.len());
         if levels == 0 {
-            return Ok((snapshot.sampled(), snapshot.sampled()));
+            return Ok(Backdrop {
+                blurred: raw.clone(),
+                raw,
+                page,
+            });
         }
-        let mut source = snapshot.sampled();
+        let mut source = raw.clone();
         for level in 0..levels {
             let target = self
                 .blur
@@ -2676,7 +2714,81 @@ impl Encoding<'_> {
         }
         let target = self.target.clone();
         self.bind_target(&target)?;
-        Ok((source, snapshot.sampled()))
+        Ok(Backdrop {
+            blurred: source,
+            raw,
+            page,
+        })
+    }
+    /// Copies the page-only `snapshot`'s `region` into the underlaid copy and
+    /// draws `underlays` (topmost first) under it.
+    fn underlay(
+        &mut self,
+        snapshot: &Arc<Target>,
+        region: RECT,
+        underlays: &[&VnUnderlay],
+    ) -> Result<AtlasTexture> {
+        if self.underlaid.is_none() {
+            *self.underlaid = Some(Target::new_in(
+                self.gpu,
+                self.format,
+                self.width,
+                self.height,
+                1,
+            )?);
+        }
+        let underlaid = self
+            .underlaid
+            .as_ref()
+            .context("D3D12 underlaid snapshot missing")?
+            .clone();
+        #[cfg(test)]
+        tests::UNDERLAY_REGIONS.with_borrow_mut(|regions| regions.push(region));
+        snapshot.to(self.list, D3D12_RESOURCE_STATE_COPY_SOURCE, self.changes);
+        underlaid.to(self.list, D3D12_RESOURCE_STATE_COPY_DEST, self.changes);
+        retain(&self.retained, underlaid.clone());
+        let source = TextureLocation::subresource(&snapshot.resource, 0);
+        let destination = TextureLocation::subresource(&underlaid.resource, 0);
+        let region_box = D3D12_BOX {
+            left: region.left as u32,
+            top: region.top as u32,
+            front: 0,
+            right: region.right as u32,
+            bottom: region.bottom as u32,
+            back: 1,
+        };
+        unsafe {
+            self.list.CopyTextureRegion(
+                destination.raw(),
+                region.left as u32,
+                region.top as u32,
+                0,
+                source.raw(),
+                Some(&region_box),
+            );
+        }
+        snapshot.to(self.list, SHADER_READ, self.changes);
+        self.bind_target_rect(&underlaid, region)?;
+        let buffer = self.data.underlays;
+        for underlay in underlays {
+            let texture = self
+                .textures
+                .get(&underlay.tile.texture_id)
+                .context("D3D12 atlas snapshot is missing an underlay's texture")?
+                .clone();
+            self.draw(
+                ShaderModule::VnUnderlay,
+                buffer,
+                underlay.order,
+                1,
+                4,
+                Some(&texture),
+                None,
+                1,
+            )?;
+        }
+        underlaid.to(self.list, SHADER_READ, self.changes);
+        Ok(underlaid.sampled())
     }
     fn blur_pass(
         &mut self,
@@ -2713,17 +2825,18 @@ impl Encoding<'_> {
                 first = next;
                 continue;
             }
-            let (blurred, original) = self.backdrop(request)?;
+            let snapshot = self.backdrop(request)?;
             let buffer = self.data.blur_rects;
-            self.draw(
-                ShaderModule::BlurRect,
+            let pipeline = self
+                .pipelines
+                .pipeline(ShaderModule::BlurRect, self.format, 1)?;
+            self.draw_pipeline_textures(
+                &pipeline,
                 buffer,
                 first as u32,
                 (next - first) as u32,
                 4,
-                Some(&blurred),
-                Some(&original),
-                1,
+                snapshot.textures(),
             )?;
             first = next;
         }
@@ -2768,16 +2881,15 @@ impl Encoding<'_> {
                 next += 1;
             }
             let request = BackdropRequest::effects(&self.scene.effect_quads[first..next]);
-            let (blurred, original) = self.backdrop(request)?;
+            let snapshot = self.backdrop(request)?;
             self.bind_effect_textures(&textures)?;
-            self.draw_pipeline(
+            self.draw_pipeline_textures(
                 &pipeline,
                 buffer,
                 first as u32,
                 (next - first) as u32,
                 4,
-                Some(&blurred),
-                Some(&original),
+                snapshot.textures(),
             )?;
             first = next;
         }
@@ -2813,6 +2925,26 @@ impl Encoding<'_> {
             self.bound.effect_table = table.ptr;
         }
         Ok(())
+    }
+}
+
+/// vue-native: what a backdrop reader samples: the pyramid's top (t0), the
+/// snapshot with any underlay sources under it (t2), and without them (t13).
+struct Backdrop {
+    blurred: AtlasTexture,
+    raw: AtlasTexture,
+    page: AtlasTexture,
+}
+
+impl Backdrop {
+    fn textures(&self) -> [Option<&AtlasTexture>; TABLE_TEXTURES] {
+        [
+            Some(&self.blurred),
+            Some(&self.raw),
+            None,
+            None,
+            Some(&self.page),
+        ]
     }
 }
 
@@ -3011,6 +3143,9 @@ mod tests {
         /// The window pixels every backdrop snapshot on this thread copied.
         pub(super) static SNAPSHOT_REGIONS: std::cell::RefCell<Vec<RECT>> =
             const { std::cell::RefCell::new(Vec::new()) };
+        /// The window pixels every underlay pass on this thread drew into.
+        pub(super) static UNDERLAY_REGIONS: std::cell::RefCell<Vec<RECT>> =
+            const { std::cell::RefCell::new(Vec::new()) };
     }
 
     #[::core::prelude::v1::test]
@@ -3066,7 +3201,7 @@ mod tests {
                 for texture in &textures {
                     descriptors.textures(
                         list,
-                        [Some(texture), None, None, None],
+                        [Some(texture), None, None, None, None],
                         &mut uploads,
                         &mut first,
                     )?;
@@ -3093,7 +3228,7 @@ mod tests {
             for texture in &textures {
                 descriptors.textures(
                     list,
-                    [Some(texture), None, None, None],
+                    [Some(texture), None, None, None, None],
                     &mut uploads,
                     &mut second,
                 )?;
@@ -3134,6 +3269,7 @@ mod tests {
             present_no_wait: false,
             layers: Vec::new(),
             snapshot: None,
+            underlaid: None,
             blur: Vec::new(),
             idle_frames: ScratchIdle::default(),
             timings: None,
@@ -4012,7 +4148,7 @@ mod tests {
             reload_app_effects(
                 AppEffects::new(
                     "test",
-                    r#"{"schema": 12, "effects": [
+                    r#"{"schema": 13, "effects": [
                         {"name": "tint", "backdrop": false, "hlsl": "tint.hlsl"}
                     ]}"#,
                     [("tint.hlsl".to_string(), hlsl.to_string())],
@@ -4339,6 +4475,54 @@ mod tests {
             [full_rect(256, 256)],
             "one group, and an unbounded quad in it makes it whole"
         );
+        Ok(())
+    }
+
+    #[::core::prelude::v1::test]
+    #[ignore = "requires a native D3D12 hardware adapter; run explicitly for renderer qualification"]
+    fn native_underlays_lie_under_backdrops_and_readers_write_back_the_page_alone() -> Result<()> {
+        use gpui::underlay_test_scene::{self as underlays, Reader, SIDE, Sources};
+        let transparent = WindowBackgroundAppearance::Transparent;
+        for reader in [Reader::BlurRect, Reader::Frost] {
+            let mut renderer = offscreen(SIDE, SIDE)?;
+            let scene =
+                |renderer: &Renderer, sources| underlays::scene(&*renderer.atlas, reader, sources);
+            let page = renderer.render_to_image(&scene(&renderer, Sources::None)?, transparent)?;
+            UNDERLAY_REGIONS.with_borrow_mut(Vec::clear);
+            let unpictured =
+                renderer.render_to_image(&scene(&renderer, Sources::Unpictured)?, transparent)?;
+            assert!(
+                unpictured == page
+                    && UNDERLAY_REGIONS.take().is_empty()
+                    && renderer.underlaid.is_none(),
+                "{reader:?}: no picture, no pass, no texture, the same bytes"
+            );
+            for sources in [Sources::One, Sources::Two] {
+                SNAPSHOT_REGIONS.with_borrow_mut(Vec::clear);
+                UNDERLAY_REGIONS.with_borrow_mut(Vec::clear);
+                let image = renderer.render_to_image(&scene(&renderer, sources)?, transparent)?;
+                underlays::check(&image, &page, sources)
+                    .with_context(|| format!("{reader:?} over {sources:?}"))?;
+                let snapshots = SNAPSHOT_REGIONS.take();
+                assert_eq!(
+                    UNDERLAY_REGIONS.take(),
+                    snapshots,
+                    "{reader:?}: each snapshot composites the sources in its own region"
+                );
+                if reader == Reader::BlurRect {
+                    assert!(
+                        snapshots.iter().all(|r| *r != full_rect(SIDE, SIDE)),
+                        "blur rects are bounded"
+                    );
+                }
+            }
+            let plain = scene(&renderer, Sources::None)?;
+            draw_repeatedly(&mut renderer, &plain, 1)?;
+            assert!(
+                renderer.underlaid.is_none(),
+                "a frame without sources lets the copy go"
+            );
+        }
         Ok(())
     }
     #[::core::prelude::v1::test]

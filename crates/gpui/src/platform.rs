@@ -23,6 +23,10 @@ mod visual_test;
 #[doc(hidden)]
 pub mod hdr_test_scene;
 
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod underlay_test_scene;
+
 #[cfg(all(
     feature = "screen-capture",
     any(target_os = "windows", target_os = "linux", target_os = "freebsd",)

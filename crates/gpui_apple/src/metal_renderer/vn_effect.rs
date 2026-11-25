@@ -249,6 +249,7 @@ impl MetalRenderer {
             };
             let textures = if backdrop {
                 Some(self.snapshot_layer_backdrop(
+                    draw,
                     command_buffer,
                     frame,
                     quad.effective_kernel_levels() as usize,
@@ -343,7 +344,7 @@ mod tests {
         gpui::reload_app_effects(
             gpui::AppEffects::new(
                 "test",
-                r#"{"schema": 12, "effects": [
+                r#"{"schema": 13, "effects": [
                     {"name": "swap", "backdrop": false, "metal": "fx.metal"},
                     {"name": "count", "backdrop": false, "history": true, "metal": "fx.metal"}
                 ]}"#,

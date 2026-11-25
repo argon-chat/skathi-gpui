@@ -1057,13 +1057,11 @@ impl MetalRenderer {
                 PrimitiveBatch::BackdropBlurRects(range) => {
                     if frame.backdrop && !range.is_empty() {
                         command_encoder = self.draw_backdrop_blur_rects(
+                            draw,
                             command_buffer,
                             command_encoder,
                             frame,
-                            &scene.backdrop_blur_rects[range.clone()],
-                            range.start,
-                            &instance_bindings.backdrop_blur_rects,
-                            viewport_size,
+                            range,
                         )?;
                     }
                 }
@@ -1081,14 +1079,12 @@ impl MetalRenderer {
                         ),
                         backdrop::EffectPass::Backdrop => {
                             command_encoder = self.draw_backdrop_effects(
+                                draw,
                                 command_buffer,
                                 command_encoder,
                                 frame,
                                 effect_id,
-                                effect_quads,
-                                range.start,
-                                &instance_bindings.effect_quads,
-                                viewport_size,
+                                range,
                             )?;
                         }
                     }
@@ -1994,6 +1990,8 @@ struct InstanceBindings {
     polychrome_sprites: InstanceBinding,
     surfaces: InstanceBinding,
     native_views: InstanceBinding,
+    /// vue-native fork: `Scene::vn_underlays`, only in a frame where one has a picture.
+    vn_underlays: Option<InstanceBinding>,
 }
 
 impl InstanceBindings {
@@ -2038,6 +2036,11 @@ fn write_instances(
                 content_mask: native_view.content_mask,
             }
         }))?,
+        vn_underlays: if scene.vn_underlays.iter().any(gpui::VnUnderlay::has_picture) {
+            Some(writer.write(&scene.vn_underlays)?)
+        } else {
+            None
+        },
     })
 }
 
@@ -2247,14 +2250,16 @@ enum BackdropInputIndex {
 }
 
 /// Texture slots of the same pipelines, the generated stages' `[[texture(0)]]`
-/// (the blurred backdrop), `[[texture(2)]]` (the untouched snapshot), and an
-/// effect layer's content and history.
+/// (the blurred backdrop), `[[texture(2)]]` (the untouched snapshot), an
+/// effect layer's content and history, and `[[texture(13)]]` (the page without
+/// `<sk-layer>` pictures).
 #[repr(C)]
 enum BackdropTextureIndex {
     Processed = 0,
     Original = 2,
     Content = 7,
     History = 8,
+    Page = 13,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

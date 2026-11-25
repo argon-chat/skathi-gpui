@@ -3,8 +3,8 @@
 //! effect pipeline table.
 
 use super::{
-    BACKDROP_SHADERS, BLUR_SHADERS, EFFECT_VERTEX_SHADER, InstanceBinding, WgpuBindGroupLayouts,
-    WgpuRendererCore,
+    BACKDROP_SHADERS, BLUR_SHADERS, EFFECT_VERTEX_SHADER, GroupDraw, InstanceBinding,
+    WgpuBindGroupLayouts, WgpuRendererCore,
 };
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
@@ -102,6 +102,8 @@ pub(super) struct WgpuBackdrop {
     blur_upsample: wgpu::RenderPipeline,
     blur_rect: wgpu::RenderPipeline,
     frame_copy: wgpu::RenderPipeline,
+    /// vue-native fork: `<sk-layer>` pictures, destination-over.
+    vn_underlay: wgpu::RenderPipeline,
     /// The built-ins, indexed by `EffectQuad::effect_id`. A hole keeps the
     /// numbering when one failed to build.
     effects: Vec<Option<wgpu::RenderPipeline>>,
@@ -163,6 +165,8 @@ struct BackdropTargets {
     /// deepest level a frame has asked for.
     levels: Vec<TargetTexture>,
     frame: Option<TargetTexture>,
+    /// vue-native fork: the snapshot with `<sk-layer>` pictures under it; only while a frame has one.
+    underlaid: Option<TargetTexture>,
 }
 
 /// Where a frame renders. A backdrop needs to copy what has been drawn so far,
@@ -174,6 +178,8 @@ pub(super) struct FrameTarget {
     copy_to: Option<wgpu::TextureView>,
     /// Whether this frame can draw backdrop blurs and effects at all.
     pub(super) backdrop: bool,
+    /// vue-native fork: the window's own target, whose snapshots composite `<sk-layer>` pictures.
+    pub(super) root: bool,
 }
 
 impl FrameTarget {
@@ -183,6 +189,7 @@ impl FrameTarget {
             view,
             copy_to: None,
             backdrop,
+            root: false,
         }
     }
 }
@@ -212,6 +219,7 @@ impl WgpuRendererCore {
             view: target_view.clone(),
             copy_to: None,
             backdrop,
+            root: true,
         };
         let effect_quads = || {
             scene
@@ -235,6 +243,11 @@ impl WgpuRendererCore {
             } else {
                 0
             });
+            if !scene.vn_underlays.iter().any(gpui::VnUnderlay::has_picture)
+                && let Some(targets) = &mut state.targets
+            {
+                targets.underlaid = None;
+            }
         }
         if !backdrop {
             return frame;
@@ -389,12 +402,13 @@ impl WgpuRendererCore {
     /// below it.
     pub(super) fn draw_backdrop_blur_rects(
         &mut self,
+        draw: &GroupDraw<'_>,
         encoder: &mut wgpu::CommandEncoder,
         frame: &FrameTarget,
-        blur_rects: &[BackdropBlurRect],
-        start: usize,
-        instances: &InstanceBinding,
+        range: Range<usize>,
     ) -> Result<()> {
+        let blur_rects = &draw.scene.backdrop_blur_rects[range.clone()];
+        let (start, instances) = (range.start, &draw.instances.backdrop_blur_rects);
         for group in backdrop_groups(blur_rects, |rect| {
             (rect.effective_kernel_levels() as usize, rect.bounds)
         }) {
@@ -407,7 +421,8 @@ impl WgpuRendererCore {
             {
                 continue;
             }
-            let textures = self.snapshot_backdrop(encoder, frame, request, [None, None], None)?;
+            let textures =
+                self.snapshot_backdrop(draw, encoder, frame, request, [None, None], None)?;
             let state = self
                 .resources
                 .backdrop
@@ -469,12 +484,8 @@ impl WgpuRendererCore {
         pass.set_bind_group(1, &instances.bind_group, &[]);
         match images {
             Some(_) => {
-                let textures = state.effect_textures(
-                    &self.resources.device,
-                    [None, None],
-                    [None, None],
-                    images,
-                );
+                let textures =
+                    state.effect_textures(&self.resources.device, [None; 3], [None, None], images);
                 pass.set_bind_group(2, &textures, &[]);
             }
             None => pass.set_bind_group(2, &state.placeholder_textures, &[]),
@@ -490,19 +501,21 @@ impl WgpuRendererCore {
     /// blending disabled.
     pub(super) fn draw_backdrop_effects(
         &mut self,
+        draw: &GroupDraw<'_>,
         encoder: &mut wgpu::CommandEncoder,
         frame: &FrameTarget,
         effect_id: u32,
-        effect_quads: &[EffectQuad],
-        start: usize,
-        instances: &InstanceBinding,
+        range: Range<usize>,
     ) -> Result<()> {
+        let effect_quads = &draw.scene.effect_quads[range.clone()];
+        let (start, instances) = (range.start, &draw.instances.effect_quads);
         for group in backdrop_groups(effect_quads, |quad| {
             (quad.effective_kernel_levels() as usize, quad.bounds)
         }) {
             let request = BackdropRequest::effects(&effect_quads[group.clone()]);
             let images = effect_quads[0].texture_set();
-            let textures = self.snapshot_backdrop(encoder, frame, request, [None, None], images)?;
+            let textures =
+                self.snapshot_backdrop(draw, encoder, frame, request, [None, None], images)?;
             let state = self
                 .resources
                 .backdrop
@@ -522,15 +535,28 @@ impl WgpuRendererCore {
     /// Copies what the frame holds so far and blurs it as `request` asks.
     /// Returns group 2 for the composite: the processed backdrop, the clamping
     /// sampler, the untouched snapshot, `layer` (an effect layer's content and
-    /// history) and the effect's `images`.
+    /// history), the effect's `images` and the page alone.
+    ///
+    /// vue-native fork: on the root target the `<sk-layer>` pictures the region
+    /// meets go under a copy of the snapshot, destination-over, topmost first;
+    /// the blur and the raw backdrop read that copy, the page-only binding the
+    /// snapshot.
     fn snapshot_backdrop(
         &mut self,
+        draw: &GroupDraw<'_>,
         encoder: &mut wgpu::CommandEncoder,
         frame: &FrameTarget,
         request: BackdropRequest,
         layer: [Option<&wgpu::TextureView>; 2],
         images: Option<usize>,
     ) -> Result<wgpu::BindGroup> {
+        let request = request.on_root(frame.root);
+        let pictures = request.underlays(draw.scene);
+        let underlays = draw
+            .instances
+            .vn_underlays
+            .as_ref()
+            .filter(|_| !pictures.is_empty());
         let region = request.region().map(PixelRect::from);
         #[cfg(test)]
         let region = region.filter(|_| !tests::FULL_WINDOW_BACKDROP.get());
@@ -540,13 +566,25 @@ impl WgpuRendererCore {
             anyhow::bail!("backdrop pipelines missing");
         };
         let (width, height) = (frame.texture.width(), frame.texture.height());
-        state.targets(
+        let targets = state.targets(
             &resources.device,
             self.target_format,
             width,
             height,
             kernel_levels,
         );
+        if underlays.is_some() && targets.underlaid.is_none() {
+            targets.underlaid = Some(create_target_texture(
+                &resources.device,
+                "backdrop_underlaid",
+                self.target_format,
+                width,
+                height,
+                wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST,
+            ));
+        }
         let state = &**state;
         let targets = state.targets.as_ref().context("backdrop targets missing")?;
         let full = PixelRect::of(&frame.texture);
@@ -554,6 +592,8 @@ impl WgpuRendererCore {
         if region.is_empty() {
             anyhow::bail!("empty backdrop region");
         }
+        #[cfg(test)]
+        tests::SNAPSHOT_RECTS.with_borrow_mut(|rects| rects.push(region));
 
         let origin = wgpu::Origin3d {
             x: region.left as u32,
@@ -575,6 +615,51 @@ impl WgpuRendererCore {
                 depth_or_array_layers: 1,
             },
         );
+
+        let raw = match (underlays, &targets.underlaid) {
+            (Some(instances), Some(underlaid)) => {
+                encoder.copy_texture_to_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        origin,
+                        ..targets.snapshot.texture.as_image_copy()
+                    },
+                    wgpu::TexelCopyTextureInfo {
+                        origin,
+                        ..underlaid.texture.as_image_copy()
+                    },
+                    wgpu::Extent3d {
+                        width: (region.right - region.left) as u32,
+                        height: (region.bottom - region.top) as u32,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                #[cfg(test)]
+                tests::UNDERLAY_PASS_RECTS.with_borrow_mut(|rects| rects.push(region));
+                let mut pass = super::continue_pass(encoder, &underlaid.view, "vn_underlays");
+                pass.set_scissor_rect(
+                    region.left as u32,
+                    region.top as u32,
+                    (region.right - region.left) as u32,
+                    (region.bottom - region.top) as u32,
+                );
+                pass.set_pipeline(&state.vn_underlay);
+                pass.set_bind_group(0, &resources.globals_bind_group, &[]);
+                pass.set_bind_group(1, &instances.bind_group, &[]);
+                for picture in &pictures {
+                    let Some(atlas) = resources
+                        .atlas_texture_bind_groups
+                        .get(&picture.tile.texture_id)
+                    else {
+                        continue;
+                    };
+                    pass.set_bind_group(2, &atlas.bind_group, &[]);
+                    let instance = instances.first_instance + picture.order;
+                    pass.draw(0..4, instance..instance + 1);
+                }
+                underlaid
+            }
+            _ => &targets.snapshot,
+        };
 
         // Like D3D12, a pass writes only its scissor and leaves the rest of
         // the level as it was; the rounded-out rects keep every texel the
@@ -620,16 +705,10 @@ impl WgpuRendererCore {
         };
 
         let blurred = if kernel_levels == 0 {
-            &targets.snapshot.view
+            &raw.view
         } else {
             let levels = &targets.levels[..kernel_levels];
-            blur_pass(
-                encoder,
-                &state.blur_downsample,
-                &targets.snapshot.view,
-                &levels[0],
-                1,
-            );
+            blur_pass(encoder, &state.blur_downsample, &raw.view, &levels[0], 1);
             for level in 1..kernel_levels {
                 blur_pass(
                     encoder,
@@ -653,7 +732,7 @@ impl WgpuRendererCore {
 
         Ok(state.effect_textures(
             &resources.device,
-            [Some(blurred), Some(&targets.snapshot.view)],
+            [Some(blurred), Some(&raw.view), Some(&targets.snapshot.view)],
             layer,
             images,
         ))
@@ -662,6 +741,7 @@ impl WgpuRendererCore {
     /// The backdrop of an effect layer's effect, which may sample it anywhere.
     pub(super) fn snapshot_layer_backdrop(
         &mut self,
+        draw: &GroupDraw<'_>,
         encoder: &mut wgpu::CommandEncoder,
         frame: &FrameTarget,
         kernel_levels: usize,
@@ -671,8 +751,9 @@ impl WgpuRendererCore {
         let request = BackdropRequest {
             kernel_levels,
             samples: None,
+            underlays: false,
         };
-        self.snapshot_backdrop(encoder, frame, request, layer, images)
+        self.snapshot_backdrop(draw, encoder, frame, request, layer, images)
     }
 
     fn source_bind_group(
@@ -844,6 +925,7 @@ impl WgpuBackdrop {
                 texture_entry(6),
                 texture_entry(7),
                 texture_entry(8),
+                texture_entry(10),
                 wgpu::BindGroupLayoutEntry {
                     binding: 9,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -909,7 +991,7 @@ impl WgpuBackdrop {
             device,
             &textures_layout,
             (&clamp_sampler, &repeat_sampler),
-            [&placeholder.view; 4],
+            [&placeholder.view; 5],
             [&placeholder.view; gpui::EFFECT_TEXTURE_SLOTS],
         );
 
@@ -924,8 +1006,13 @@ impl WgpuBackdrop {
             "effect_layout",
             &[&effect_globals_layout, &layouts.instances, &textures_layout],
         );
+        let underlay_layout = pipeline_layout(
+            device,
+            "vn_underlay_layout",
+            &[&layouts.globals, &layouts.instances, &layouts.texture],
+        );
 
-        let (blur_downsample, blur_upsample, blur_rect, frame_copy, effect_vertex) =
+        let (blur_downsample, blur_upsample, blur_rect, frame_copy, vn_underlay, effect_vertex) =
             capture_validation(device, || {
                 let blur = shader_module(device, "backdrop_blur_shaders", BLUR_SHADERS);
                 let composite = shader_module(device, "backdrop_shaders", BACKDROP_SHADERS);
@@ -954,6 +1041,15 @@ impl WgpuBackdrop {
                         None,
                     ),
                     pass("backdrop_frame_copy", "fs_frame_copy"),
+                    render_pipeline(
+                        device,
+                        "vn_underlay",
+                        &underlay_layout,
+                        (&composite, "vs_vn_underlay"),
+                        (&composite, "fs_vn_underlay"),
+                        format,
+                        Some(DESTINATION_OVER),
+                    ),
                     effect_vertex,
                 )
             })?;
@@ -1002,6 +1098,7 @@ impl WgpuBackdrop {
             blur_upsample,
             blur_rect,
             frame_copy,
+            vn_underlay,
             effects,
             app_effects: Default::default(),
             app_warmup: Default::default(),
@@ -1055,13 +1152,13 @@ impl WgpuBackdrop {
             });
     }
 
-    /// Group 2 of an effect: the backdrop as blurred and as snapshotted, an
+    /// Group 2 of an effect: the backdrop as blurred, as snapshotted and as the page alone, an
     /// effect layer's content and history, and the images of texture set
     /// `images` (`EffectQuad::texture_set`); a placeholder for each absent.
     pub(super) fn effect_textures(
         &self,
         device: &wgpu::Device,
-        backdrop: [Option<&wgpu::TextureView>; 2],
+        backdrop: [Option<&wgpu::TextureView>; 3],
         layer: [Option<&wgpu::TextureView>; 2],
         images: Option<usize>,
     ) -> wgpu::BindGroup {
@@ -1076,6 +1173,7 @@ impl WgpuBackdrop {
                 backdrop[1].unwrap_or(placeholder),
                 layer[0].unwrap_or(placeholder),
                 layer[1].unwrap_or(placeholder),
+                backdrop[2].unwrap_or(placeholder),
             ],
             std::array::from_fn(|slot| {
                 images
@@ -1177,10 +1275,13 @@ impl WgpuBackdrop {
                 format,
                 width,
                 height,
-                wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+                wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
             ),
             levels: Vec::new(),
             frame: None,
+            underlaid: None,
         });
         while targets.levels.len() < kernel_levels {
             let divisor = 2u32.saturating_pow(targets.levels.len() as u32 + 1);
@@ -1238,7 +1339,7 @@ fn textures_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     (clamp, repeat): (&wgpu::Sampler, &wgpu::Sampler),
-    [blurred, snapshot, content, history]: [&wgpu::TextureView; 4],
+    [blurred, snapshot, content, history, page]: [&wgpu::TextureView; 5],
     [image0, image1, image2, image3]: [&wgpu::TextureView; gpui::EFFECT_TEXTURE_SLOTS],
 ) -> wgpu::BindGroup {
     let texture = |binding, view| wgpu::BindGroupEntry {
@@ -1263,6 +1364,7 @@ fn textures_bind_group(
             texture(7, content),
             texture(8, history),
             sampler(9, repeat),
+            texture(10, page),
         ],
     })
 }
@@ -1319,6 +1421,20 @@ fn upload_effect_texture(
     );
     Ok(texture.create_view(&wgpu::TextureViewDescriptor::default()))
 }
+
+/// vue-native fork: D3D12's `Blend::DestinationOver`, the source under what the target holds.
+const DESTINATION_OVER: wgpu::BlendState = wgpu::BlendState {
+    color: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::OneMinusDstAlpha,
+        dst_factor: wgpu::BlendFactor::One,
+        operation: wgpu::BlendOperation::Add,
+    },
+    alpha: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::OneMinusDstAlpha,
+        dst_factor: wgpu::BlendFactor::One,
+        operation: wgpu::BlendOperation::Add,
+    },
+};
 
 /// D3D12's `Blend::DestinationOut`: the target times one minus the source's
 /// alpha, an eraser.
@@ -1537,6 +1653,12 @@ pub(super) mod tests {
         /// The scissor of every blur pass drawn on this thread.
         pub(super) static BLUR_PASS_RECTS: std::cell::RefCell<Vec<PixelRect>> =
             const { std::cell::RefCell::new(Vec::new()) };
+        /// The region of every snapshot taken on this thread.
+        pub(super) static SNAPSHOT_RECTS: std::cell::RefCell<Vec<PixelRect>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+        /// The region of every `<sk-layer>` underlay pass drawn on this thread.
+        pub(super) static UNDERLAY_PASS_RECTS: std::cell::RefCell<Vec<PixelRect>> =
+            const { std::cell::RefCell::new(Vec::new()) };
     }
 
     #[test]
@@ -1689,7 +1811,7 @@ pub(super) mod tests {
             bindings.sort_unstable();
             assert_eq!(
                 bindings,
-                [(0, 0), (1, 0), (2, 0), (2, 1), (2, 2), (2, 7), (2, 8)],
+                [(0, 0), (1, 0), (2, 0), (2, 1), (2, 7), (2, 8), (2, 10)],
                 "{name}"
             );
             assert!(
@@ -2132,6 +2254,79 @@ pub(super) mod tests {
         }
 
         #[test]
+        fn underlays_lie_under_backdrops_and_readers_write_back_the_page_alone() -> Result<()> {
+            use gpui::underlay_test_scene::{self as underlays, Reader, Sources};
+            let side = underlays::SIDE as i32;
+            let size = size(DevicePixels(side), DevicePixels(side));
+            let underlaid = |renderer: &WgpuHeadlessRenderer| {
+                renderer
+                    .core
+                    .resources
+                    .backdrop
+                    .ready()
+                    .and_then(|state| state.targets.as_ref())
+                    .is_some_and(|targets| targets.underlaid.is_some())
+            };
+            for reader in [Reader::BlurRect, Reader::Frost] {
+                let mut renderer = WgpuHeadlessRenderer::new()?;
+                renderer.clear_color = wgpu::Color::TRANSPARENT;
+                let atlas = renderer.sprite_atlas();
+                let page = renderer.render_scene_to_image(
+                    &underlays::scene(&*atlas, reader, Sources::None)?,
+                    size,
+                )?;
+                UNDERLAY_PASS_RECTS.with_borrow_mut(Vec::clear);
+                let unpictured = renderer.render_scene_to_image(
+                    &underlays::scene(&*atlas, reader, Sources::Unpictured)?,
+                    size,
+                )?;
+                assert!(
+                    unpictured == page
+                        && UNDERLAY_PASS_RECTS.take().is_empty()
+                        && !underlaid(&renderer),
+                    "{reader:?}: no picture, no pass, no texture, the same bytes"
+                );
+                for sources in [Sources::One, Sources::Two] {
+                    SNAPSHOT_RECTS.with_borrow_mut(Vec::clear);
+                    UNDERLAY_PASS_RECTS.with_borrow_mut(Vec::clear);
+                    let image = renderer.render_scene_to_image(
+                        &underlays::scene(&*atlas, reader, sources)?,
+                        size,
+                    )?;
+                    underlays::check(&image, &page, sources)
+                        .with_context(|| format!("{reader:?} over {sources:?}"))?;
+                    let snapshots = SNAPSHOT_RECTS.take();
+                    assert_eq!(
+                        UNDERLAY_PASS_RECTS.take(),
+                        snapshots,
+                        "{reader:?}: each snapshot composites the sources in its own region"
+                    );
+                    if reader == Reader::BlurRect {
+                        let full = PixelRect {
+                            left: 0,
+                            top: 0,
+                            right: side,
+                            bottom: side,
+                        };
+                        assert!(
+                            snapshots.iter().all(|r| *r != full),
+                            "blur rects are bounded"
+                        );
+                    }
+                }
+                renderer.render_scene_to_image(
+                    &underlays::scene(&*atlas, reader, Sources::None)?,
+                    size,
+                )?;
+                assert!(
+                    !underlaid(&renderer),
+                    "a frame without sources lets the copy go"
+                );
+            }
+            Ok(())
+        }
+
+        #[test]
         fn a_small_blur_processes_its_region_only_and_matches_the_whole_frame() -> Result<()> {
             const LARGE: i32 = 256;
             let size = size(DevicePixels(LARGE), DevicePixels(LARGE));
@@ -2451,6 +2646,7 @@ pub(super) mod tests {
                     view: surface.view.clone(),
                     copy_to: Some(readback_view),
                     backdrop: true,
+                    root: true,
                 },
             );
             renderer
@@ -2502,7 +2698,7 @@ pub(super) mod tests {
             gpui::reload_app_effects(
                 gpui::AppEffects::new(
                     "test",
-                    r#"{"schema": 12, "effects": [
+                    r#"{"schema": 13, "effects": [
                         {"name": "tint", "backdrop": false, "wgsl": "tint.wgsl"}
                     ]}"#,
                     [("tint.wgsl".to_string(), wgsl.to_string())],

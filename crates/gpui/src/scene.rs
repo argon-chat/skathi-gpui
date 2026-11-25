@@ -120,6 +120,8 @@ pub struct Scene {
     /// vue-native fork: the groups painted for [`VnIsolation::capture`],
     /// which the renderer draws first and keeps as snapshots.
     pub vn_captures: Vec<VnCapture>,
+    /// vue-native fork: pictures under the page, in paint order; in no group.
+    pub vn_underlays: Vec<VnUnderlay>,
     pub native_views: Vec<PaintNativeView>,
     animations: Vec<SpriteAnimation>,
 }
@@ -289,6 +291,79 @@ pub struct VnSnapshotPaint {
     pub plus_lighter: bool,
     /// Where the capture was taken, ignoring `to_unit`.
     pub in_place: bool,
+}
+
+/// vue-native fork: [`VnUnderlay::flags`].
+pub mod vn_underlay_flags {
+    /// `tile` holds the picture; without it the source is only tracked for reads.
+    pub const PICTURE: u32 = 1;
+    /// A backdrop reader of the root target samples it ([`super::Scene::finish`]).
+    pub const READ: u32 = 2;
+}
+
+/// vue-native fork: a picture that lies under the whole page, such as a native
+/// layer's ([`Scene::vn_insert_underlay`]). It is not drawn into the frame; a
+/// backdrop snapshot of the window's own target composites it under the page's
+/// pixels (destination-over), within `bounds` rounded by `corner_radii` and cut
+/// by `clip`. Sources stack in paint order, the last painted on top.
+///
+/// Keep in sync with `struct VnUnderlay` in `gpui_windows/src/shaders.hlsl`,
+/// `gpui_wgpu/src/shaders_backdrop.wgsl` and `gpui_apple/src/shaders.metal`
+/// (32 words); renderers upload it as it is.
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+#[allow(missing_docs)]
+pub struct VnUnderlay {
+    /// Its place in paint order among the scene's underlays.
+    pub order: u32,
+    /// [`PolychromeSprite::sampling_word`] of `tile`.
+    pub sampling: u32,
+    pub tile: AtlasTile,
+    /// The box, in device pixels.
+    pub bounds: Bounds<ScaledPixels>,
+    pub clip: Bounds<ScaledPixels>,
+    pub corner_radii: Corners<ScaledPixels>,
+    /// Where the picture lies, in device pixels; transparent outside it.
+    pub content: Bounds<ScaledPixels>,
+    pub opacity: f32,
+    /// [`vn_underlay_flags`].
+    pub flags: u32,
+    /// Who painted it, low and high words ([`Scene::vn_underlays_read`]).
+    pub key: [u32; 2],
+    pub pad: [u32; 2],
+}
+
+/// vue-native fork: where [`crate::Window::vn_paint_underlay`] puts a picture,
+/// `[x, y, width, height]` and `[top_left, top_right, bottom_right,
+/// bottom_left]` in device pixels of the window.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[allow(missing_docs)]
+pub struct VnUnderlayPlace {
+    /// The box, rounded by `radii`.
+    pub bounds: [f32; 4],
+    pub radii: [f32; 4],
+    /// The clip of the box's ancestors.
+    pub clip: [f32; 4],
+    /// Where the picture lies.
+    pub content: [f32; 4],
+    pub opacity: f32,
+}
+
+impl VnUnderlay {
+    /// The device pixels it can cover.
+    pub fn visible_bounds(&self) -> Bounds<ScaledPixels> {
+        self.bounds.intersect(&self.clip)
+    }
+
+    /// The key it was painted with.
+    pub fn key(&self) -> u64 {
+        self.key[0] as u64 | (self.key[1] as u64) << 32
+    }
+
+    /// Whether it carries a picture to composite.
+    pub fn has_picture(&self) -> bool {
+        self.flags & vn_underlay_flags::PICTURE != 0
+    }
 }
 
 /// vue-native fork: one `--shading` quad of a [`VnEffectLayer`], with the key
@@ -590,8 +665,80 @@ impl Scene {
         self.vn_contexts.clear();
         self.vn_group_ranges.clear();
         self.vn_captures.clear();
+        self.vn_underlays.clear();
         self.native_views.clear();
         self.animations.clear();
+    }
+
+    /// vue-native fork: records a picture under the page ([`VnUnderlay`]);
+    /// `order` is set here.
+    pub fn vn_insert_underlay(&mut self, underlay: VnUnderlay) {
+        if underlay.visible_bounds().is_empty() {
+            return;
+        }
+        self.paint_operations
+            .push(PaintOperation::VnUnderlay(underlay));
+        self.vn_underlays.push(VnUnderlay {
+            order: self.vn_underlays.len() as u32,
+            flags: underlay.flags & !vn_underlay_flags::READ,
+            ..underlay
+        });
+    }
+
+    /// vue-native fork: the keys of the underlays a backdrop reader samples,
+    /// known once the scene is finished.
+    pub fn vn_underlays_read(&self) -> impl Iterator<Item = u64> + '_ {
+        self.vn_underlays
+            .iter()
+            .filter(|underlay| underlay.flags & vn_underlay_flags::READ != 0)
+            .map(VnUnderlay::key)
+    }
+
+    /// Marks each underlay that some backdrop reader drawn on the window's own
+    /// target samples. Readers inside an isolated group see that group only.
+    fn vn_note_underlay_reads(&mut self) {
+        if self.vn_underlays.is_empty() {
+            return;
+        }
+        let (rects, quads, layers) = match self.vn_group_ranges.first() {
+            Some(root) => (
+                root.backdrop_blur_rects.clone(),
+                root.effect_quads.clone(),
+                root.vn_layers.clone(),
+            ),
+            None => (
+                0..self.backdrop_blur_rects.len(),
+                0..self.effect_quads.len(),
+                0..self.vn_layers.len(),
+            ),
+        };
+        let mut regions: Vec<Option<Bounds<crate::DevicePixels>>> = Vec::new();
+        for rect in &self.backdrop_blur_rects[rects] {
+            regions.push(crate::BackdropRequest::blur_rects(std::slice::from_ref(rect)).region());
+        }
+        for quad in &self.effect_quads[quads] {
+            if quad.flags & crate::EFFECT_FLAG_NEEDS_BACKDROP != 0 {
+                regions.push(crate::BackdropRequest::effects(std::slice::from_ref(quad)).region());
+            }
+        }
+        for index in layers {
+            if let Some(effect) = self.vn_effect_layer(index)
+                && effect.draws().any(|draw| {
+                    self.vn_effect_draws[draw].quad.flags & crate::EFFECT_FLAG_NEEDS_BACKDROP != 0
+                })
+            {
+                regions.push(None);
+            }
+        }
+        for underlay in &mut self.vn_underlays {
+            let visible = underlay.visible_bounds();
+            if regions
+                .iter()
+                .any(|region| region.is_none_or(|region| crate::vn_meets(&visible, &region)))
+            {
+                underlay.flags |= vn_underlay_flags::READ;
+            }
+        }
     }
 
     /// vue-native fork: swaps the open group's lists with `lists`.
@@ -1385,6 +1532,7 @@ impl Scene {
                 PaintOperation::VnEndIsolation => self.vn_pop_isolation(),
                 PaintOperation::VnSnapshot(paint) => self.vn_insert_snapshot(*paint),
                 PaintOperation::VnBeginMask(luminance) => self.vn_begin_mask(*luminance),
+                PaintOperation::VnUnderlay(underlay) => self.vn_insert_underlay(*underlay),
             }
         }
     }
@@ -1435,6 +1583,7 @@ impl Scene {
             }
             self.vn_group_ranges = ranges;
         }
+        self.vn_note_underlay_reads();
 
         // Sorting moved the sprites, so animations learn where theirs ended up.
         if !self.animations.is_empty() {
@@ -1613,6 +1762,8 @@ pub(crate) enum PaintOperation {
     VnSnapshot(VnSnapshotPaint),
     /// vue-native fork: [`Scene::vn_begin_mask`].
     VnBeginMask(bool),
+    /// vue-native fork: [`Scene::vn_insert_underlay`].
+    VnUnderlay(VnUnderlay),
 }
 
 #[derive(Clone)]

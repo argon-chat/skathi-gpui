@@ -5,7 +5,7 @@
 //   source:     crates/sk-effects/shaders/glow.slang+wrapper
 //   signature:  glow(<color>?, <length:radius>, <number:strength>)
 //   slang:      2026.12
-//   schema:     12
+//   schema:     13
 //   src-sha256: de1d06dddb28503e5a23a3494d73227436591594943428bd0ecec042d3926caa
 //   output:     premultiplied RGBA, blended One, OneMinusSrcAlpha
 //
@@ -78,7 +78,7 @@ struct SLANG_ParameterGroup_GlobalParams_std140_0
 
 @binding(8) @group(2) var sk_history_0 : texture_2d<f32>;
 
-@binding(2) @group(2) var sk_backdrop_original_0 : texture_2d<f32>;
+@binding(10) @group(2) var sk_backdrop_page_0 : texture_2d<f32>;
 
 struct Glow_0
 {
@@ -166,7 +166,7 @@ fn sk_finish_0( material_0 : Glow_0,  i_0 : EffectInput_0) -> vec4<f32>
     var result_0 : vec4<f32>;
     if(i_0.hasBackdrop_0)
     {
-        result_0 = mix((textureSampleLevel((sk_backdrop_original_0), (sk_clamp_sampler_0), (i_0.uv_0), (0.0f))), shaded_2, vec4<f32>(coverage_1));
+        result_0 = mix((textureSampleLevel((sk_backdrop_page_0), (sk_clamp_sampler_0), (i_0.uv_0), (0.0f))), shaded_2, vec4<f32>(coverage_1));
     }
     else
     {

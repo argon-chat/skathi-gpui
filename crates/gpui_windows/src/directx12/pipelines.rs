@@ -40,9 +40,9 @@ pub(super) const ROOT_TEXTURES: u32 = 5;
 pub(super) const ROOT_EFFECT_TEXTURES: u32 = 6;
 pub(super) const ROOT_PATH_CURVES: u32 = 7;
 pub(super) const ROOT_PATH_PAINTS: u32 = 8;
-/// The descriptors in a [`ROOT_TEXTURES`] table: t0, t2, and an effect
-/// layer's content and history at t7 and t8.
-pub(super) const TABLE_TEXTURES: usize = 4;
+/// The descriptors in a [`ROOT_TEXTURES`] table: t0, t2, an effect layer's
+/// content and history at t7 and t8, and the page-only backdrop at t13.
+pub(super) const TABLE_TEXTURES: usize = 5;
 /// `[SkHistory]` state textures.
 pub(super) const HISTORY_FORMAT: DXGI_FORMAT = DXGI_FORMAT_R16G16B16A16_FLOAT;
 
@@ -642,6 +642,13 @@ fn create_root_signature(device: &ID3D12Device) -> Result<ID3D12RootSignature> {
             RegisterSpace: 0,
             OffsetInDescriptorsFromTableStart: 2,
         },
+        D3D12_DESCRIPTOR_RANGE {
+            RangeType: D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
+            NumDescriptors: 1,
+            BaseShaderRegister: 13,
+            RegisterSpace: 0,
+            OffsetInDescriptorsFromTableStart: 4,
+        },
     ];
     // t3..t6: an effect's `SkTexture` images.
     let effect_texture_range = D3D12_DESCRIPTOR_RANGE {
@@ -759,6 +766,8 @@ enum Blend {
     Subpixel,
     /// vue-native: CSS `plus-lighter` over premultiplied colour.
     PlusLighter,
+    /// vue-native: premultiplied source UNDER what the target holds.
+    DestinationOver,
 }
 
 fn app_effect_blend(needs_backdrop: bool) -> Blend {
@@ -775,6 +784,7 @@ fn module_blend(module: ShaderModule) -> Blend {
             Blend::Replace
         }
         ShaderModule::VnLayer => Blend::Premultiplied,
+        ShaderModule::VnUnderlay => Blend::DestinationOver,
         ShaderModule::SubpixelSprite => Blend::Subpixel,
         ShaderModule::Effect(effect) if effect.needs_backdrop() => Blend::Replace,
         // `sk_finish` outputs premultiplied colour.
@@ -792,21 +802,22 @@ fn blend_description(blend: Blend) -> D3D12_BLEND_DESC {
         Blend::DestinationOut => D3D12_BLEND_ZERO,
         Blend::Straight => D3D12_BLEND_SRC_ALPHA,
         Blend::Subpixel => D3D12_BLEND_SRC1_COLOR,
+        Blend::DestinationOver => D3D12_BLEND_INV_DEST_ALPHA,
         _ => D3D12_BLEND_ONE,
     };
     target.DestBlend = match blend {
         Blend::Subpixel => D3D12_BLEND_INV_SRC1_COLOR,
-        Blend::PlusLighter => D3D12_BLEND_ONE,
+        Blend::PlusLighter | Blend::DestinationOver => D3D12_BLEND_ONE,
         _ => D3D12_BLEND_INV_SRC_ALPHA,
     };
     target.BlendOp = D3D12_BLEND_OP_ADD;
-    target.SrcBlendAlpha = if matches!(blend, Blend::DestinationOut) {
-        D3D12_BLEND_ZERO
-    } else {
-        D3D12_BLEND_ONE
+    target.SrcBlendAlpha = match blend {
+        Blend::DestinationOut => D3D12_BLEND_ZERO,
+        Blend::DestinationOver => D3D12_BLEND_INV_DEST_ALPHA,
+        _ => D3D12_BLEND_ONE,
     };
     target.DestBlendAlpha = match blend {
-        Blend::PlusLighter => D3D12_BLEND_ONE,
+        Blend::PlusLighter | Blend::DestinationOver => D3D12_BLEND_ONE,
         _ => D3D12_BLEND_INV_SRC_ALPHA,
     };
     target.BlendOpAlpha = D3D12_BLEND_OP_ADD;
@@ -976,6 +987,7 @@ fn compile_module(module: ShaderModule) -> Result<(Vec<u8>, Vec<u8>)> {
         ShaderModule::SubpixelSprite => "subpixel_sprite",
         ShaderModule::PolychromeSprite => "polychrome_sprite",
         ShaderModule::VnLayer => "vn_layer",
+        ShaderModule::VnUnderlay => "vn_underlay",
         ShaderModule::Effect(_) => bail!("Effect shaders require their shared vertex stage"),
     };
     Ok((

@@ -1,9 +1,9 @@
 {
-  "schema": 12,
+  "schema": 13,
   "slang": "2026.12",
   "compiler": "redslangc 0.1.1",
   "kind": "builtin",
-  "preludeSha256": "691bd5db414927bfe8bb799e247fcfb9d14425c9a6177f514294ddafbb1e16e5",
+  "preludeSha256": "5410533e3348e3c5b3b62864869e8c28fb1d2a7fd808b6d3482730835aff0cda",
   "effects": [
     {
       "id": 0,
@@ -19,9 +19,9 @@
       "source": "crates/sk-effects/shaders/frost.slang",
       "sourceSha256": "9024d32ca088179a5696533d2e2277f02d429ad8a9b78b9e09f279a3ab5615da",
       "generatedSha256": {
-        "hlsl": "b2ec555b7b5e48db3bdbe8c549f68af4976b4a2e695f9a122b5ce6957adff388",
-        "wgsl": "d6ac363e35fda92eab06c23676bfe83321f9e26d62c197ed5e116ff32cdcaae4",
-        "metal": "074e2bffd597dc24bf0549f434766111b434ecf5da897d5fb4a08246f5ed4159"
+        "hlsl": "4179fa034bc6a5e3e7a182f4b31033e520fd196c43c3a05cbc3fe348986874ab",
+        "wgsl": "cd1e2f21f885c926ba0a1bbff09997221cb7cdad7c71057138b0f86bed22aa15",
+        "metal": "740fedbb233a020b14988c6fb9f6909dee509ff2cceb91efc317148f0bfce6de"
       },
       "signature": "frost(<number:strength>, <length:radius>?, <color:tint>?)",
       "backdropRadiusParam": 1,
@@ -97,6 +97,11 @@
           "index": 2
         },
         {
+          "name": "sk_backdrop_page",
+          "kind": "shaderResource",
+          "index": 13
+        },
+        {
           "name": "sk_clamp_sampler",
           "kind": "samplerState",
           "index": 1
@@ -157,9 +162,9 @@
       "source": "crates/sk-effects/shaders/noise.slang",
       "sourceSha256": "4dca94745eb5795fef3b21c9d73c37a1c39707bf030e58a748f0ba393529ca9f",
       "generatedSha256": {
-        "hlsl": "75b55921c7cf85a5c1eea2e28716ef916fe4207b0ce1801de349d7e78e3eac31",
-        "wgsl": "ab08f82fd12eb0dfbd2e4bb45341c9e41d3ba0f00801dde5255b3854baae6238",
-        "metal": "2ed611545bbfc634f7261823f83fb1559fbc19d4ab63bfa500c5c8a7274528d3"
+        "hlsl": "e828c5443572b253568a69ba43ec5c4f8095f89baf83a22970a714c40d0e5e43",
+        "wgsl": "325b39bb9f9e4ee10299adac421c632a4a26c8c37b1756f16a47dfc3a3a5d7d9",
+        "metal": "39db5d5fb72db2de0a1eafe7de41debed2ac2d99eb3e79fe56f5d8556d783629"
       },
       "signature": "noise(<number:amount>, <length:scale>?, <number:speed>?)",
       "backdropRadiusParam": null,
@@ -238,6 +243,11 @@
           "index": 2
         },
         {
+          "name": "sk_backdrop_page",
+          "kind": "shaderResource",
+          "index": 13
+        },
+        {
           "name": "sk_clamp_sampler",
           "kind": "samplerState",
           "index": 1
@@ -298,9 +308,9 @@
       "source": "crates/sk-effects/shaders/glow.slang",
       "sourceSha256": "de1d06dddb28503e5a23a3494d73227436591594943428bd0ecec042d3926caa",
       "generatedSha256": {
-        "hlsl": "da8dd5bafb0484cefcc0e0ae486e02fb2ec1ef4edb69aa23cdf87d39a24c03af",
-        "wgsl": "d2b8dd6176e4fc9d97afd64be188de868051cd821f000b71aebe325cf7b610c5",
-        "metal": "a143e84bd89873b98b35336263c8e8a4c0612c9ff3417388289d8b7d8515b259"
+        "hlsl": "ea1f603ddfef608119db1bf36036f83116b67c7f63efed27eb4cc52b5211d145",
+        "wgsl": "7b707d01aa374925d1ab6cbe2657228f6d0d7a05dc9cc8a32affad5dbecdbd4e",
+        "metal": "159cc290fc2ddf87bd670f614d9661f933bff32b79016dc769fc225660705559"
       },
       "signature": "glow(<color>?, <length:radius>, <number:strength>)",
       "backdropRadiusParam": null,
@@ -374,6 +384,11 @@
           "name": "sk_backdrop_original",
           "kind": "shaderResource",
           "index": 2
+        },
+        {
+          "name": "sk_backdrop_page",
+          "kind": "shaderResource",
+          "index": 13
         },
         {
           "name": "sk_clamp_sampler",

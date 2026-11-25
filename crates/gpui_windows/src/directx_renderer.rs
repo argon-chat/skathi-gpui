@@ -1678,6 +1678,7 @@ impl DirectXRenderer {
             (3, &textures[..]),
             (7, slice::from_ref(content)),
             (8, slice::from_ref(history)),
+            (13, original_texture),
         ];
 
         unsafe {
@@ -1833,7 +1834,12 @@ impl DirectXRenderer {
         };
         let backdrop_texture = slice::from_ref(backdrop_texture);
         let original_texture = slice::from_ref(&blur_resources.snapshot_srv);
-        let fragment_textures = [(0, backdrop_texture), (2, original_texture)];
+        // No underlay sources here: the page-only snapshot (t13) is the original.
+        let fragment_textures = [
+            (0, backdrop_texture),
+            (2, original_texture),
+            (13, original_texture),
+        ];
 
         unsafe {
             unbind_shader_resources(&devices.device_context);
@@ -3589,6 +3595,7 @@ unsafe fn unbind_shader_resources(device_context: &ID3D11DeviceContext) {
         device_context.PSSetShaderResources(0, Some(&empty));
         // vue-native fork: an effect layer's content and history.
         device_context.PSSetShaderResources(7, Some(&empty[..2]));
+        device_context.PSSetShaderResources(13, Some(&empty[..1]));
     }
 }
 
@@ -3632,6 +3639,9 @@ pub(crate) mod shader_resources {
         /// vue-native fork: an isolated layer's composite through its clip
         /// shape (`vn_layer_*` in shaders.hlsl).
         VnLayer,
+        /// vue-native fork: an underlay source drawn under a backdrop snapshot
+        /// (`vn_underlay_*`); the D3D12 renderer's only, D3D11 composites none.
+        VnUnderlay,
         /// A `--shading` effect. Its two halves come from two different files:
         /// the shared engine vertex stage from `src/effects.hlsl`, the
         /// per-effect fragment stage from the checked-in slangc output under
@@ -3893,6 +3903,10 @@ pub(crate) mod shader_resources {
                     ShaderTarget::Vertex => VN_LAYER_VERTEX_BYTES,
                     ShaderTarget::Fragment => VN_LAYER_FRAGMENT_BYTES,
                 },
+                ShaderModule::VnUnderlay => match target {
+                    ShaderTarget::Vertex => VN_UNDERLAY_VERTEX_BYTES,
+                    ShaderTarget::Fragment => VN_UNDERLAY_FRAGMENT_BYTES,
+                },
                 // One vertex shader serves every effect; only the fragment
                 // half differs.
                 ShaderModule::Effect(effect) => match target {
@@ -3980,6 +3994,7 @@ pub(crate) mod shader_resources {
                 ShaderModule::SubpixelSprite => "subpixel_sprite",
                 ShaderModule::PolychromeSprite => "polychrome_sprite",
                 ShaderModule::VnLayer => "vn_layer",
+                ShaderModule::VnUnderlay => "vn_underlay",
             }
         }
     }
@@ -4092,7 +4107,7 @@ pub(crate) mod effect_layer_tests {
         reload_app_effects(
             AppEffects::new(
                 "test",
-                r#"{"schema": 12, "effects": [
+                r#"{"schema": 13, "effects": [
                     {"name": "swap", "backdrop": false, "hlsl": "fx.hlsl"},
                     {"name": "count", "backdrop": false, "history": true, "hlsl": "fx.hlsl"}
                 ]}"#,

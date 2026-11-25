@@ -5,7 +5,7 @@
 //   source:     crates/sk-effects/shaders/noise.slang+wrapper
 //   signature:  noise(<number:amount>, <length:scale>?, <number:speed>?)
 //   slang:      2026.12
-//   schema:     12
+//   schema:     13
 //   src-sha256: 4dca94745eb5795fef3b21c9d73c37a1c39707bf030e58a748f0ba393529ca9f
 //   output:     premultiplied RGBA, blended One, OneMinusSrcAlpha
 //
@@ -78,7 +78,7 @@ struct SLANG_ParameterGroup_GlobalParams_std140_0
 
 @binding(8) @group(2) var sk_history_0 : texture_2d<f32>;
 
-@binding(2) @group(2) var sk_backdrop_original_0 : texture_2d<f32>;
+@binding(10) @group(2) var sk_backdrop_page_0 : texture_2d<f32>;
 
 struct Noise_0
 {
@@ -175,7 +175,7 @@ fn sk_finish_0( material_0 : Noise_0,  i_0 : EffectInput_0) -> vec4<f32>
     var result_0 : vec4<f32>;
     if(i_0.hasBackdrop_0)
     {
-        result_0 = mix((textureSampleLevel((sk_backdrop_original_0), (sk_clamp_sampler_0), (i_0.uv_0), (0.0f))), shaded_2, vec4<f32>(coverage_1));
+        result_0 = mix((textureSampleLevel((sk_backdrop_page_0), (sk_clamp_sampler_0), (i_0.uv_0), (0.0f))), shaded_2, vec4<f32>(coverage_1));
     }
     else
     {

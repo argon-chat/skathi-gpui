@@ -1065,6 +1065,22 @@ float4 sample_surface(texture2d<float> atlas, float2 uv, PolychromeSprite sprite
     return float4(clamp(sum.rgb / sum.a, low.rgb, high.rgb), alpha);
 }
 
+// vue-native fork: a texel sampled under `PolychromeSprite::sampling_word`'s
+// HDR headroom (surface tag and legacy word), as sRGB.
+float4 encode_sampled_texel(float4 color, uint word) {
+  bool packed_word = (word & 0x80000000u) != 0u;
+  uint code = word & 0x07ffffffu;
+  uint headroom = packed_word ? (code == 0u ? 0u : code + 0x3f7fffffu) : word;
+  if (headroom != 0u) {
+    float3 light = min(color.rgb, float3(as_type<float>(headroom)));
+    bool signed_hdr = (word & 0xc0000000u) == 0xc0000000u;
+    float3 encoded = signed_hdr ? sign(light) * linear_to_srgb(abs(light))
+                                : linear_to_srgb(max(light, float3(0.0)));
+    color = float4(encoded, saturate(color.a));
+  }
+  return color;
+}
+
 fragment float4 polychrome_sprite_fragment(
     PolychromeSpriteFragmentInput input [[stage_in]],
     constant PolychromeSprite *sprites [[buffer(SpriteInputIndex_Sprites)]],
@@ -1083,17 +1099,7 @@ fragment float4 polychrome_sprite_fragment(
       shaped_quad_sdf(input.local_position, sprite.bounds, sprite.corner_radii,
                       sprite.corner_shapes);
 
-  float4 color = sample;
-  // See PolychromeSprite::sampling_word for the surface tag and legacy HDR word.
-  uint code = sprite.pad & 0x07ffffffu;
-  uint headroom = packed_word ? (code == 0u ? 0u : code + 0x3f7fffffu) : sprite.pad;
-  if (headroom != 0u) {
-    float3 light = min(color.rgb, float3(as_type<float>(headroom)));
-    bool signed_hdr = (sprite.pad & 0xc0000000u) == 0xc0000000u;
-    float3 encoded = signed_hdr ? sign(light) * linear_to_srgb(abs(light))
-                                : linear_to_srgb(max(light, float3(0.0)));
-    color = float4(encoded, saturate(color.a));
-  }
+  float4 color = encode_sampled_texel(sample, sprite.pad);
   // vue-native fork: the tint takes the pixels by its alpha, keeping theirs
   // (canvas `source-atop`, in straight alpha). `PolychromeSprite` comes from
   // cbindgen (build.rs), so its `tint` is already there.
@@ -2127,15 +2133,16 @@ float4 over_straight_on_premultiplied(float4 below, float4 above) {
   return clamp_premultiplied(premultiplied + below * (1. - above.a));
 }
 
-// Drawn with blending disabled: outside the rounded rect the untouched
-// snapshot is written back, which keeps the antialiased edge correct.
+// Drawn with blending disabled: outside the rounded rect the page alone
+// (the snapshot without `<sk-layer>` pictures) is written back, which keeps
+// the antialiased edge correct.
 fragment float4 blur_rect_fragment(
     BlurRectVertexOutput input [[stage_in]],
     constant BackdropBlurRect *blur_rects [[buffer(BackdropInputIndex_Instances)]],
     constant Size_DevicePixels *viewport_size
     [[buffer(BackdropInputIndex_ViewportSize)]],
     texture2d<float> processed [[texture(BackdropTextureIndex_Processed)]],
-    texture2d<float> original [[texture(BackdropTextureIndex_Original)]]) {
+    texture2d<float> original [[texture(BackdropTextureIndex_Page)]]) {
   BackdropBlurRect blur_rect = blur_rects[input.blur_rect_id];
   float2 position = input.position.xy;
   float2 texture_position =
@@ -2156,6 +2163,47 @@ fragment float4 blur_rect_fragment(
                    content_mask_coverage(position, blur_rect.content_mask.bounds,
                                          blur_rect.content_mask.corner_radii, blur_rect.content_mask.corner_shapes);
   return clamp_premultiplied(mix(untouched, tinted, float4(coverage)));
+}
+
+// vue-native fork: an `<sk-layer>` picture (`VnUnderlay`), drawn
+// destination-over into a copy of the snapshot.
+struct VnUnderlayVertexOutput {
+  float4 position [[position]];
+  uint underlay_id [[flat]];
+};
+
+vertex VnUnderlayVertexOutput vn_underlay_vertex(
+    uint vertex_id [[vertex_id]], uint underlay_id [[instance_id]],
+    constant VnUnderlay *underlays [[buffer(BackdropInputIndex_Instances)]],
+    constant Size_DevicePixels *viewport_size
+    [[buffer(BackdropInputIndex_ViewportSize)]]) {
+  VnUnderlay underlay = underlays[underlay_id];
+  float4 position = to_device_position(
+      strip_unit_vertex(vertex_id), clip_to_mask(underlay.bounds, underlay.clip),
+      viewport_size);
+  return VnUnderlayVertexOutput{position, underlay_id};
+}
+
+fragment float4 vn_underlay_fragment(
+    VnUnderlayVertexOutput input [[stage_in]],
+    constant VnUnderlay *underlays [[buffer(BackdropInputIndex_Instances)]],
+    texture2d<float> atlas [[texture(BackdropTextureIndex_Processed)]]) {
+  VnUnderlay underlay = underlays[input.underlay_id];
+  constexpr sampler atlas_sampler(mag_filter::linear, min_filter::linear);
+  float2 position = input.position.xy;
+  float2 origin = float2(underlay.content.origin.x, underlay.content.origin.y);
+  float2 extent = float2(underlay.content.size.width, underlay.content.size.height);
+  float2 local = (position - origin) / max(extent, float2(1e-3));
+  float2 atlas_size = float2(atlas.get_width(), atlas.get_height());
+  float2 tile_origin = float2(underlay.tile.bounds.origin.x, underlay.tile.bounds.origin.y);
+  float2 tile_size = float2(underlay.tile.bounds.size.width, underlay.tile.bounds.size.height);
+  float2 uv = clamp_to_tile((tile_origin + local * tile_size) / atlas_size, underlay.tile, atlas);
+  float4 color = encode_sampled_texel(atlas.sample(atlas_sampler, uv, level(0.)), underlay.sampling);
+  float2 inset = min(position - origin, origin + extent - position);
+  float coverage = saturate(min(inset.x, inset.y) + 0.5) * underlay.opacity *
+                   saturate(0.5 - quad_sdf(position, underlay.bounds, underlay.corner_radii));
+  float alpha = saturate(color.a) * coverage;
+  return float4(color.rgb * alpha, alpha);
 }
 
 // The generated fragment stages (effects/*.metal) read

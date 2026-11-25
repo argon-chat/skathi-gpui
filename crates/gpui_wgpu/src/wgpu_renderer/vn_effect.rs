@@ -173,7 +173,7 @@ impl WgpuRendererCore {
                 && let Some(pipeline) = state.history_effect(quad.effect_id)
             {
                 let textures =
-                    state.effect_textures(&self.resources.device, [None, None], layer, images);
+                    state.effect_textures(&self.resources.device, [None; 3], layer, images);
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("vn_effect_history_step"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -206,6 +206,7 @@ impl WgpuRendererCore {
             };
             if backdrop {
                 let textures = self.snapshot_layer_backdrop(
+                    draw,
                     encoder,
                     frame,
                     quad.effective_kernel_levels() as usize,
@@ -229,7 +230,7 @@ impl WgpuRendererCore {
                     continue;
                 };
                 let textures =
-                    state.effect_textures(&self.resources.device, [None, None], layer, images);
+                    state.effect_textures(&self.resources.device, [None; 3], layer, images);
                 let mut pass = continue_pass(encoder, &frame.view, "vn_effect_composite");
                 pass.set_pipeline(pipeline);
                 pass.set_bind_group(0, &state.effect_globals_bind_group, &[]);
@@ -303,7 +304,7 @@ mod tests {
         gpui::reload_app_effects(
             gpui::AppEffects::new(
                 "test",
-                r#"{"schema": 12, "effects": [
+                r#"{"schema": 13, "effects": [
                     {"name": "swap", "backdrop": false, "wgsl": "fx.wgsl"},
                     {"name": "count", "backdrop": false, "history": true, "wgsl": "fx.wgsl"}
                 ]}"#,

@@ -1,8 +1,11 @@
 //! vue-native: what a group of backdrop readers asks of the snapshot a
 //! renderer takes before drawing it. Every backend consumes the same request,
-//! so they agree on what is copied and blurred.
+//! so they agree on what is copied, what lies under it, and what is blurred.
 
-use crate::{BackdropBlurRect, Bounds, DevicePixels, EffectQuad, ScaledPixels, point, size};
+use crate::{
+    BackdropBlurRect, Bounds, DevicePixels, EffectQuad, ScaledPixels, Scene, VnUnderlay, point,
+    size,
+};
 
 /// One group's backdrop: blur rects, or effect quads of one pipeline, that
 /// share a kernel depth and do not overlap.
@@ -12,6 +15,9 @@ pub struct BackdropRequest {
     pub kernel_levels: usize,
     /// The device pixels the group samples, or `None` for anywhere in the frame.
     pub samples: Option<Bounds<ScaledPixels>>,
+    /// Whether the scene's underlay sources ([`VnUnderlay`]) are composited
+    /// under the snapshot: only a snapshot of the window's own target has them.
+    pub underlays: bool,
 }
 
 impl BackdropRequest {
@@ -25,6 +31,7 @@ impl BackdropRequest {
                 .iter()
                 .map(|rect| rect.bounds)
                 .reduce(|union, bounds| union.union(&bounds)),
+            underlays: false,
         }
     }
 
@@ -40,6 +47,15 @@ impl BackdropRequest {
                 .map(EffectQuad::backdrop_samples)
                 .reduce(|union, samples| Some(union?.union(&samples?)))
                 .flatten(),
+            underlays: false,
+        }
+    }
+
+    /// The same request, on the window's own target (`root`) or not.
+    pub fn on_root(self, root: bool) -> Self {
+        Self {
+            underlays: root,
+            ..self
         }
     }
 
@@ -63,6 +79,40 @@ impl BackdropRequest {
             ),
         })
     }
+
+    /// The underlays to composite under this snapshot, topmost first: the
+    /// order destination-over draws them in, so the last painted ends on top.
+    /// Empty unless [`Self::underlays`]; only those with a picture that meets
+    /// [`Self::region`].
+    pub fn underlays<'a>(&self, scene: &'a Scene) -> Vec<&'a VnUnderlay> {
+        if !self.underlays {
+            return Vec::new();
+        }
+        let region = self.region();
+        scene
+            .vn_underlays
+            .iter()
+            .rev()
+            .filter(|underlay| {
+                underlay.has_picture()
+                    && region.is_none_or(|region| vn_meets(&underlay.visible_bounds(), &region))
+            })
+            .collect()
+    }
+}
+
+/// Whether device-pixel `bounds` overlap the whole pixels of `region`.
+pub fn vn_meets(bounds: &Bounds<ScaledPixels>, region: &Bounds<DevicePixels>) -> bool {
+    let (left, top) = (region.origin.x.0 as f32, region.origin.y.0 as f32);
+    let (right, bottom) = (
+        left + region.size.width.0 as f32,
+        top + region.size.height.0 as f32,
+    );
+    !bounds.is_empty()
+        && bounds.origin.x.0 < right
+        && bounds.origin.y.0 < bottom
+        && bounds.origin.x.0 + bounds.size.width.0 > left
+        && bounds.origin.y.0 + bounds.size.height.0 > top
 }
 
 /// Frame pixels a blur of `levels` pyramid levels can carry into a pixel. Each
@@ -76,7 +126,10 @@ pub fn backdrop_blur_reach(levels: usize) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EFFECT_FLAG_BACKDROP_REACH, EFFECT_FLAG_NEEDS_BACKDROP};
+    use crate::{
+        AtlasTextureId, AtlasTextureKind, AtlasTile, Corners, EFFECT_FLAG_BACKDROP_REACH,
+        EFFECT_FLAG_NEEDS_BACKDROP, TileId, vn_underlay_flags,
+    };
 
     fn effect(x: f32, reach: Option<f32>) -> EffectQuad {
         EffectQuad {
@@ -87,6 +140,38 @@ mod tests {
             flags: EFFECT_FLAG_NEEDS_BACKDROP | reach.map_or(0, |_| EFFECT_FLAG_BACKDROP_REACH),
             backdrop_reach: ScaledPixels(reach.unwrap_or(0.)),
             ..Default::default()
+        }
+    }
+
+    pub(crate) fn underlay(x: f32, key: u64, picture: bool) -> VnUnderlay {
+        let bounds = Bounds::new(
+            point(ScaledPixels(x), ScaledPixels(0.)),
+            size(ScaledPixels(40.), ScaledPixels(40.)),
+        );
+        VnUnderlay {
+            order: 0,
+            sampling: 0,
+            tile: AtlasTile {
+                texture_id: AtlasTextureId {
+                    index: 0,
+                    kind: AtlasTextureKind::Polychrome,
+                },
+                tile_id: TileId(0),
+                padding: 0,
+                bounds: Bounds::default(),
+            },
+            bounds,
+            clip: bounds,
+            corner_radii: Corners::default(),
+            content: bounds,
+            opacity: 1.,
+            flags: if picture {
+                vn_underlay_flags::PICTURE
+            } else {
+                0
+            },
+            key: [key as u32, (key >> 32) as u32],
+            pad: [0; 2],
         }
     }
 
@@ -106,5 +191,45 @@ mod tests {
         );
         let mixed = BackdropRequest::effects(&[effect(10., Some(4.)), effect(50., None)]);
         assert_eq!(mixed.region(), None);
+    }
+
+    #[test]
+    fn a_root_snapshot_composites_the_pictures_its_region_meets_topmost_first() {
+        let mut scene = Scene::default();
+        scene.vn_insert_underlay(underlay(0., 1, true));
+        scene.vn_insert_underlay(underlay(20., 2, true));
+        scene.vn_insert_underlay(underlay(30., 3, false));
+        scene.vn_insert_underlay(underlay(400., 4, true));
+        let request = BackdropRequest::effects(&[effect(10., Some(4.))]);
+        assert!(request.underlays(&scene).is_empty(), "not on the root");
+        let keys: Vec<u64> = request
+            .on_root(true)
+            .underlays(&scene)
+            .iter()
+            .map(|u| u.key())
+            .collect();
+        assert_eq!(keys, [2, 1], "no picture, or out of reach, is left out");
+        let whole = BackdropRequest::effects(&[effect(10., None)]).on_root(true);
+        assert_eq!(whole.underlays(&scene).len(), 3);
+    }
+
+    #[test]
+    fn only_root_readers_mark_what_they_sample_as_read() {
+        let mut scene = Scene::default();
+        scene.vn_insert_underlay(underlay(0., 1, false));
+        scene.vn_insert_underlay(underlay(600., 2, true));
+        let mut quad = effect(10., Some(4.));
+        quad.content_mask.bounds = Bounds::new(
+            point(ScaledPixels(0.), ScaledPixels(0.)),
+            size(ScaledPixels(1000.), ScaledPixels(1000.)),
+        );
+        scene.insert_primitive(quad);
+        scene.finish();
+        assert_eq!(scene.vn_underlays_read().collect::<Vec<_>>(), [1]);
+
+        let mut plain = Scene::default();
+        plain.vn_insert_underlay(underlay(0., 1, true));
+        plain.finish();
+        assert_eq!(plain.vn_underlays_read().count(), 0, "nothing reads");
     }
 }

@@ -200,6 +200,8 @@ struct InstanceBindings {
     monochrome_sprites: InstanceBinding,
     subpixel_sprites: InstanceBinding,
     polychrome_sprites: InstanceBinding,
+    /// vue-native fork: `Scene::vn_underlays`, only in a frame where one has a picture.
+    vn_underlays: Option<InstanceBinding>,
 }
 
 /// What every group of one frame draws from.
@@ -1605,13 +1607,7 @@ impl WgpuRendererCore {
                             continue;
                         }
                         drop(pass);
-                        self.draw_backdrop_blur_rects(
-                            encoder,
-                            frame,
-                            &scene.backdrop_blur_rects[range.clone()],
-                            range.start,
-                            &instance_bindings.backdrop_blur_rects,
-                        )?;
+                        self.draw_backdrop_blur_rects(draw, encoder, frame, range)?;
                         pass = continue_pass(encoder, &frame.view, "main_pass_continued");
                     }
                     PrimitiveBatch::EffectQuads { effect_id, range } => {
@@ -1627,14 +1623,7 @@ impl WgpuRendererCore {
                             ),
                             backdrop::EffectPass::Backdrop => {
                                 drop(pass);
-                                self.draw_backdrop_effects(
-                                    encoder,
-                                    frame,
-                                    effect_id,
-                                    effect_quads,
-                                    range.start,
-                                    &instance_bindings.effect_quads,
-                                )?;
+                                self.draw_backdrop_effects(draw, encoder, frame, effect_id, range)?;
                                 pass = continue_pass(encoder, &frame.view, "main_pass_continued");
                             }
                         }
@@ -1753,6 +1742,15 @@ impl WgpuRendererCore {
                 instance_offset,
                 &scene.polychrome_sprites,
             )?,
+            vn_underlays: if scene.vn_underlays.iter().any(gpui::VnUnderlay::has_picture) {
+                Some(self.write_instance_binding(
+                    "vn_underlays_bind_group",
+                    instance_offset,
+                    &scene.vn_underlays,
+                )?)
+            } else {
+                None
+            },
         })
     }
 
@@ -1791,6 +1789,11 @@ impl WgpuRendererCore {
             };
             if !texture_ids.contains(&texture_id) {
                 texture_ids.push(texture_id);
+            }
+        }
+        for underlay in scene.vn_underlays.iter().filter(|u| u.has_picture()) {
+            if !texture_ids.contains(&underlay.tile.texture_id) {
+                texture_ids.push(underlay.tile.texture_id);
             }
         }
 
@@ -2346,6 +2349,8 @@ pub struct WgpuHeadlessRenderer {
     core: WgpuRendererCore,
     render_target: Option<HeadlessRenderTarget>,
     observed_error_generation: u64,
+    /// vue-native fork: what each frame starts from; tests of what shows through a page clear it.
+    clear_color: wgpu::Color,
 }
 
 #[cfg(all(
@@ -2371,6 +2376,7 @@ impl WgpuHeadlessRenderer {
             core,
             render_target: None,
             observed_error_generation,
+            clear_color: wgpu::Color::BLACK,
         })
     }
 
@@ -2440,7 +2446,7 @@ impl WgpuHeadlessRenderer {
             .ok_or_else(|| anyhow::anyhow!("Headless render target was not created"))?;
         let (texture, view) = (target.texture.clone(), target.view.clone());
         self.core
-            .render_frame(scene, &texture, &view, size, false, wgpu::Color::BLACK)?;
+            .render_frame(scene, &texture, &view, size, false, self.clear_color)?;
         Ok(())
     }
 

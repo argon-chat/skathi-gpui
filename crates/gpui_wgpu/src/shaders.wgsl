@@ -2036,6 +2036,21 @@ fn sample_surface(uv: vec2<f32>, sprite: PolychromeSprite, mode: u32) -> vec4<f3
     return vec4<f32>(clamp(sum.rgb / sum.a, low.rgb, high.rgb), alpha);
 }
 
+// vue-native fork: a texel sampled under `PolychromeSprite::sampling_word`'s HDR headroom, as sRGB.
+fn encode_sampled_texel(sample: vec4<f32>, word: u32) -> vec4<f32> {
+    let packed_word = (word & 0x80000000u) != 0u;
+    let code = word & 0x07ffffffu;
+    let headroom_bits = select(word, select(0u, code + 0x3f7fffffu, code != 0u), packed_word);
+    if (headroom_bits == 0u) {
+        return sample;
+    }
+    let light = min(sample.rgb, vec3<f32>(bitcast<f32>(headroom_bits)));
+    if ((word & 0xc0000000u) == 0xc0000000u) {
+        return vec4<f32>(sign(light) * linear_to_srgb(abs(light)), saturate(sample.a));
+    }
+    return vec4<f32>(linear_to_srgb(max(light, vec3<f32>(0.0))), saturate(sample.a));
+}
+
 @fragment
 fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
     let uv = clamp(input.tile_position, input.tile_clamp.xy, input.tile_clamp.zw);
@@ -2055,16 +2070,7 @@ fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
     if (mode != 0u) {
         color = sample_surface(input.tile_position, sprite, mode);
     }
-    let code = sprite.pad & 0x07ffffffu;
-    let headroom_bits = select(sprite.pad, select(0u, code + 0x3f7fffffu, code != 0u), packed_word);
-    if (headroom_bits != 0u) {
-        let light = min(color.rgb, vec3<f32>(bitcast<f32>(headroom_bits)));
-        if ((sprite.pad & 0xc0000000u) == 0xc0000000u) {
-            color = vec4<f32>(sign(light) * linear_to_srgb(abs(light)), saturate(color.a));
-        } else {
-            color = vec4<f32>(linear_to_srgb(max(light, vec3<f32>(0.0))), saturate(color.a));
-        }
-    }
+    color = encode_sampled_texel(color, sprite.pad);
     // vue-native fork: the tint takes the pixels by its alpha, keeping theirs
     // (canvas `source-atop`, in straight alpha).
     if (sprite.tint.a > 0.0) {

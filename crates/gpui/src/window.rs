@@ -1775,6 +1775,9 @@ pub struct Window {
     element_image_tint: Hsla,
     /// The HDR tile's headroom and whether to preserve signed RGB.
     element_image_headroom: (f32, bool),
+    /// vue-native fork: page frames handed to the platform so far.
+    vn_frames_submitted: u64,
+    vn_on_frame_submitted: Option<Box<dyn FnMut(u64)>>,
     /// The composed CSS `transform` of every ancestor currently being painted,
     /// in DEVICE space. Identity outside a `Style::vn_transform`.
     ///
@@ -3156,6 +3159,8 @@ impl Window {
             vn_group_opacity: 1.0,
             element_image_tint: Hsla::transparent_black(),
             element_image_headroom: (1.0, false),
+            vn_frames_submitted: 0,
+            vn_on_frame_submitted: None,
             element_transform: TransformationMatrix::unit(),
             vn_hitbox_tag: 0,
             vn_tag_fresh: false,
@@ -3875,6 +3880,93 @@ impl Window {
     /// vue-native: called after each commit made for [`Self::vn_composition_commit`].
     pub fn vn_on_composition_commit(&self, callback: Box<dyn FnMut()>) {
         self.platform_window.vn_on_composition_commit(callback);
+    }
+
+    /// vue-native: calls `callback` on this thread right after each page frame
+    /// is handed to the platform (drawn and presented or committed), with its
+    /// sequence number in this window, counting from 1. Replaces any earlier one.
+    pub fn vn_on_frame_submitted(&mut self, callback: Box<dyn FnMut(u64)>) {
+        self.vn_on_frame_submitted = Some(callback);
+    }
+
+    /// vue-native: the page frames handed to the platform so far.
+    pub fn vn_frames_submitted(&self) -> u64 {
+        self.vn_frames_submitted
+    }
+
+    /// vue-native: the keys of the underlays ([`Self::vn_paint_underlay`]) a
+    /// backdrop sampled in the frame last drawn.
+    pub fn vn_underlays_read(&self) -> Vec<u64> {
+        self.rendered_frame.scene.vn_underlays_read().collect()
+    }
+
+    /// vue-native: records a picture under the page at `place` (device
+    /// pixels), which backdrop snapshots composite under the page's pixels; see
+    /// [`crate::VnUnderlay`]. `picture` is drawn into `content` with the
+    /// current image headroom ([`Self::with_signed_image_headroom`]); without
+    /// one the source is only tracked for reads.
+    pub fn vn_paint_underlay(
+        &mut self,
+        key: u64,
+        place: crate::VnUnderlayPlace,
+        picture: Option<Arc<RenderImage>>,
+    ) -> Result<()> {
+        self.invalidator.debug_assert_paint();
+        let tile = match &picture {
+            Some(data) => self.sprite_atlas.get_or_insert_with(
+                RenderImageParams {
+                    image_id: data.id,
+                    frame_index: 0,
+                }
+                .into(),
+                &mut || {
+                    Ok(data
+                        .as_bytes(0)
+                        .map(|bytes| (data.size(0), Cow::Borrowed(bytes))))
+                },
+            )?,
+            None => None,
+        };
+        let (headroom, signed) = self.element_image_headroom;
+        let headroom = tile
+            .filter(|tile| tile.texture_id.kind == AtlasTextureKind::PolychromeHdr)
+            .map(|_| headroom);
+        let px = |b: [f32; 4]| Bounds {
+            origin: point(ScaledPixels(b[0]), ScaledPixels(b[1])),
+            size: size(ScaledPixels(b[2].max(0.)), ScaledPixels(b[3].max(0.))),
+        };
+        let [top_left, top_right, bottom_right, bottom_left] = place.radii.map(ScaledPixels);
+        self.next_frame.scene.vn_insert_underlay(crate::VnUnderlay {
+            order: 0,
+            sampling: PolychromeSprite::sampling_word(headroom, 0, signed),
+            tile: tile.unwrap_or(AtlasTile {
+                texture_id: crate::AtlasTextureId {
+                    index: 0,
+                    kind: AtlasTextureKind::Polychrome,
+                },
+                tile_id: crate::TileId(0),
+                padding: 0,
+                bounds: Bounds::default(),
+            }),
+            bounds: px(place.bounds),
+            clip: px(place.clip),
+            corner_radii: Corners {
+                top_left,
+                top_right,
+                bottom_right,
+                bottom_left,
+            },
+            content: px(place.content),
+            opacity: place.opacity,
+            flags: if tile.is_some() {
+                crate::vn_underlay_flags::PICTURE
+            } else {
+                0
+            },
+            key: [key as u32, (key >> 32) as u32],
+            pad: [0; 2],
+        });
+        Ok(())
     }
 
     /// vue-native: maximizes or leaves the maximized state without toggling.
@@ -5343,6 +5435,10 @@ impl Window {
         #[cfg(feature = "profiler")]
         let present_start = Instant::now();
         self.platform_window.draw(&self.rendered_frame.scene);
+        self.vn_frames_submitted += 1;
+        if let Some(submitted) = self.vn_on_frame_submitted.as_mut() {
+            submitted(self.vn_frames_submitted);
+        }
         #[cfg(feature = "profiler")]
         self.window_profiler.record_present(
             present_start,

@@ -89,6 +89,7 @@ mod shader_compilation {
             "polychrome_sprite",
             // vue-native fork: the isolated layer composite (`clip-path`).
             "vn_layer",
+            "vn_underlay",
         ];
 
         let rust_binding_path = format!("{}/shaders_bytes.rs", out_dir);

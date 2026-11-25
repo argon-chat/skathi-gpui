@@ -120,6 +120,7 @@ mod apple_build {
             "EffectQuad".into(),
             "BackdropInputIndex".into(),
             "BackdropTextureIndex".into(),
+            "VnUnderlay".into(),
             "VnLayer".into(),
             "VnTextBackground".into(),
             "VnLayerInputIndex".into(),

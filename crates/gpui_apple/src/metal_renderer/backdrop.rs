@@ -3,7 +3,7 @@
 //! grouping, the same effect pipeline table.
 
 use super::{
-    BackdropInputIndex, BackdropTextureIndex, InstanceBinding, MetalRenderer,
+    BackdropInputIndex, BackdropTextureIndex, GroupDraw, InstanceBinding, MetalRenderer,
     new_command_encoder_for_texture,
 };
 use anyhow::{Context as _, Result};
@@ -132,6 +132,8 @@ pub(super) struct MetalBackdrop {
     blur_upsample: Pipeline,
     blur_rect: Pipeline,
     frame_copy: Pipeline,
+    /// vue-native fork: `<sk-layer>` pictures, destination-over.
+    vn_underlay: Pipeline,
     /// The built-ins, indexed by `EffectQuad::effect_id`. A hole keeps the
     /// numbering when one failed to build.
     effects: Vec<Option<Pipeline>>,
@@ -176,6 +178,8 @@ struct BackdropTargets {
     /// deepest level a frame has asked for.
     levels: Vec<Texture>,
     frame: Option<Texture>,
+    /// vue-native fork: the snapshot with `<sk-layer>` pictures under it; only while a frame has one.
+    underlaid: Option<Texture>,
 }
 
 /// Where a frame renders. A backdrop copies what has been drawn so far, which
@@ -186,6 +190,8 @@ pub(super) struct FrameTarget {
     copy_to: Option<Texture>,
     /// Whether this frame can draw backdrop blurs and effects at all.
     pub(super) backdrop: bool,
+    /// vue-native fork: the window's own target, whose snapshots composite `<sk-layer>` pictures.
+    pub(super) root: bool,
 }
 
 impl FrameTarget {
@@ -194,6 +200,7 @@ impl FrameTarget {
             texture,
             copy_to: None,
             backdrop,
+            root: false,
         }
     }
 }
@@ -206,11 +213,12 @@ pub(super) enum EffectPass {
     Backdrop,
 }
 
-/// What a backdrop composite samples: the processed backdrop and the
-/// untouched snapshot.
+/// What a backdrop composite samples: the processed backdrop, the
+/// untouched snapshot and the page without `<sk-layer>` pictures.
 pub(super) struct BackdropTextures {
     processed: Texture,
     original: Texture,
+    page: Texture,
 }
 
 impl MetalRenderer {
@@ -228,6 +236,7 @@ impl MetalRenderer {
             texture: target.retain(),
             copy_to: None,
             backdrop,
+            root: true,
         };
         let effect_quads = || {
             scene
@@ -252,6 +261,11 @@ impl MetalRenderer {
             } else {
                 0
             });
+            if !scene.vn_underlays.iter().any(gpui::VnUnderlay::has_picture)
+                && let Some(targets) = &mut state.targets
+            {
+                targets.underlaid = None;
+            }
             if state.targets.is_none() && self.framebuffer_only_lifted {
                 self.framebuffer_only_lifted = false;
                 if let Some(layer) = &self.layer {
@@ -383,14 +397,15 @@ impl MetalRenderer {
     /// in; on an error, no encoder is left open.
     pub(super) fn draw_backdrop_blur_rects(
         &mut self,
+        draw: &GroupDraw<'_>,
         command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
         mut encoder: Encoder,
         frame: &FrameTarget,
-        blur_rects: &[BackdropBlurRect],
-        start: usize,
-        instances: &InstanceBinding,
-        viewport_size: Size<DevicePixels>,
+        range: Range<usize>,
     ) -> Result<Encoder> {
+        let blur_rects = &draw.scene.backdrop_blur_rects[range.clone()];
+        let (start, instances) = (range.start, &draw.instances.backdrop_blur_rects);
+        let viewport_size = draw.viewport_size;
         for group in backdrop_groups(blur_rects, |rect| {
             (rect.effective_kernel_levels() as usize, rect.bounds)
         }) {
@@ -407,7 +422,7 @@ impl MetalRenderer {
             }
 
             encoder.endEncoding();
-            let textures = self.snapshot_backdrop(command_buffer, frame, request)?;
+            let textures = self.snapshot_backdrop(draw, command_buffer, frame, request)?;
             let state = self
                 .backdrop
                 .ready()
@@ -490,21 +505,22 @@ impl MetalRenderer {
     /// blending disabled. Encoders as in [`Self::draw_backdrop_blur_rects`].
     pub(super) fn draw_backdrop_effects(
         &mut self,
+        draw: &GroupDraw<'_>,
         command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
         mut encoder: Encoder,
         frame: &FrameTarget,
         effect_id: u32,
-        effect_quads: &[EffectQuad],
-        start: usize,
-        instances: &InstanceBinding,
-        viewport_size: Size<DevicePixels>,
+        range: Range<usize>,
     ) -> Result<Encoder> {
+        let effect_quads = &draw.scene.effect_quads[range.clone()];
+        let (start, instances) = (range.start, &draw.instances.effect_quads);
+        let viewport_size = draw.viewport_size;
         for group in backdrop_groups(effect_quads, |quad| {
             (quad.effective_kernel_levels() as usize, quad.bounds)
         }) {
             let request = BackdropRequest::effects(&effect_quads[group.clone()]);
             encoder.endEncoding();
-            let textures = self.snapshot_backdrop(command_buffer, frame, request)?;
+            let textures = self.snapshot_backdrop(draw, command_buffer, frame, request)?;
             let state = self
                 .backdrop
                 .ready()
@@ -534,6 +550,7 @@ impl MetalRenderer {
     /// Called between encoders.
     pub(super) fn snapshot_layer_backdrop(
         &mut self,
+        draw: &GroupDraw<'_>,
         command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
         frame: &FrameTarget,
         kernel_levels: usize,
@@ -541,18 +558,32 @@ impl MetalRenderer {
         let request = BackdropRequest {
             kernel_levels,
             samples: None,
+            underlays: false,
         };
-        self.snapshot_backdrop(command_buffer, frame, request)
+        self.snapshot_backdrop(draw, command_buffer, frame, request)
     }
 
     /// Copies what the frame holds so far and blurs it as `request` asks.
     /// Called between encoders: it opens and ends its own.
+    ///
+    /// vue-native fork: on the root target the `<sk-layer>` pictures the region
+    /// meets go under a copy of the snapshot, destination-over, topmost first;
+    /// the blur and the raw backdrop read that copy, the page-only slot the
+    /// snapshot.
     fn snapshot_backdrop(
         &mut self,
+        draw: &GroupDraw<'_>,
         command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
         frame: &FrameTarget,
         request: BackdropRequest,
     ) -> Result<BackdropTextures> {
+        let request = request.on_root(frame.root);
+        let pictures = request.underlays(draw.scene);
+        let underlays = draw
+            .instances
+            .vn_underlays
+            .as_ref()
+            .filter(|_| !pictures.is_empty());
         let region = request.region().map(PixelRect::from);
         #[cfg(test)]
         let region = region.filter(|_| !tests::FULL_WINDOW_BACKDROP.get());
@@ -560,17 +591,26 @@ impl MetalRenderer {
         let BackdropState::Ready(state) = &mut self.backdrop else {
             anyhow::bail!("backdrop pipelines missing");
         };
-        state.ensure_targets(
-            &self.device,
-            frame.texture.width(),
-            frame.texture.height(),
-            kernel_levels,
-        )?;
+        let (width, height) = (frame.texture.width(), frame.texture.height());
+        let format = state.format;
+        let targets = state.ensure_targets(&self.device, width, height, kernel_levels)?;
+        if underlays.is_some() && targets.underlaid.is_none() {
+            targets.underlaid = Some(create_target_texture(
+                &self.device,
+                "backdrop_underlaid",
+                width,
+                height,
+                MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead,
+                format,
+            )?);
+        }
         let state = &**state;
         let targets = state.targets.as_ref().context("backdrop targets missing")?;
         let full = PixelRect::of(&frame.texture);
         let region = region.map_or(full, |region| region.intersect(full));
         anyhow::ensure!(!region.is_empty(), "empty backdrop region");
+        #[cfg(test)]
+        tests::SNAPSHOT_RECTS.with_borrow_mut(|rects| rects.push(region));
 
         let blit = command_buffer
             .blitCommandEncoder()
@@ -580,7 +620,13 @@ impl MetalRenderer {
             y: region.top as usize,
             z: 0,
         };
-        // SAFETY: Both textures are retained 2D textures in the frame's format, of the
+        let extent = MTLSize {
+            width: (region.right - region.left) as usize,
+            height: (region.bottom - region.top) as usize,
+            depth: 1,
+        };
+        let underlaid = targets.underlaid.as_ref().filter(|_| underlays.is_some());
+        // SAFETY: Every texture is a retained 2D texture in the frame's format, of the
         // frame's size, and the region lies within them.
         unsafe {
             blit.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin(
@@ -588,18 +634,83 @@ impl MetalRenderer {
                 0,
                 0,
                 origin,
-                MTLSize {
-                    width: (region.right - region.left) as usize,
-                    height: (region.bottom - region.top) as usize,
-                    depth: 1,
-                },
+                extent,
                 &targets.snapshot,
                 0,
                 0,
                 origin,
             );
+            if let Some(underlaid) = underlaid {
+                blit.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin(
+                    &frame.texture,
+                    0,
+                    0,
+                    origin,
+                    extent,
+                    underlaid,
+                    0,
+                    0,
+                    origin,
+                );
+            }
         }
         blit.endEncoding();
+
+        let raw = match (underlays, underlaid) {
+            (Some(instances), Some(underlaid)) => {
+                #[cfg(test)]
+                tests::UNDERLAY_PASS_RECTS.with_borrow_mut(|rects| rects.push(region));
+                let encoder = render_pass(command_buffer, underlaid, MTLLoadAction::Load)?;
+                encoder.setRenderPipelineState(&state.vn_underlay);
+                encoder.setScissorRect(MTLScissorRect {
+                    x: region.left as usize,
+                    y: region.top as usize,
+                    width: extent.width,
+                    height: extent.height,
+                });
+                let viewport_size = draw.viewport_size;
+                // SAFETY: The binding holds the scene's whole underlay array at an
+                // aligned offset and each `order` indexes it; Metal retains the
+                // buffer and textures and copies the viewport bytes.
+                unsafe {
+                    encoder.setVertexBuffer_offset_atIndex(
+                        Some(&instances.buffer),
+                        instances.offset,
+                        BackdropInputIndex::Instances as usize,
+                    );
+                    encoder.setVertexBytes_length_atIndex(
+                        ptr::NonNull::from(&viewport_size).cast(),
+                        mem::size_of_val(&viewport_size),
+                        BackdropInputIndex::ViewportSize as usize,
+                    );
+                    encoder.setFragmentBuffer_offset_atIndex(
+                        Some(&instances.buffer),
+                        instances.offset,
+                        BackdropInputIndex::Instances as usize,
+                    );
+                    for picture in &pictures {
+                        let Some(atlas) = self.sprite_atlas.metal_texture(picture.tile.texture_id)
+                        else {
+                            continue;
+                        };
+                        encoder.setFragmentTexture_atIndex(
+                            Some(&atlas),
+                            BackdropTextureIndex::Processed as usize,
+                        );
+                        encoder.drawPrimitives_vertexStart_vertexCount_instanceCount_baseInstance(
+                            MTLPrimitiveType::TriangleStrip,
+                            0,
+                            4,
+                            1,
+                            picture.order as usize,
+                        );
+                    }
+                }
+                encoder.endEncoding();
+                underlaid
+            }
+            _ => &targets.snapshot,
+        };
 
         // Like D3D12, a pass writes only its scissor and leaves the rest of
         // the level as it was; the rounded-out rects keep every texel the
@@ -643,13 +754,13 @@ impl MetalRenderer {
         };
 
         let processed = if kernel_levels == 0 {
-            &targets.snapshot
+            raw
         } else {
             let levels = targets
                 .levels
                 .get(..kernel_levels)
                 .context("missing blur pyramid levels")?;
-            blur_pass(&state.blur_downsample, &targets.snapshot, &levels[0], 1)?;
+            blur_pass(&state.blur_downsample, raw, &levels[0], 1)?;
             for level in 1..kernel_levels {
                 blur_pass(
                     &state.blur_downsample,
@@ -670,7 +781,8 @@ impl MetalRenderer {
         };
         Ok(BackdropTextures {
             processed: processed.clone(),
-            original: targets.snapshot.clone(),
+            original: raw.clone(),
+            page: targets.snapshot.clone(),
         })
     }
 }
@@ -796,6 +908,8 @@ enum Blend {
     /// D3D12's `Blend::DestinationOut`: the target times one minus the
     /// source's alpha, an eraser.
     DestinationOut,
+    /// vue-native fork: D3D12's `Blend::DestinationOver`, the source under the target.
+    DestinationOver,
 }
 
 impl MetalBackdrop {
@@ -817,6 +931,18 @@ impl MetalBackdrop {
         let blur_downsample = pass("backdrop_blur_downsample", "blur_downsample_fragment")?;
         let blur_upsample = pass("backdrop_blur_upsample", "blur_upsample_fragment")?;
         let frame_copy = pass("backdrop_frame_copy", "frame_copy_fragment")?;
+        let (underlay_vertex, underlay_fragment) = (
+            function("vn_underlay_vertex")?,
+            function("vn_underlay_fragment")?,
+        );
+        let vn_underlay = backdrop_pipeline(
+            device,
+            "vn_underlay",
+            &underlay_vertex,
+            &underlay_fragment,
+            format,
+            Blend::DestinationOver,
+        )?;
         let blur_rect_vertex = function("blur_rect_vertex")?;
         let blur_rect_fragment = function("blur_rect_fragment")?;
         let blur_rect = backdrop_pipeline(
@@ -895,6 +1021,7 @@ impl MetalBackdrop {
             blur_upsample,
             blur_rect,
             frame_copy,
+            vn_underlay,
             effects,
             app_effects: Default::default(),
             app_warmup: Default::default(),
@@ -1038,6 +1165,7 @@ impl MetalBackdrop {
                 )?,
                 levels: Vec::new(),
                 frame: None,
+                underlaid: None,
             },
         };
         let targets = self.targets.insert(targets);
@@ -1103,9 +1231,9 @@ impl MetalBackdrop {
             is_bgr: 0,
             pad: [0; 3],
         };
-        let (processed, original) = match textures {
-            Some(textures) => (&textures.processed, &textures.original),
-            None => (&self.placeholder, &self.placeholder),
+        let (processed, original, page) = match textures {
+            Some(textures) => (&textures.processed, &textures.original, &textures.page),
+            None => (&self.placeholder, &self.placeholder, &self.placeholder),
         };
         encoder.setRenderPipelineState(pipeline);
         // SAFETY: The binding holds the scene's whole instance array at an
@@ -1146,6 +1274,7 @@ impl MetalBackdrop {
                 Some(original),
                 BackdropTextureIndex::Original as usize,
             );
+            encoder.setFragmentTexture_atIndex(Some(page), BackdropTextureIndex::Page as usize);
             encoder.setFragmentTexture_atIndex(
                 Some(layer[0].unwrap_or(&self.placeholder)),
                 BackdropTextureIndex::Content as usize,
@@ -1323,19 +1452,23 @@ fn pipeline_in(
     // SAFETY: Index zero is within the pipeline's color attachment array.
     let color_attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
     color_attachment.setPixelFormat(format);
-    let source = match blend {
+    let factors = match blend {
         Blend::Off => None,
-        Blend::Premultiplied => Some(MTLBlendFactor::One),
-        Blend::DestinationOut => Some(MTLBlendFactor::Zero),
+        Blend::Premultiplied => Some((MTLBlendFactor::One, MTLBlendFactor::OneMinusSourceAlpha)),
+        Blend::DestinationOut => Some((MTLBlendFactor::Zero, MTLBlendFactor::OneMinusSourceAlpha)),
+        Blend::DestinationOver => Some((
+            MTLBlendFactor::OneMinusDestinationAlpha,
+            MTLBlendFactor::One,
+        )),
     };
-    color_attachment.setBlendingEnabled(source.is_some());
-    if let Some(source) = source {
+    color_attachment.setBlendingEnabled(factors.is_some());
+    if let Some((source, destination)) = factors {
         color_attachment.setRgbBlendOperation(MTLBlendOperation::Add);
         color_attachment.setAlphaBlendOperation(MTLBlendOperation::Add);
         color_attachment.setSourceRGBBlendFactor(source);
         color_attachment.setSourceAlphaBlendFactor(source);
-        color_attachment.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-        color_attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+        color_attachment.setDestinationRGBBlendFactor(destination);
+        color_attachment.setDestinationAlphaBlendFactor(destination);
     }
     device
         .newRenderPipelineStateWithDescriptor_error(&descriptor)
@@ -1462,6 +1595,12 @@ pub(super) mod tests {
             const { std::cell::Cell::new(false) };
         /// The scissor of every blur pass drawn on this thread.
         pub(super) static BLUR_PASS_RECTS: std::cell::RefCell<Vec<PixelRect>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+        /// The region of every snapshot taken on this thread.
+        pub(super) static SNAPSHOT_RECTS: std::cell::RefCell<Vec<PixelRect>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+        /// The region of every `<sk-layer>` underlay pass drawn on this thread.
+        pub(super) static UNDERLAY_PASS_RECTS: std::cell::RefCell<Vec<PixelRect>> =
             const { std::cell::RefCell::new(Vec::new()) };
     }
 
@@ -1862,6 +2001,66 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn underlays_lie_under_backdrops_and_readers_write_back_the_page_alone() -> Result<()> {
+        use gpui::underlay_test_scene::{self as underlays, Reader, Sources};
+        let side = underlays::SIDE as i32;
+        let size = size(DevicePixels(side), DevicePixels(side));
+        let underlaid = |renderer: &MetalRenderer| {
+            renderer
+                .backdrop
+                .ready()
+                .and_then(|state| state.targets.as_ref())
+                .is_some_and(|targets| targets.underlaid.is_some())
+        };
+        for reader in [Reader::BlurRect, Reader::Frost] {
+            let mut renderer = renderer()?;
+            renderer.update_transparency(true);
+            let atlas = renderer.sprite_atlas.clone();
+            let scene = |sources| underlays::scene(&*atlas, reader, sources);
+            let page = renderer.render_scene_to_image(&scene(Sources::None)?, size)?;
+            UNDERLAY_PASS_RECTS.with_borrow_mut(Vec::clear);
+            let unpictured = renderer.render_scene_to_image(&scene(Sources::Unpictured)?, size)?;
+            assert!(
+                unpictured == page
+                    && UNDERLAY_PASS_RECTS.take().is_empty()
+                    && !underlaid(&renderer),
+                "{reader:?}: no picture, no pass, no texture, the same bytes"
+            );
+            for sources in [Sources::One, Sources::Two] {
+                SNAPSHOT_RECTS.with_borrow_mut(Vec::clear);
+                UNDERLAY_PASS_RECTS.with_borrow_mut(Vec::clear);
+                let image = renderer.render_scene_to_image(&scene(sources)?, size)?;
+                underlays::check(&image, &page, sources)
+                    .with_context(|| format!("{reader:?} over {sources:?}"))?;
+                let snapshots = SNAPSHOT_RECTS.take();
+                assert_eq!(
+                    UNDERLAY_PASS_RECTS.take(),
+                    snapshots,
+                    "{reader:?}: each snapshot composites the sources in its own region"
+                );
+                if reader == Reader::BlurRect {
+                    let full = PixelRect {
+                        left: 0,
+                        top: 0,
+                        right: side,
+                        bottom: side,
+                    };
+                    assert!(
+                        snapshots.iter().all(|r| *r != full),
+                        "blur rects are bounded"
+                    );
+                }
+            }
+            renderer.render_scene_to_image(&scene(Sources::None)?, size)?;
+            assert!(
+                !underlaid(&renderer),
+                "a frame without sources lets the copy go"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn a_small_blur_processes_its_region_only_and_matches_the_whole_frame() -> Result<()> {
         const LARGE: i32 = 256;
         let size = size(DevicePixels(LARGE), DevicePixels(LARGE));
@@ -2257,7 +2456,7 @@ pub(super) mod tests {
         gpui::reload_app_effects(
             gpui::AppEffects::new(
                 "test",
-                r#"{"schema": 12, "effects": [
+                r#"{"schema": 13, "effects": [
                     {"name": "tint", "backdrop": false, "metal": "tint.metal"}
                 ]}"#,
                 [("tint.metal".to_string(), msl.to_string())],
