@@ -42,7 +42,7 @@ jobs:
           arch: x64
       - name: Rust
         shell: pwsh
-        run: rustup toolchain install 1.97.1 --profile minimal --target x86_64-pc-windows-msvc
+        run: rustup toolchain install 1.100.0 --profile minimal --target x86_64-pc-windows-msvc
       - name: Publish
         shell: pwsh
         run: bun scripts/publish-crates.ts --tag "$env:TAG"

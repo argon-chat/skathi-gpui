@@ -1386,6 +1386,7 @@ mod tests {
         counter: Arc<AtomicU64>,
         benchmark: impl Fn(&mut BenchAppContext, &Arc<AtomicU64>),
     ) -> Vec<u64> {
+        let _trace_guard = profiler::TraceTestGuard::new();
         let platform = bench_platform(None, Arc::new(crate::NoopTextSystem::new()));
         let report = BenchReport::default();
         let mut criterion = criterion::Criterion::default()
@@ -1462,6 +1463,7 @@ mod tests {
 
     #[test]
     fn foreground_work_reports_long_task_without_window_draw() {
+        let _trace_guard = profiler::TraceTestGuard::new();
         let (journal, _journal_guard) = install_test_foreground_journal(1024, 64);
         let dispatcher = Arc::new(ThreadedDispatcher::new());
         let foreground_executor = ForegroundExecutor::new(dispatcher);
@@ -1477,8 +1479,10 @@ mod tests {
 
         let events = trace_scope.finish();
         assert!(
-            events.frame_events.is_empty(),
-            "no window was involved, so no frame events should be recorded"
+            !events
+                .foreground_events()
+                .any(|event| matches!(event, ForegroundEvent::Draw(_))),
+            "this foreground journal should contain no window draws"
         );
 
         let report = BenchReport::default();
@@ -1508,6 +1512,7 @@ mod tests {
 
     #[test]
     fn foreground_work_excludes_setup_before_trace_scope_starts() {
+        let _trace_guard = profiler::TraceTestGuard::new();
         let (journal, _journal_guard) = install_test_foreground_journal(1024, 64);
         let dispatcher = Arc::new(ThreadedDispatcher::new());
         let foreground_executor = ForegroundExecutor::new(dispatcher);
@@ -1548,6 +1553,7 @@ mod tests {
 
     #[test]
     fn bench_task_reports_long_task_without_window() {
+        let _trace_guard = profiler::TraceTestGuard::new();
         let platform = bench_platform(None, Arc::new(crate::NoopTextSystem::new()));
         let report = BenchReport::default();
         let name = "bench_task_reports_long_task_without_window";

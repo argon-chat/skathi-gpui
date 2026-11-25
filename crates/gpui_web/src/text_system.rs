@@ -403,8 +403,8 @@ impl PlatformTextSystem for WebTextSystem {
                 Cow::Owned(
                     runs.iter()
                         .map(|run| FontRun {
-                            len: run.len,
                             font_id: self.native_font_id(run.font_id),
+                            ..*run
                         })
                         .collect(),
                 )

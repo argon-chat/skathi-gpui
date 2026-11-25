@@ -283,7 +283,7 @@ impl WgpuRendererCore {
     }
 
     pub(super) fn ensure_backdrop(&mut self) -> bool {
-        if self.uses_webgl_instance_data {
+        if self.uses_texture_instance_data {
             effects_advisory(
                 "`backdrop-filter` and `--shading` need storage buffers, which WebGL2 lacks; \
                  they are not drawn and every other style renders normally",

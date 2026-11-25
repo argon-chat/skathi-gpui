@@ -874,7 +874,6 @@ pub struct WrapBoundary {
 
 impl WrappedLineLayout {
     /// The length of the underlying text, in utf8 bytes.
-    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.unwrapped_layout.len
     }
@@ -1049,6 +1048,19 @@ impl WrappedLineLayout {
     }
 }
 
+/// Moves the layouts in `unused` that are held outside the cache into `cache`, and drops
+/// the rest. The two never share a key, so only the smaller map's entries are moved.
+fn keep_held_layouts<V>(
+    cache: &mut FxHashMap<Arc<CacheKey>, Arc<V>>,
+    unused: &mut FxHashMap<Arc<CacheKey>, Arc<V>>,
+) {
+    unused.retain(|_, layout| Arc::strong_count(layout) > 1);
+    if unused.len() > cache.len() {
+        std::mem::swap(cache, unused);
+    }
+    cache.extend(unused.drain());
+}
+
 pub(crate) struct LineLayoutCache {
     state: RefCell<LineLayoutCacheState>,
     wrap_scratch: RefCell<WrapScratch>,
@@ -1162,8 +1174,13 @@ impl LineLayoutCache {
             current_frame,
         } = &mut *self.state.borrow_mut();
         std::mem::swap(previous_frame, current_frame);
-        current_frame.lines.clear();
-        current_frame.wrapped_lines.clear();
+        // Text that kept its measurement isn't shaped again, so the layouts it holds must
+        // stay cached. Wrapped lines go first, since they hold their unwrapped lines.
+        keep_held_layouts(
+            &mut previous_frame.wrapped_lines,
+            &mut current_frame.wrapped_lines,
+        );
+        keep_held_layouts(&mut previous_frame.lines, &mut current_frame.lines);
         current_frame.used_lines.clear();
         current_frame.used_wrapped_lines.clear();
     }
@@ -1282,6 +1299,11 @@ impl LineLayoutCache {
         layout.width += shift;
     }
 
+    #[cfg(test)]
+    pub(crate) fn last_frame_wrapped_line_count(&self) -> usize {
+        self.state.borrow().previous_frame.used_wrapped_lines.len()
+    }
+
     pub fn layout_wrapped_line<Text>(
         &self,
         text: Text,
@@ -1303,6 +1325,7 @@ impl LineLayoutCache {
             runs,
             spans,
             wrap_width,
+            max_lines,
             force_width: None,
             wrap: rules,
         } as &dyn AsCacheKeyRef;
@@ -1354,6 +1377,7 @@ impl LineLayoutCache {
                 runs: SmallVec::from(runs),
                 spans: SmallVec::from(spans),
                 wrap_width,
+                max_lines,
                 force_width: None,
                 wrap: rules,
             });
@@ -1421,6 +1445,7 @@ impl LineLayoutCache {
             runs,
             spans,
             wrap_width: None,
+            max_lines: None,
             force_width,
             wrap,
         } as &dyn AsCacheKeyRef;
@@ -1487,6 +1512,7 @@ impl LineLayoutCache {
                 runs: SmallVec::from(runs),
                 spans: SmallVec::from(spans),
                 wrap_width: None,
+                max_lines: None,
                 force_width,
                 wrap,
             });
@@ -1945,6 +1971,7 @@ struct CacheKey {
     runs: SmallVec<[FontRun; 1]>,
     spans: SmallVec<[LayoutSpan; 0]>,
     wrap_width: Option<Pixels>,
+    max_lines: Option<usize>,
     force_width: Option<Pixels>,
     /// vue-native fork: the same text wraps differently under other rules.
     wrap: TextWrap,
@@ -1957,6 +1984,7 @@ struct CacheKeyRef<'a> {
     runs: &'a [FontRun],
     spans: &'a [LayoutSpan],
     wrap_width: Option<Pixels>,
+    max_lines: Option<usize>,
     force_width: Option<Pixels>,
     wrap: TextWrap,
 }
@@ -1983,6 +2011,7 @@ impl AsCacheKeyRef for CacheKey {
             runs: self.runs.as_slice(),
             spans: self.spans.as_slice(),
             wrap_width: self.wrap_width,
+            max_lines: self.max_lines,
             force_width: self.force_width,
             wrap: self.wrap,
         }
@@ -2763,6 +2792,33 @@ pub(super) mod tests {
         assert_eq!(key.text.as_ptr(), text.as_ptr());
     }
 
+    #[test]
+    fn layouts_held_outside_the_cache_outlive_frames_that_dont_use_them() {
+        let text_system =
+            WindowTextSystem::new(Arc::new(TextSystem::new(Arc::new(NoopTextSystem::new()))));
+        let shape = |text: &'static str| {
+            let runs = [TextRun {
+                len: text.len(),
+                font: font(".ZedMono"),
+                ..Default::default()
+            }];
+            text_system
+                .shape_text(text.into(), px(14.), &runs, Some(px(100.)), None)
+                .unwrap()
+                .remove(0)
+                .layout
+        };
+
+        let held = shape("held");
+        let dropped = Arc::downgrade(&shape("dropped").unwrapped_layout);
+        for _ in 0..3 {
+            text_system.finish_frame();
+        }
+
+        assert!(Arc::ptr_eq(&shape("held"), &held));
+        assert!(dropped.upgrade().is_none());
+    }
+
     fn glyph_at(x: f32, index: usize) -> ShapedGlyph {
         ShapedGlyph {
             id: GlyphId(0),
@@ -2984,13 +3040,6 @@ pub(super) mod tests {
         }
     }
 
-    fn boundary(glyph_ix: usize) -> WrapBoundary {
-        WrapBoundary {
-            run_ix: 0,
-            glyph_ix,
-        }
-    }
-
     const HYPHEN: Pixels = px(10.);
 
     fn rules(overflow_wrap: OverflowWrap, word_break: WordBreak, hyphens: Hyphens) -> TextWrap {
@@ -3137,5 +3186,91 @@ pub(super) mod tests {
     fn a_zero_width_space_is_a_break_opportunity() {
         assert_eq!(wrap("aaa\u{200B}bbb", 30., NORMAL).0, vec![4]);
         assert_eq!(min_content("aaa\u{200B}bbb", NORMAL), px(30.));
+    }
+
+    #[test]
+    fn test_wrap_ignores_the_sign_of_a_zero_wrap_width_in_the_cache() {
+        let runs = [FontRun {
+            len: 2,
+            font_id: FontId(1),
+            tracking: px(0.),
+            word_spacing: px(0.),
+        }];
+
+        let cold_cache = LineLayoutCache::new(
+            Arc::new(TextSystem::new(Arc::new(NoopTextSystem::new()))),
+            Arc::default(),
+        );
+        let cold = cold_cache.layout_wrapped_line(
+            "ab",
+            px(0.),
+            &runs,
+            &[],
+            Some(px(0.)),
+            None,
+            TextWrap::BREAK_WORD,
+        );
+
+        let warm_cache = LineLayoutCache::new(
+            Arc::new(TextSystem::new(Arc::new(NoopTextSystem::new()))),
+            Arc::default(),
+        );
+        warm_cache.layout_wrapped_line(
+            "ab",
+            px(0.),
+            &runs,
+            &[],
+            Some(-px(0.)),
+            None,
+            TextWrap::BREAK_WORD,
+        );
+        let warm = warm_cache.layout_wrapped_line(
+            "ab",
+            px(0.),
+            &runs,
+            &[],
+            Some(px(0.)),
+            None,
+            TextWrap::BREAK_WORD,
+        );
+
+        assert_eq!(warm.wrap_boundaries, cold.wrap_boundaries);
+    }
+
+    #[test]
+    fn test_wrap_cache_distinguishes_max_lines() {
+        let text = "one two three four five six";
+        let runs = [FontRun {
+            len: text.len(),
+            font_id: FontId(1),
+            tracking: px(0.),
+            word_spacing: px(0.),
+        }];
+        let cache = LineLayoutCache::new(
+            Arc::new(TextSystem::new(Arc::new(NoopTextSystem::new()))),
+            Arc::default(),
+        );
+
+        let unclamped = cache.layout_wrapped_line(
+            text,
+            px(14.),
+            &runs,
+            &[],
+            Some(px(50.)),
+            None,
+            TextWrap::BREAK_WORD,
+        );
+        assert!(unclamped.wrap_boundaries.len() > 1);
+
+        let clamped = cache.layout_wrapped_line(
+            text,
+            px(14.),
+            &runs,
+            &[],
+            Some(px(50.)),
+            Some(1),
+            TextWrap::BREAK_WORD,
+        );
+        assert!(clamped.wrap_boundaries.is_empty());
     }
 }

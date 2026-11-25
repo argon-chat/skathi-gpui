@@ -12,7 +12,20 @@ struct SubpixelSprite {
     color: Hsla,
     transformation: TransformationMatrix,
 }
-@group(1) @binding(0) var<storage, read> b_subpixel_sprites: array<SubpixelSprite>;
+// SubpixelSprite has no animation or contrast tail after its transformation.
+fn load_subpixel_sprite(instance_id: u32) -> SubpixelSprite {
+    var cursor = instance_cursor(instance_id * 36u);
+    let order = read_word(&cursor);
+    let contrast = read_word(&cursor);
+    let tile = read_atlas_tile(&cursor);
+    let bounds = read_bounds(&cursor);
+    let mask = read_bounds(&cursor);
+    let radii = read_corners(&cursor);
+    let shapes = read_corner_shapes(&cursor);
+    let color = read_hsla(&cursor);
+    let transform = read_transformation(&cursor);
+    return SubpixelSprite(order, contrast, tile, bounds, mask, radii, shapes, color, transform);
+}
 
 struct SubpixelSpriteOutput {
     @builtin(position) position: vec4<f32>,
@@ -35,7 +48,7 @@ struct SubpixelSpriteFragmentOutput {
 @vertex
 fn vs_subpixel_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) instance_id: u32) -> SubpixelSpriteOutput {
     let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
-    let sprite = b_subpixel_sprites[instance_id];
+    let sprite = load_subpixel_sprite(instance_id);
 
     let gutter = sprite_gutter(sprite.transformation);
     let bounds = grow_sprite_bounds(sprite.bounds, sprite.tile, gutter);
