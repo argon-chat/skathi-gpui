@@ -319,32 +319,13 @@ impl WindowsWindowInner {
             GetWindowRect(hwnd, &mut frame).ok()?;
             GetClientRect(hwnd, &mut client).ok()?;
         }
-        let frame_w = frame.right - frame.left - client.right;
-        let frame_h = frame.bottom - frame.top - client.bottom;
+        let non_client = size(
+            frame.right - frame.left - client.right,
+            frame.bottom - frame.top - client.bottom,
+        );
+        // SAFETY: WM_SIZING supplies a writable proposed window rectangle.
         let rect = unsafe { &mut *(lparam.0 as *mut RECT) };
-        let w = (rect.right - rect.left - frame_w) as f32;
-        let h = (rect.bottom - rect.top - frame_h) as f32;
-        let horizontal = match edge {
-            WMSZ_LEFT | WMSZ_RIGHT => true,
-            WMSZ_TOP | WMSZ_BOTTOM => false,
-            _ => {
-                (w - client.right as f32).abs() * client.bottom as f32
-                    >= (h - client.bottom as f32).abs() * client.right as f32
-            }
-        };
-        let sz = constraints.fit(size(px(w / scale), px(h / scale)), horizontal);
-        let w = ((sz.width.as_f32() * scale).round() as i32).saturating_add(frame_w);
-        let h = ((sz.height.as_f32() * scale).round() as i32).saturating_add(frame_h);
-        if matches!(edge, WMSZ_LEFT | WMSZ_TOPLEFT | WMSZ_BOTTOMLEFT) {
-            rect.left = rect.right.saturating_sub(w);
-        } else {
-            rect.right = rect.left.saturating_add(w);
-        }
-        if matches!(edge, WMSZ_TOP | WMSZ_TOPLEFT | WMSZ_TOPRIGHT) {
-            rect.top = rect.bottom.saturating_sub(h);
-        } else {
-            rect.bottom = rect.top.saturating_add(h);
-        }
+        fit_sizing_rect(rect, edge, non_client, scale, constraints);
         Some(1)
     }
 
@@ -2343,5 +2324,119 @@ fn notify_frame_changed(handle: HWND) {
                 | SWP_NOZORDER,
         )
         .log_err();
+    }
+}
+
+fn fit_sizing_rect(
+    rect: &mut RECT,
+    edge: u32,
+    non_client: Size<i32>,
+    scale: f32,
+    constraints: WindowSizeConstraints,
+) {
+    let w = (rect.right - rect.left - non_client.width) as f32;
+    let h = (rect.bottom - rect.top - non_client.height) as f32;
+    let horizontal = match edge {
+        WMSZ_LEFT | WMSZ_RIGHT => true,
+        WMSZ_TOP | WMSZ_BOTTOM => false,
+        // A corner follows the axis whose aspect fit covers the proposed client area.
+        _ => constraints.aspect.is_some_and(|aspect| w >= h * aspect),
+    };
+    let sz = constraints.fit(size(px(w / scale), px(h / scale)), horizontal);
+    let w = ((sz.width.as_f32() * scale).round() as i32).saturating_add(non_client.width);
+    let h = ((sz.height.as_f32() * scale).round() as i32).saturating_add(non_client.height);
+    if matches!(edge, WMSZ_LEFT | WMSZ_TOPLEFT | WMSZ_BOTTOMLEFT) {
+        rect.left = rect.right.saturating_sub(w);
+    } else {
+        rect.right = rect.left.saturating_add(w);
+    }
+    if matches!(edge, WMSZ_TOP | WMSZ_TOPLEFT | WMSZ_TOPRIGHT) {
+        rect.top = rect.bottom.saturating_sub(h);
+    } else {
+        rect.bottom = rect.top.saturating_add(h);
+    }
+}
+
+#[cfg(test)]
+mod sizing_tests {
+    use super::fit_sizing_rect;
+    use gpui::{WindowSizeConstraints, px, size};
+    use windows::Win32::{
+        Foundation::RECT,
+        UI::WindowsAndMessaging::{
+            WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP,
+            WMSZ_TOPLEFT, WMSZ_TOPRIGHT,
+        },
+    };
+
+    fn proposal(edge: u32, w: i32, h: i32) -> RECT {
+        let leftward = matches!(edge, WMSZ_LEFT | WMSZ_TOPLEFT | WMSZ_BOTTOMLEFT);
+        let upward = matches!(edge, WMSZ_TOP | WMSZ_TOPLEFT | WMSZ_TOPRIGHT);
+        let left = if leftward { 3000 - w } else { 300 };
+        let top = if upward { 1800 - h } else { 200 };
+        RECT {
+            left,
+            top,
+            right: left + w,
+            bottom: top + h,
+        }
+    }
+
+    #[test]
+    fn corner_drags_follow_the_proposed_rect_in_both_directions() {
+        let border = size(16, 38);
+        for edge in [
+            WMSZ_TOPLEFT,
+            WMSZ_TOPRIGHT,
+            WMSZ_BOTTOMLEFT,
+            WMSZ_BOTTOMRIGHT,
+        ] {
+            for (aspect, start_w, start_h, dx, dy) in
+                [(2.39, 2010, 841, 8, 5), (0.5, 400, 800, 5, 8)]
+            {
+                let constraints = WindowSizeConstraints {
+                    aspect: Some(aspect),
+                    ..Default::default()
+                };
+                for step in (0..=45).chain((0..45).rev()) {
+                    let w = start_w + step * dx;
+                    let h = start_h + step * dy;
+                    let mut rect = proposal(edge, w + border.width, h + border.height);
+                    fit_sizing_rect(&mut rect, edge, border, 1.5, constraints);
+                    let fit_w = (w as f32).max(h as f32 * aspect);
+                    let expected = proposal(
+                        edge,
+                        fit_w.round() as i32 + border.width,
+                        (fit_w / aspect).round() as i32 + border.height,
+                    );
+                    assert_eq!(rect, expected, "edge={edge}, step={step}, aspect={aspect}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn single_edges_keep_the_dragged_axis_and_limits_use_logical_pixels() {
+        let border = size(16, 38);
+        let constraints = WindowSizeConstraints {
+            min: Some(size(px(100.), px(50.))),
+            max: Some(size(px(400.), px(200.))),
+            aspect: Some(2.),
+        };
+        for (edge, w, h, expected_w, expected_h) in [
+            (WMSZ_LEFT, 300, 250, 300, 150),
+            (WMSZ_RIGHT, 300, 250, 300, 150),
+            (WMSZ_TOP, 500, 100, 200, 100),
+            (WMSZ_BOTTOM, 500, 100, 200, 100),
+            (WMSZ_BOTTOMRIGHT, 1000, 600, 600, 300),
+            (WMSZ_TOPLEFT, 10, 20, 150, 75),
+        ] {
+            let mut rect = proposal(edge, w + border.width, h + border.height);
+            fit_sizing_rect(&mut rect, edge, border, 1.5, constraints);
+            assert_eq!(
+                rect,
+                proposal(edge, expected_w + border.width, expected_h + border.height)
+            );
+        }
     }
 }
