@@ -7,7 +7,7 @@ use crate::{
 use anyhow::{Context as _, anyhow};
 use block2::RcBlock;
 use core_foundation::{
-    runloop::{CFRunLoopGetMain, CFRunLoopRun, CFRunLoopStop},
+    runloop::{CFRunLoopGetMain, CFRunLoopRun, CFRunLoopStop, CFRunLoopWakeUp},
     string::CFStringRef,
 };
 use ctor::ctor;
@@ -38,12 +38,17 @@ use objc2_app_kit::{
     NSAppearanceNameVibrantLight, NSApplication, NSApplicationActivationPolicy,
     NSApplicationOcclusionState, NSApplicationTerminateReply, NSControlStateValueOn, NSCursor,
     NSDocumentController, NSEventModifierFlags, NSEventSubtype, NSEventType, NSMenu, NSMenuItem,
-    NSModalResponse, NSModalResponseOK, NSOpenPanel, NSSavePanel, NSScroller, NSScrollerStyle,
-    NSWorkspace, NSWorkspaceDidWakeNotification, NSWorkspaceWillSleepNotification,
+    NSModalPanelRunLoopMode, NSModalResponse, NSModalResponseOK, NSOpenPanel, NSSavePanel,
+    NSScroller, NSScrollerStyle, NSWorkspace, NSWorkspaceDidWakeNotification,
+    NSWorkspaceWillSleepNotification,
+};
+use objc2_core_services::{
+    kAELogOut, kAEQuitAll, kAEQuitApplication, kAEQuitReason, kAEReallyLogOut, kAERestart,
+    kAEShowRestartDialog, kAEShowShutdownDialog, kAEShutDown, kCoreEventClass,
 };
 use objc2_foundation::{
-    NSActivityOptions, NSArray, NSBundle, NSError, NSInteger, NSPoint, NSProcessInfo, NSString,
-    NSURL, NSUTF8StringEncoding,
+    NSActivityOptions, NSAppleEventManager, NSArray, NSBundle, NSError, NSInteger, NSPoint,
+    NSProcessInfo, NSRunLoop, NSRunLoopCommonModes, NSString, NSURL, NSUTF8StringEncoding,
 };
 use parking_lot::Mutex;
 use semver::Version;
@@ -169,6 +174,14 @@ unsafe fn build_classes() {
 
 pub struct MacPlatform(Mutex<MacPlatformState>, MainThreadMarker);
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum QuitState {
+    Running,
+    Requested,
+    EndingSession,
+    Finished,
+}
+
 pub(crate) struct MacPlatformState {
     background_executor: BackgroundExecutor,
     foreground_executor: ForegroundExecutor,
@@ -188,7 +201,7 @@ pub(crate) struct MacPlatformState {
     on_system_wake: Option<Box<dyn FnMut()>>,
     system_power_observers_registered: bool,
     quit: Option<Box<dyn FnMut() -> bool>>,
-    quit_requested: bool,
+    quit_state: QuitState,
     menu_command: Option<Box<dyn FnMut(&dyn Action)>>,
     validate_menu_command: Option<Box<dyn FnMut(&dyn Action) -> bool>>,
     will_open_menu: Option<Box<dyn FnMut()>>,
@@ -252,7 +265,7 @@ impl MacPlatform {
             find_pasteboard: Pasteboard::find(),
             reopen: None,
             quit: None,
-            quit_requested: false,
+            quit_state: QuitState::Running,
             menu_command: None,
             validate_menu_command: None,
             will_open_menu: None,
@@ -278,56 +291,88 @@ impl MacPlatform {
     // Defer until GPUI releases its App borrow. The callback runs shutdown()
     // synchronously, including waiting for every quit observer future. Only
     // after it returns true may the platform loop return to the embedding host.
-    fn request_quit(&self) {
-        {
+    fn request_quit(&self, session_quit: bool) -> NSApplicationTerminateReply {
+        let schedule = {
             let mut state = self.0.lock();
-            if state.quit_requested {
-                return;
+            if session_quit && state.quit_state == QuitState::Finished {
+                return NSApplicationTerminateReply::TerminateNow;
             }
-            state.quit_requested = true;
+            let schedule = state.quit_state == QuitState::Running;
+            if session_quit {
+                state.quit_state = QuitState::EndingSession;
+            } else if schedule {
+                state.quit_state = QuitState::Requested;
+            }
+            schedule
+        };
+        if schedule {
+            self.defer_quit();
         }
-        let platform = self as *const Self as *mut c_void;
-        unsafe { DispatchQueue::main().exec_async_f(platform, finish_quit) };
+        if session_quit {
+            NSApplicationTerminateReply::TerminateLater
+        } else {
+            // Unwind terminate: before stopping the outer loop. The host owns
+            // process exit and may have called terminate: while borrowing the app.
+            NSApplicationTerminateReply::TerminateCancel
+        }
+    }
 
-        extern "C" fn finish_quit(context: *mut c_void) {
-            let platform = unsafe { &*(context as *const MacPlatform) };
-            let mut callback = platform.0.lock().quit.take();
-            let ready = callback.as_mut().is_none_or(|callback| callback());
-            let headless = {
-                let mut state = platform.0.lock();
-                state.quit = callback;
-                if !ready {
-                    state.quit_requested = false;
-                }
-                state.headless
-            };
-            if !ready {
-                platform.request_quit();
-                return;
+    fn defer_quit(&self) {
+        let platform = self as *const Self;
+        // AppKit pumps modal-panel mode while a session quit awaits our reply.
+        // The platform outlives its main run loop, where this block executes.
+        unsafe {
+            let modes = NSArray::from_slice(&[NSRunLoopCommonModes, NSModalPanelRunLoopMode]);
+            NSRunLoop::mainRunLoop().performInModes_block(
+                &modes,
+                &RcBlock::new(move || {
+                    (*platform).finish_quit();
+                }),
+            );
+            CFRunLoopWakeUp(CFRunLoopGetMain());
+        }
+    }
+
+    fn finish_quit(&self) {
+        let mut callback = self.0.lock().quit.take();
+        let ready = callback.as_mut().is_none_or(|callback| callback());
+        let (headless, session_quit) = {
+            let mut state = self.0.lock();
+            state.quit = callback;
+            let session_quit = state.quit_state == QuitState::EndingSession;
+            if ready {
+                state.quit_state = QuitState::Finished;
             }
-            unsafe {
-                if headless {
-                    CFRunLoopStop(CFRunLoopGetMain());
-                } else {
-                    let app: *mut AnyObject = msg_send![APP_CLASS, sharedApplication];
-                    let _: () = msg_send![app, stop: ptr::null_mut::<AnyObject>()];
-                    // stop: sets a flag but does not wake nextEventMatchingMask:.
-                    // An application-defined event lets run return immediately.
-                    let event: *mut AnyObject = msg_send![
-                        class!(NSEvent),
-                        otherEventWithType: NSEventType::ApplicationDefined,
-                        location: NSPoint::new(0.0, 0.0),
-                        modifierFlags: NSEventModifierFlags::empty(),
-                        timestamp: 0.0f64,
-                        windowNumber: 0 as NSInteger,
-                        context: ptr::null_mut::<AnyObject>(),
-                        subtype: NSEventSubtype::WindowExposed.0,
-                        data1: 0 as NSInteger,
-                        data2: 0 as NSInteger
-                    ];
-                    if !event.is_null() {
-                        let _: () = msg_send![app, postEvent: event, atStart: Bool::YES];
-                    }
+            (state.headless, session_quit)
+        };
+        if !ready {
+            self.defer_quit();
+            return;
+        }
+        unsafe {
+            if headless {
+                CFRunLoopStop(CFRunLoopGetMain());
+            } else if session_quit {
+                NSApplication::sharedApplication(self.1).replyToApplicationShouldTerminate(true);
+            } else {
+                let app: *mut AnyObject = msg_send![APP_CLASS, sharedApplication];
+                let _: () = msg_send![app, stop: ptr::null_mut::<AnyObject>()];
+                // stop: sets a flag but does not wake nextEventMatchingMask:.
+                // An application-defined event lets run return immediately.
+                let event: *mut AnyObject = msg_send![
+                    class!(NSEvent),
+                    otherEventWithType: NSEventType::ApplicationDefined,
+                    location: NSPoint::new(0.0, 0.0),
+                    modifierFlags: NSEventModifierFlags::empty(),
+                    timestamp: 0.0f64,
+                    windowNumber: 0 as NSInteger,
+                    context: ptr::null_mut::<AnyObject>(),
+                    subtype: NSEventSubtype::WindowExposed.0,
+                    data1: 0 as NSInteger,
+                    data2: 0 as NSInteger
+                ];
+                if !event.is_null() {
+                    let _: () = msg_send![app, postEvent: event, atStart: Bool::YES];
                 }
             }
         }
@@ -680,7 +725,7 @@ impl Platform for MacPlatform {
     }
 
     fn quit(&self) {
-        self.request_quit();
+        self.request_quit(false);
     }
 
     fn restart(&self, binary_path: Option<PathBuf>, arguments: Vec<std::ffi::OsString>) {
@@ -1527,10 +1572,29 @@ extern "C-unwind" fn should_terminate(
     _: *mut AnyObject,
 ) -> NSApplicationTerminateReply {
     let platform = unsafe { get_mac_platform(this) };
-    platform.request_quit();
-    // NSTerminateLater: the embedding host owns process termination after the
-    // stopped application loop returns. AppKit must not exit before host cleanup.
-    NSApplicationTerminateReply::TerminateLater
+    let reason = NSAppleEventManager::sharedAppleEventManager()
+        .currentAppleEvent()
+        .filter(|event| {
+            event.eventClass() == kCoreEventClass && event.eventID() == kAEQuitApplication
+        })
+        .and_then(|event| {
+            event
+                .attributeDescriptorForKeyword(kAEQuitReason)
+                .or_else(|| event.paramDescriptorForKeyword(kAEQuitReason))
+        });
+    let session_quit = reason.is_some_and(|reason| {
+        [
+            kAEQuitAll,
+            kAELogOut,
+            kAEReallyLogOut,
+            kAERestart,
+            kAEShutDown,
+            kAEShowRestartDialog,
+            kAEShowShutdownDialog,
+        ]
+        .contains(&reason.enumCodeValue())
+    });
+    platform.request_quit(session_quit)
 }
 
 extern "C-unwind" fn on_keyboard_layout_change(this: &AnyObject, _: Sel, _: *mut AnyObject) {

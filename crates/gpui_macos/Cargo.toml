@@ -50,7 +50,8 @@ objc2-app-kit = { workspace = true, features = ["objc2-core-graphics", "objc2-un
 objc2-core-graphics = { workspace = true, features = ["CGColor", "objc2"] }
 objc2-core-media = { workspace = true, optional = true }
 objc2-core-video = { workspace = true, features = ["CVHostTime"] }
-objc2-foundation.workspace = true
+objc2-core-services = { version = "0.3.2", default-features = false, features = ["AERegistry", "AppleEvents"] }
+objc2-foundation = { workspace = true, features = ["NSAppleEventDescriptor", "NSAppleEventManager", "block2", "objc2-core-services"] }
 objc2-quartz-core.workspace = true
 objc2-screen-capture-kit = { workspace = true, optional = true }
 objc2-uniform-type-identifiers.workspace = true
