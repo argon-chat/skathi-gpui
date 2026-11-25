@@ -88,7 +88,7 @@ impl WgpuRendererCore {
         if scene.vn_layers.is_empty() {
             return Ok(None);
         }
-        if self.uses_webgl_instance_data {
+        if self.uses_texture_instance_data {
             effects_advisory(
                 "`clip-path` shapes, `filter` color matrices and `background-clip: text` need \
                  storage buffers, which WebGL2 lacks; their content paints unclipped and unfiltered",
@@ -250,7 +250,7 @@ impl WgpuRendererCore {
         frame: &FrameTarget,
         instance_offset: &mut u64,
     ) -> Result<()> {
-        if self.uses_webgl_instance_data {
+        if self.uses_texture_instance_data {
             return Ok(());
         }
         let (width, height) = (frame.texture.width(), frame.texture.height());

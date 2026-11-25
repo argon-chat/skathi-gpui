@@ -275,6 +275,7 @@ pub(super) fn request_measured_layout(
     mut measure: impl FnMut(
         Size<Option<Pixels>>,
         Size<AvailableSpace>,
+        bool,
         &mut Window,
         &mut App,
     ) -> Size<Pixels>
@@ -308,8 +309,8 @@ pub(super) fn request_measured_layout(
     };
     let measure: Box<MeasureFn> = Box::new({
         let log = log.clone();
-        move |known, available, window, cx| {
-            let size = measure(known, available, window, cx);
+        move |known, available, final_layout, window, cx| {
+            let size = measure(known, available, final_layout, window, cx);
             log.borrow_mut().record(known, available, size);
             size
         }
@@ -351,9 +352,14 @@ pub(super) fn note_measure(
     id: NodeId,
     known: Size<Option<Pixels>>,
     available: Size<AvailableSpace>,
+    final_layout: bool,
 ) {
     engine.count(|stats| stats.probe_calls += 1);
-    record_width(engine, id, known, available);
+    if final_layout {
+        record_width(engine, id, known, available);
+    } else {
+        engine.measured.entry(id).or_insert(None);
+    }
 }
 
 fn record_width(
@@ -402,11 +408,17 @@ pub(super) fn replay(engine: &mut TaffyLayoutEngine, window: &mut Window, cx: &m
             continue;
         };
         let mut last = None;
-        let stands = probes.iter().all(|(known, available, expected)| {
-            last = Some((*known, *available));
-            engine.retention.count(|stats| stats.probe_calls += 1);
-            (context.measure)(*known, *available, window, cx) == *expected
-        });
+        let stands = probes
+            .iter()
+            .enumerate()
+            .all(|(index, (known, available, expected))| {
+                let final_probe = index + 1 == probes.len();
+                if final_probe {
+                    last = Some((*known, *available));
+                }
+                engine.retention.count(|stats| stats.probe_calls += 1);
+                (context.measure)(*known, *available, final_probe, window, cx) == *expected
+            });
         if let Some((known, available)) = last {
             record_width(&mut engine.retention, id.into(), known, available);
         }
@@ -467,6 +479,7 @@ pub(super) fn settle(engine: &mut TaffyLayoutEngine, window: &mut Window, cx: &m
                     width: AvailableSpace::Definite(content.width),
                     height: AvailableSpace::Definite(content.height),
                 },
+                true,
                 window,
                 cx,
             );
@@ -517,7 +530,7 @@ fn remove(engine: &mut TaffyLayoutEngine, id: LayoutId) {
     if let Some(context) = engine.taffy.get_node_context_mut(id.into()) {
         // Taffy 0.13's remove leaves node_context_data alive until slot reuse.
         // Release captured DOM/text/state without dirtying unrelated parents.
-        let measure: Box<MeasureFn> = Box::new(|_, _, _, _| Size::default());
+        let measure: Box<MeasureFn> = Box::new(|_, _, _, _, _| Size::default());
         #[cfg(feature = "stacker")]
         let measure = super::StackSafe::new(measure);
         context.measure = measure;

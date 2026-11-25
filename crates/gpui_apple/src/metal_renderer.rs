@@ -135,6 +135,8 @@ pub struct MetalRenderer {
     display_link_mode: DisplayLinkMode,
     /// For headless rendering, tracks whether output should be opaque
     opaque: bool,
+    /// Whether the last scene drawn to the layer let native views show through it.
+    shows_native_views: bool,
     command_queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     path_tiles_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     shadows_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
@@ -143,6 +145,7 @@ pub struct MetalRenderer {
     monochrome_sprites_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     polychrome_sprites_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     surfaces_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    native_views_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     /// Kept for the backdrop pipelines, built on the first frame that needs them.
     library: Retained<ProtocolObject<dyn MTLLibrary>>,
     backdrop: backdrop::BackdropState,
@@ -351,6 +354,7 @@ impl MetalRenderer {
             monochrome_sprites_pipeline_state,
             polychrome_sprites_pipeline_state,
             surfaces_pipeline_state,
+            native_views_pipeline_state,
         } = FramePipelines::new(&device, &library, MTLPixelFormat::BGRA8Unorm)?;
 
         let command_queue = device.newCommandQueue().context("creating command queue")?;
@@ -399,6 +403,7 @@ impl MetalRenderer {
             is_apple_gpu,
             is_unified_memory,
             opaque,
+            shows_native_views: false,
             command_queue,
             path_tiles_pipeline_state,
             shadows_pipeline_state,
@@ -407,6 +412,7 @@ impl MetalRenderer {
             monochrome_sprites_pipeline_state,
             polychrome_sprites_pipeline_state,
             surfaces_pipeline_state,
+            native_views_pipeline_state,
             library,
             backdrop: backdrop::BackdropState::default(),
             vn_layers: vn_layer::VnLayerState::default(),
@@ -516,6 +522,10 @@ impl MetalRenderer {
                 &mut self.polychrome_sprites_pipeline_state,
                 pipelines.polychrome_sprites_pipeline_state,
             ),
+            native_views_pipeline_state: mem::replace(
+                &mut self.native_views_pipeline_state,
+                pipelines.native_views_pipeline_state,
+            ),
             surfaces_pipeline_state: mem::replace(
                 &mut self.surfaces_pipeline_state,
                 pipelines.surfaces_pipeline_state,
@@ -616,7 +626,7 @@ impl MetalRenderer {
     pub fn update_transparency(&mut self, transparent: bool) {
         self.opaque = !transparent;
         if let Some(layer) = &self.layer {
-            layer.setOpaque(!transparent);
+            layer.setOpaque(self.opaque && !self.shows_native_views);
         }
     }
 
@@ -635,6 +645,13 @@ impl MetalRenderer {
             }
         };
         let target = self.frame_target.take();
+        // Native views sit beneath the layer, so it can only be opaque, and
+        // eligible for direct-to-display presentation, while none are showing.
+        let shows_native_views = !scene.native_views.is_empty();
+        if shows_native_views != self.shows_native_views {
+            self.shows_native_views = shows_native_views;
+            layer.setOpaque(self.opaque && !shows_native_views);
+        }
         let drawable = match &mut self.display_link_mode {
             DisplayLinkMode::Attached { drawable } => {
                 let Some(drawable) = drawable.take() else {
@@ -1111,12 +1128,44 @@ impl MetalRenderer {
                         return Err(error);
                     }
                 }
+                PrimitiveBatch::NativeViews(range) => {
+                    self.draw_native_views(range, instance_bindings, &command_encoder)
+                }
                 PrimitiveBatch::SubpixelSprites { .. } => unreachable!(),
             }
         }
 
         command_encoder.endEncoding();
         Ok(())
+    }
+
+    fn draw_native_views(
+        &self,
+        native_views: Range<usize>,
+        instance_bindings: &InstanceBindings,
+        command_encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+    ) {
+        if native_views.is_empty() {
+            return;
+        }
+
+        command_encoder.setRenderPipelineState(&self.native_views_pipeline_state);
+        // SAFETY: The SurfaceBounds instances match the shader layout and slot.
+        // Metal retains the buffer, and writer.finish publishes its writes.
+        unsafe {
+            command_encoder.setVertexBuffer_offset_atIndex(
+                Some(&instance_bindings.native_views.buffer),
+                instance_bindings.native_views.offset,
+                SurfaceInputIndex::Surfaces as usize,
+            );
+            command_encoder.drawPrimitives_vertexStart_vertexCount_instanceCount_baseInstance(
+                MTLPrimitiveType::TriangleStrip,
+                0,
+                4,
+                native_views.len(),
+                native_views.start,
+            );
+        }
     }
 
     fn draw_path_tiles(
@@ -1716,6 +1765,7 @@ struct FramePipelines {
     monochrome_sprites_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     polychrome_sprites_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     surfaces_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    native_views_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
 }
 
 impl FramePipelines {
@@ -1724,6 +1774,15 @@ impl FramePipelines {
         library: &ProtocolObject<dyn MTLLibrary>,
         format: MTLPixelFormat,
     ) -> Result<Self> {
+        let native_views_pipeline_state = build_pipeline_state(
+            device,
+            library,
+            "native_views",
+            "native_view_vertex",
+            "native_view_fragment",
+            format,
+            false,
+        )?;
         let path_tiles_pipeline_state = build_pipeline_state(
             device,
             library,
@@ -1731,6 +1790,7 @@ impl FramePipelines {
             "path_tile_vertex",
             "path_tile_fragment",
             format,
+            true,
         )?;
         let shadows_pipeline_state = build_pipeline_state(
             device,
@@ -1739,6 +1799,7 @@ impl FramePipelines {
             "shadow_vertex",
             "shadow_fragment",
             format,
+            true,
         )?;
         let quads_pipeline_state = build_pipeline_state(
             device,
@@ -1747,6 +1808,7 @@ impl FramePipelines {
             "quad_vertex",
             "quad_fragment",
             format,
+            true,
         )?;
         let underlines_pipeline_state = build_pipeline_state(
             device,
@@ -1755,6 +1817,7 @@ impl FramePipelines {
             "underline_vertex",
             "underline_fragment",
             format,
+            true,
         )?;
         let monochrome_sprites_pipeline_state = build_pipeline_state(
             device,
@@ -1763,6 +1826,7 @@ impl FramePipelines {
             "monochrome_sprite_vertex",
             "monochrome_sprite_fragment",
             format,
+            true,
         )?;
         let polychrome_sprites_pipeline_state = build_pipeline_state(
             device,
@@ -1771,6 +1835,7 @@ impl FramePipelines {
             "polychrome_sprite_vertex",
             "polychrome_sprite_fragment",
             format,
+            true,
         )?;
         let surfaces_pipeline_state = build_pipeline_state(
             device,
@@ -1779,6 +1844,7 @@ impl FramePipelines {
             "surface_vertex",
             "surface_fragment",
             format,
+            true,
         )?;
         Ok(Self {
             path_tiles_pipeline_state,
@@ -1788,6 +1854,7 @@ impl FramePipelines {
             monochrome_sprites_pipeline_state,
             polychrome_sprites_pipeline_state,
             surfaces_pipeline_state,
+            native_views_pipeline_state,
         })
     }
 }
@@ -1799,6 +1866,7 @@ fn build_pipeline_state(
     vertex_fn_name: &str,
     fragment_fn_name: &str,
     pixel_format: MTLPixelFormat,
+    blend: bool,
 ) -> Result<Retained<ProtocolObject<dyn MTLRenderPipelineState>>> {
     let vertex_fn = library
         .newFunctionWithName(&NSString::from_str(vertex_fn_name))
@@ -1814,7 +1882,7 @@ fn build_pipeline_state(
     // SAFETY: Index zero is within the pipeline's color attachment array.
     let color_attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
     color_attachment.setPixelFormat(pixel_format);
-    color_attachment.setBlendingEnabled(true);
+    color_attachment.setBlendingEnabled(blend);
     color_attachment.setRgbBlendOperation(MTLBlendOperation::Add);
     color_attachment.setAlphaBlendOperation(MTLBlendOperation::Add);
     color_attachment.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
@@ -1913,6 +1981,7 @@ struct InstanceBindings {
     monochrome_sprites: InstanceBinding,
     polychrome_sprites: InstanceBinding,
     surfaces: InstanceBinding,
+    native_views: InstanceBinding,
 }
 
 impl InstanceBindings {
@@ -1950,6 +2019,12 @@ fn write_instances(
         surfaces: writer.write_iter(scene.surfaces.iter().map(|surface| SurfaceBounds {
             bounds: surface.bounds,
             content_mask: surface.content_mask,
+        }))?,
+        native_views: writer.write_iter(scene.native_views.iter().map(|native_view| {
+            SurfaceBounds {
+                bounds: native_view.bounds,
+                content_mask: native_view.content_mask,
+            }
         }))?,
     })
 }

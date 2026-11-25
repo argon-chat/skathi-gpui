@@ -1247,7 +1247,6 @@ impl X11WindowStatePtr {
         self.release_pointer_lock();
         let state = self.state.borrow();
         let client = state.client.clone();
-        #[allow(clippy::mutable_key_type)]
         let children = state.children.clone();
         drop(state);
 

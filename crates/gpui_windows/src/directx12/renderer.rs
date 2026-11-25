@@ -2527,6 +2527,7 @@ impl Encoding<'_> {
             PrimitiveBatch::EffectQuads { effect_id, range } => {
                 self.effects(effect_id, range.start, range.end)
             }
+            PrimitiveBatch::NativeViews(_) => Ok(()),
             PrimitiveBatch::Surfaces(range) => {
                 ensure!(
                     range.is_empty(),

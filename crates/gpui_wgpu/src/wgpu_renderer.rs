@@ -25,26 +25,22 @@ const MAX_INSTANCE_BUFFER_SIZE: u64 = 256 * 1024 * 1024;
 
 const INSTANCE_TEXTURE_TEXEL_SIZE: u64 = 16;
 
-/// Shader variant for backends with storage buffer support: the shared shader
-/// logic plus the storage-buffer instance transport.
+/// Shader variant for backends with storage buffer support.
 const STORAGE_BUFFER_SHADERS: &str = concat!(
     include_str!("shaders.wgsl"),
     include_str!("shaders_storage.wgsl"),
     include_str!("shaders_decode.wgsl"),
 );
 
-/// Shader variant for WebGL2, which has no storage buffers: the shared shader
-/// logic plus the texture-based instance transport.
+/// Shader variant for adapters without storage buffers (WebGL2 and some OpenGL ES drivers).
 const WEBGL_SHADERS: &str = concat!(
     include_str!("shaders.wgsl"),
     include_str!("shaders_webgl.wgsl"),
     include_str!("shaders_decode.wgsl"),
 );
 
-/// Subpixel text rendering requires dual-source blending, which WebGL2 lacks, so
-/// this variant only ever runs with the storage-buffer transport. The `enable`
-/// directive must precede all declarations.
-const SUBPIXEL_SHADERS: &str = concat!(
+/// Subpixel text rendering requires dual-source blending, so it gets its own variants.
+const SUBPIXEL_STORAGE_BUFFER_SHADERS: &str = concat!(
     "enable dual_source_blending;\n",
     include_str!("shaders.wgsl"),
     include_str!("shaders_storage.wgsl"),
@@ -77,6 +73,14 @@ const BLUR_SHADERS: &str = include_str!("shaders_blur.wgsl");
 /// fragment stage, standalone: its group 0 is the DirectX-layout globals the
 /// generated fragment stages read.
 const EFFECT_VERTEX_SHADER: &str = include_str!("shaders_effects.wgsl");
+
+const SUBPIXEL_WEBGL_SHADERS: &str = concat!(
+    "enable dual_source_blending;\n",
+    include_str!("shaders.wgsl"),
+    include_str!("shaders_webgl.wgsl"),
+    include_str!("shaders_decode.wgsl"),
+    include_str!("shaders_subpixel.wgsl"),
+);
 
 fn least_common_multiple(left: u64, right: u64) -> u64 {
     let mut first = left;
@@ -163,7 +167,7 @@ struct InstanceBinding {
     bind_group: wgpu::BindGroup,
     /// Index of the allocation's first instance within the bound data. Always
     /// zero on the storage-buffer path, where the binding offset already
-    /// positions the array; on the WebGL texture path the shader indexes the
+    /// positions the array; on the texture path the shader indexes the
     /// shared instance texture absolutely, so draws must offset their
     /// instance (or vertex) ranges by this value.
     first_instance: u32,
@@ -218,8 +222,8 @@ pub type GpuContext = Rc<RefCell<Option<WgpuContext>>>;
 
 enum InstanceData {
     Storage(wgpu::Buffer),
-    // WebGL2 has no storage buffers. A uint texture keeps the records available to both shader
-    // stages while preserving integer and floating-point bit patterns exactly.
+    // Used when storage buffers are unavailable. A uint texture keeps the records available to
+    // both shader stages while preserving integer and floating-point bit patterns exactly.
     Texture {
         texture: wgpu::Texture,
         view: wgpu::TextureView,
@@ -262,7 +266,7 @@ struct WgpuRendererCore {
     instance_data_capacity: u64,
     max_instance_data_size: u64,
     instance_data_alignment: u64,
-    uses_webgl_instance_data: bool,
+    uses_texture_instance_data: bool,
     rendering_params: RenderingParameters,
     is_bgr: bool,
     dual_source_blending: bool,
@@ -618,7 +622,7 @@ impl WgpuRenderer {
 impl WgpuRendererCore {
     fn create_bind_group_layouts(
         device: &wgpu::Device,
-        uses_webgl_instance_data: bool,
+        uses_texture_instance_data: bool,
     ) -> WgpuBindGroupLayouts {
         let globals =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -654,7 +658,7 @@ impl WgpuRendererCore {
         let instance_data_entry = wgpu::BindGroupLayoutEntry {
             binding: 0,
             visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-            ty: if uses_webgl_instance_data {
+            ty: if uses_texture_instance_data {
                 wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Uint,
                     view_dimension: wgpu::TextureViewDimension::D2,
@@ -793,7 +797,7 @@ impl WgpuRendererCore {
         surface_format: wgpu::TextureFormat,
         alpha_mode: wgpu::CompositeAlphaMode,
         dual_source_blending: bool,
-        uses_webgl_instance_data: bool,
+        uses_texture_instance_data: bool,
     ) -> WgpuPipelines {
         // Diagnostic guard: verify the device actually has
         // DUAL_SOURCE_BLENDING. We have a crash report (ZED-5G1) where a
@@ -815,13 +819,12 @@ impl WgpuRendererCore {
                 device.features(),
             );
         }
-        let dual_source_blending =
-            dual_source_blending && device_has_feature && !uses_webgl_instance_data;
+        let dual_source_blending = dual_source_blending && device_has_feature;
 
-        let shader_source = if uses_webgl_instance_data {
-            WEBGL_SHADERS
+        let (shader_source, subpixel_shader_source) = if uses_texture_instance_data {
+            (WEBGL_SHADERS, SUBPIXEL_WEBGL_SHADERS)
         } else {
-            STORAGE_BUFFER_SHADERS
+            (STORAGE_BUFFER_SHADERS, SUBPIXEL_STORAGE_BUFFER_SHADERS)
         };
         let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("gpui_shaders"),
@@ -831,7 +834,7 @@ impl WgpuRendererCore {
         let subpixel_shader_module = if dual_source_blending {
             Some(device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("gpui_subpixel_shaders"),
-                source: wgpu::ShaderSource::Wgsl(SUBPIXEL_SHADERS.into()),
+                source: wgpu::ShaderSource::Wgsl(subpixel_shader_source.into()),
             }))
         } else {
             None
@@ -1126,7 +1129,7 @@ impl WgpuRenderer {
     /// (`PlatformWindow::vn_supports_snapshots`); not on WebGL2.
     pub fn supports_snapshots(&self) -> bool {
         self.core()
-            .is_some_and(|core| !core.uses_webgl_instance_data)
+            .is_some_and(|core| !core.uses_texture_instance_data)
     }
 
     /// Returns `None` once GPU resources have been released by `destroy` or a pending
@@ -1252,17 +1255,17 @@ impl WgpuRendererCore {
         let device = Arc::clone(&context.device);
         let queue = Arc::clone(&context.queue);
         let rendering_params = RenderingParameters::new();
-        let uses_webgl_instance_data = context.uses_webgl_instance_data();
-        let dual_source_blending =
-            context.supports_dual_source_blending() && !uses_webgl_instance_data;
-        let bind_group_layouts = Self::create_bind_group_layouts(&device, uses_webgl_instance_data);
+        let uses_texture_instance_data = context.uses_texture_instance_data();
+        let dual_source_blending = context.supports_dual_source_blending();
+        let bind_group_layouts =
+            Self::create_bind_group_layouts(&device, uses_texture_instance_data);
         let pipelines = Self::create_pipelines(
             &device,
             &bind_group_layouts,
             target_format,
             alpha_mode,
             dual_source_blending,
-            uses_webgl_instance_data,
+            uses_texture_instance_data,
         );
         let atlas_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("atlas_sampler"),
@@ -1285,7 +1288,7 @@ impl WgpuRendererCore {
             instance_data_capacity,
             max_instance_data_size,
             instance_data_alignment,
-        ) = if uses_webgl_instance_data {
+        ) = if uses_texture_instance_data {
             let max_texture_dimension = device.limits().max_texture_dimension_2d;
             let max_instance_data_size = (u64::from(max_texture_dimension).pow(2)
                 * INSTANCE_TEXTURE_TEXEL_SIZE)
@@ -1362,7 +1365,7 @@ impl WgpuRendererCore {
             instance_data_capacity,
             max_instance_data_size,
             instance_data_alignment,
-            uses_webgl_instance_data,
+            uses_texture_instance_data,
             rendering_params,
             is_bgr: false,
             dual_source_blending,
@@ -1393,7 +1396,7 @@ impl WgpuRendererCore {
             surface_format,
             alpha_mode,
             self.dual_source_blending,
-            self.uses_webgl_instance_data,
+            self.uses_texture_instance_data,
         );
     }
 
@@ -1691,6 +1694,8 @@ impl WgpuRendererCore {
                     // Surfaces are macOS-only for video playback and are not
                     // implemented by the WGPU renderer.
                     PrimitiveBatch::Surfaces(_surfaces) => {}
+                    // Native views are only composited by the Metal renderer.
+                    PrimitiveBatch::NativeViews(_) => {}
                 }
             }
         }
@@ -1928,7 +1933,7 @@ impl WgpuRendererCore {
         // reserve the 16-byte minimum.
         let size = (data.len() as u64).max(16);
         let stride = (std::mem::size_of::<T>() as u64).max(1);
-        let (alignment, allocation_size) = if self.uses_webgl_instance_data {
+        let (alignment, allocation_size) = if self.uses_texture_instance_data {
             // The texture transport has no binding offset: the shader indexes
             // the instance texture absolutely, so each allocation must start on
             // a whole instance (a stride multiple) and a whole texel, and must
@@ -1948,7 +1953,7 @@ impl WgpuRendererCore {
         }
         *instance_offset = offset + allocation_size;
 
-        let first_instance = if self.uses_webgl_instance_data {
+        let first_instance = if self.uses_texture_instance_data {
             u32::try_from(offset / stride).context("instance index exceeds u32 range")?
         } else {
             0
@@ -2096,9 +2101,9 @@ impl WgpuRendererCore {
         // Bind groups created earlier in the frame keep the previous buffer or
         // texture alive, so allocations written before the grow remain valid;
         // only subsequent writes land in the new allocation.
-        let uses_webgl_instance_data = self.uses_webgl_instance_data;
+        let uses_texture_instance_data = self.uses_texture_instance_data;
         let resources = self.resources_mut();
-        if uses_webgl_instance_data {
+        if uses_texture_instance_data {
             let max_texture_dimension = resources.device.limits().max_texture_dimension_2d;
             let (instance_data, actual_capacity) =
                 Self::create_instance_texture(&resources.device, capacity, max_texture_dimension);
@@ -2999,9 +3004,18 @@ mod tests {
     }
 
     #[test]
-    fn subpixel_shader_is_valid_wgsl() {
+    fn subpixel_storage_buffer_shader_is_valid_wgsl() {
         validate_wgsl(
-            SUBPIXEL_SHADERS,
+            SUBPIXEL_STORAGE_BUFFER_SHADERS,
+            naga::valid::Capabilities::DUAL_SOURCE_BLENDING,
+        );
+    }
+
+    #[test]
+    fn subpixel_webgl_shader_is_valid_wgsl_without_storage_buffers() {
+        assert!(!SUBPIXEL_WEBGL_SHADERS.contains("var<storage"));
+        validate_wgsl(
+            SUBPIXEL_WEBGL_SHADERS,
             naga::valid::Capabilities::DUAL_SOURCE_BLENDING,
         );
     }

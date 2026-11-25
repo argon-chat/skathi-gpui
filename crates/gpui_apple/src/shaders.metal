@@ -15,6 +15,7 @@ float4 srgb_to_oklab(float4 color);
 float4 oklab_to_srgb(float4 color);
 float4 to_device_position(float2 unit_vertex, Bounds_ScaledPixels bounds,
                           constant Size_DevicePixels *viewport_size);
+Bounds_ScaledPixels clip_to_mask(Bounds_ScaledPixels bounds, Bounds_ScaledPixels mask);
 float4 to_device_position_transformed(float2 unit_vertex, Bounds_ScaledPixels bounds,
                           TransformationMatrix transformation,
                           constant Size_DevicePixels *input_viewport_size);
@@ -1363,6 +1364,27 @@ fragment float4 surface_fragment(SurfaceFragmentInput input [[stage_in]],
   color.a *= flat_mask_coverage(input.position.xy, input.mask_bounds,
                                 input.mask_radii, input.mask_shapes);
   return color;
+}
+
+struct NativeViewVertexOutput {
+  float4 position [[position]];
+};
+
+vertex NativeViewVertexOutput native_view_vertex(
+    uint vertex_id [[vertex_id]], uint native_view_id [[instance_id]],
+    constant SurfaceBounds *native_views [[buffer(SurfaceInputIndex_Surfaces)]],
+    constant Size_DevicePixels *viewport_size
+    [[buffer(GlobalInputIndex_ViewportSize)]]) {
+  float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
+  SurfaceBounds native_view = native_views[native_view_id];
+  Bounds_ScaledPixels clipped = clip_to_mask(native_view.bounds, native_view.content_mask.bounds);
+  return NativeViewVertexOutput{
+      to_device_position(unit_vertex, clipped, viewport_size)};
+}
+
+// The pipeline does not blend, so this erases what was drawn beneath the view.
+fragment float4 native_view_fragment(NativeViewVertexOutput input [[stage_in]]) {
+  return float4(0.);
 }
 
 float4 hsla_to_rgba(Hsla hsla) {

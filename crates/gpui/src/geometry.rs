@@ -4,6 +4,7 @@
 
 use anyhow::{Context as _, anyhow};
 use core::fmt::Debug;
+use gpui_util::canonical_float_bits;
 use refineable::Refineable;
 #[cfg(feature = "schemars")]
 use schemars::{JsonSchema, json_schema};
@@ -3071,13 +3072,15 @@ impl PartialOrd for Pixels {
 
 impl Ord for Pixels {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
-        self.0.total_cmp(&other.0)
+        self.0
+            .partial_cmp(&other.0)
+            .unwrap_or_else(|| self.0.total_cmp(&other.0))
     }
 }
 
 impl std::hash::Hash for Pixels {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.to_bits().hash(state);
+        canonical_float_bits(self.0).hash(state);
     }
 }
 
