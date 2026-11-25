@@ -89,6 +89,7 @@ static RESTORES_WORKSPACE_AT_LAUNCH_DEFAULT: Once = Once::new();
 static mut WINDOW_CLASS: *const AnyClass = ptr::null();
 static mut PANEL_CLASS: *const AnyClass = ptr::null();
 static mut WORKSPACE_PANEL_CLASS: *const AnyClass = ptr::null();
+static mut NONACTIVATING_PANEL_CLASS: *const AnyClass = ptr::null();
 static mut VIEW_CLASS: *const AnyClass = ptr::null();
 static mut BLURRED_VIEW_CLASS: *const AnyClass = ptr::null();
 static mut WINDOW_STATE_ARCHIVER_DELEGATE_CLASS: *const AnyClass = ptr::null();
@@ -119,6 +120,17 @@ unsafe fn build_classes() {
             player_chrome::cannot_become_main as extern "C" fn(_, Sel) -> Bool,
         );
         WORKSPACE_PANEL_CLASS = panel.register();
+        // vue-native: a click reaches it while another window stays key and main.
+        let mut panel = ClassBuilder::new(c"GPUINonactivatingPanel", &*PANEL_CLASS).unwrap();
+        panel.add_method(
+            sel!(canBecomeKeyWindow),
+            player_chrome::cannot_become_main as extern "C" fn(_, Sel) -> Bool,
+        );
+        panel.add_method(
+            sel!(canBecomeMainWindow),
+            player_chrome::cannot_become_main as extern "C" fn(_, Sel) -> Bool,
+        );
+        NONACTIVATING_PANEL_CLASS = panel.register();
         VIEW_CLASS = {
             let mut decl = ClassBuilder::new(c"GPUIView", class!(NSView)).unwrap();
             decl.add_ivar::<*mut c_void>(WINDOW_STATE_IVAR);
@@ -409,6 +421,27 @@ pub(crate) unsafe fn set_active_window_cursor_style(style: CursorStyle) {
         let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
         let key_window: *mut AnyObject = msg_send![app, keyWindow];
         let main_window: *mut AnyObject = msg_send![app, mainWindow];
+        // vue-native: a nonactivating panel is never key, and its cursor rects are inactive.
+        let mouse: NSPoint = msg_send![class!(NSEvent), mouseLocation];
+        let number: NSInteger = msg_send![
+            class!(NSWindow),
+            windowNumberAtPoint: mouse,
+            belowWindowWithWindowNumber: 0 as NSInteger
+        ];
+        let hovered: *mut AnyObject = msg_send![app, windowWithWindowNumber: number];
+        if !hovered.is_null() && msg_send![hovered, isKindOfClass: NONACTIVATING_PANEL_CLASS] {
+            let state = get_window_state(&*hovered);
+            let mut state = state.lock();
+            if state.cursor_style != style {
+                state.cursor_style = style;
+                let _: () = msg_send![
+                    state.native_window,
+                    invalidateCursorRectsForView: state.native_view.as_ptr()
+                ];
+            }
+            let _: () = msg_send![native_cursor(style), set];
+            return;
+        }
         let active_window = if !key_window.is_null() && is_gpui_window(key_window) {
             Some(key_window)
         } else if !main_window.is_null() && is_gpui_window(main_window) {
@@ -1189,6 +1222,7 @@ impl MacWindow {
             tabbing_identifier,
             use_display_p3,
             low_latency_surface,
+            nonactivating_panel,
             ..
         }: WindowParams,
         cursor_visible: Arc<AtomicBool>,
@@ -1226,6 +1260,11 @@ impl MacWindow {
             }
 
             let native_window: *mut AnyObject = match kind {
+                // vue-native
+                WindowKind::Normal if nonactivating_panel => {
+                    style_mask |= NSWindowStyleMask::NonactivatingPanel;
+                    msg_send![NONACTIVATING_PANEL_CLASS, alloc]
+                }
                 WindowKind::Normal => {
                     msg_send![WINDOW_CLASS, alloc]
                 }
@@ -1362,7 +1401,13 @@ impl MacWindow {
                 is_exiting_fullscreen: false,
                 fullscreen_changed: None,
                 spaces_before_override: None,
-                player_chrome: player_chrome::for_kind(&kind),
+                // vue-native: no windowed level, so a nonactivating panel is never swapped for a
+                // workspace panel that can become key.
+                player_chrome: if nonactivating_panel {
+                    player_chrome::PlayerChrome::default()
+                } else {
+                    player_chrome::for_kind(&kind)
+                },
                 simple_fullscreen_state: None,
                 move_tab_to_new_window_callback: None,
                 merge_all_windows_callback: None,
@@ -1482,6 +1527,14 @@ impl MacWindow {
                         let _: () = msg_send![native_window, setLevel: NSNormalWindowLevel];
                         let _: () = msg_send![native_window, setAcceptsMouseMovedEvents: Bool::NO];
                         add_mouse_tracking_area(tracking_view);
+                    }
+                    // vue-native: a panel otherwise hides whenever the app is deactivated.
+                    if nonactivating_panel {
+                        let _: () = msg_send![native_window, setHidesOnDeactivate: Bool::NO];
+                        let _: () = msg_send![
+                            native_window,
+                            setCollectionBehavior: NSWindowCollectionBehavior::FullScreenAuxiliary
+                        ];
                     }
 
                     if let Some(tabbing_identifier) = tabbing_identifier {
@@ -2122,9 +2175,24 @@ impl PlatformWindow for MacWindow {
         visibility(&self.0.lock())
     }
 
-    // is_hovered is unused on macOS. See Window::is_window_hovered.
+    // vue-native: only a nonactivating panel answers, since it is never key. See
+    // Window::is_window_hovered.
     fn is_hovered(&self) -> bool {
-        false
+        let window = self.0.lock().native_window;
+        unsafe {
+            let panel: bool = msg_send![window, isKindOfClass: NONACTIVATING_PANEL_CLASS];
+            if !panel {
+                return false;
+            }
+            let mouse: NSPoint = msg_send![class!(NSEvent), mouseLocation];
+            let under: NSInteger = msg_send![
+                class!(NSWindow),
+                windowNumberAtPoint: mouse,
+                belowWindowWithWindowNumber: 0 as NSInteger
+            ];
+            let own: NSInteger = msg_send![window, windowNumber];
+            under == own
+        }
     }
 
     fn set_title(&mut self, title: &str) {

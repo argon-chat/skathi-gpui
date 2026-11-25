@@ -2314,6 +2314,8 @@ impl Window {
             use_display_p3,
             #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
             low_latency_surface,
+            #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+            nonactivating_panel,
         } = options;
 
         let initial_window_title = titlebar
@@ -2361,6 +2363,8 @@ impl Window {
                 use_display_p3,
                 #[cfg(target_os = "macos")]
                 low_latency_surface,
+                #[cfg(target_os = "macos")]
+                nonactivating_panel,
             },
         )?;
 
@@ -4639,7 +4643,8 @@ impl Window {
         )) {
             self.hovered.get()
         } else {
-            self.is_window_active()
+            // vue-native fork: a macOS nonactivating panel is hovered without being active.
+            self.is_window_active() || self.platform_window.is_hovered()
         }
     }
 

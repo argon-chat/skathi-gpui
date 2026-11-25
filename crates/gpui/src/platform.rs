@@ -3451,6 +3451,10 @@ pub struct WindowOptions {
 
     /// Draws isolated surface frames immediately while the display link paces playback on macOS.
     pub low_latency_surface: bool,
+
+    /// vue-native fork: on macOS, a nonactivating panel that never becomes key or main, at the
+    /// normal window level. Other platforms ignore it.
+    pub nonactivating_panel: bool,
 }
 
 /// The variables that can be configured when creating a new window
@@ -3522,6 +3526,9 @@ pub struct WindowParams {
 
     #[cfg(target_os = "macos")]
     pub low_latency_surface: bool,
+
+    #[cfg(target_os = "macos")]
+    pub nonactivating_panel: bool,
 }
 
 /// Represents the status of how a window should be opened.
@@ -3588,6 +3595,7 @@ impl Default for WindowOptions {
             tabbing_identifier: None,
             use_display_p3: false,
             low_latency_surface: false,
+            nonactivating_panel: false,
         }
     }
 }
