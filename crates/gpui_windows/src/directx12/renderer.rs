@@ -712,7 +712,7 @@ impl Renderer {
         } else {
             Some(Composition::new(hwnd, &swap_chain)?)
         };
-        let pipelines = Pipelines::new(&gpu.device)?;
+        let mut pipelines = Pipelines::new(&gpu.device)?;
         pipelines.prewarm(FORMAT);
         let atlas = Arc::new(Atlas::new(gpu.clone()));
         let back_buffers = Self::buffers(&gpu, &swap_chain, 1, 1, FORMAT)?;
@@ -1060,6 +1060,7 @@ impl Renderer {
         present: bool,
         uploads: &mut UploadPool,
     ) -> Result<u64> {
+        self.pipelines.warm_app_effects();
         let profile_target = self.hwnd.0 as usize;
         let prepare_profile =
             crate::profiling::span(profile_target, "native", "D3D12 prepare pipelines");

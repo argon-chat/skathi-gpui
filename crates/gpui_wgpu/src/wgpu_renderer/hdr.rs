@@ -120,6 +120,7 @@ impl WgpuRendererCore {
         self.rebuild_pipelines(self.target_format, alpha_mode);
         self.resources.backdrop = Default::default();
         self.resources.vn_layers = Default::default();
+        self.warm_backdrop();
         true
     }
 

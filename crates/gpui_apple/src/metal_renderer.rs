@@ -395,7 +395,7 @@ impl MetalRenderer {
         // SAFETY: The successful create call transfers ownership of this non-null cache.
         let core_video_texture_cache = unsafe { CFRetained::from_raw(cache) };
 
-        Ok(Self {
+        let mut renderer = Self {
             device,
             layer,
             presents_with_transaction: false,
@@ -431,7 +431,9 @@ impl MetalRenderer {
             spare_pipelines: None,
             sdr_color_space: None,
             use_display_p3: false,
-        })
+        };
+        renderer.warm_backdrop();
+        Ok(renderer)
     }
 
     /// vue-native: draws in half float into an extended-range layer while
@@ -488,6 +490,7 @@ impl MetalRenderer {
         self.spare_pipelines = Some((self.target_format, previous));
         self.target_format = format;
         self.backdrop = backdrop::BackdropState::default();
+        self.warm_backdrop();
         self.vn_layers = vn_layer::VnLayerState::default();
         #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
         {

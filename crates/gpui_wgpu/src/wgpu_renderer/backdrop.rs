@@ -50,6 +50,8 @@ pub(super) enum BackdropState {
     /// Built on the first frame that paints a backdrop primitive.
     #[default]
     Unbuilt,
+    /// Being built off the frame path; that first frame waits for it.
+    Building(std::thread::JoinHandle<Result<WgpuBackdrop>>),
     Ready(Box<WgpuBackdrop>),
     Unavailable,
 }
@@ -64,8 +66,34 @@ impl BackdropState {
     pub(super) fn ready(&self) -> Option<&WgpuBackdrop> {
         match self {
             BackdropState::Ready(backdrop) => Some(backdrop),
-            BackdropState::Unbuilt | BackdropState::Unavailable => None,
+            BackdropState::Unbuilt | BackdropState::Building(_) | BackdropState::Unavailable => {
+                None
+            }
         }
+    }
+
+    /// Takes a finished build in; waits for it when `wait`.
+    fn settle(&mut self, wait: bool) {
+        let BackdropState::Building(build) = self else {
+            return;
+        };
+        if !wait && !build.is_finished() {
+            return;
+        }
+        let BackdropState::Building(build) = std::mem::take(self) else {
+            return;
+        };
+        *self = match build.join() {
+            Ok(Ok(backdrop)) => BackdropState::Ready(Box::new(backdrop)),
+            Ok(Err(error)) => {
+                effects_advisory(&format!(
+                    "`backdrop-filter` and `--shading` are unavailable — their pipelines \
+                     failed to build: {error:#}"
+                ));
+                BackdropState::Unavailable
+            }
+            Err(_) => BackdropState::Unbuilt,
+        };
     }
 }
 
@@ -79,6 +107,9 @@ pub(super) struct WgpuBackdrop {
     effects: Vec<Option<wgpu::RenderPipeline>>,
     /// The app's own, `effect_id::COUNT` on.
     app_effects: gpui::AppEffectPipelines<AppEffectPipeline>,
+    app_warmup: gpui::AppEffectWarmup<AppEffectPipeline>,
+    #[cfg(test)]
+    app_effects_built_in_sync: usize,
     effect_layout: wgpu::PipelineLayout,
     effect_vertex: wgpu::ShaderModule,
     format: wgpu::TextureFormat,
@@ -171,6 +202,7 @@ impl WgpuRendererCore {
         target: &wgpu::Texture,
         target_view: &wgpu::TextureView,
     ) -> FrameTarget {
+        self.warm_backdrop();
         let has_primitives = !scene.backdrop_blur_rects.is_empty()
             || !scene.effect_quads.is_empty()
             || !scene.vn_effect_draws.is_empty();
@@ -285,6 +317,43 @@ impl WgpuRendererCore {
         pass.draw(0..4, 0..1);
     }
 
+    /// With `gpui::app_effects_prewarm_enabled`, builds the backdrop and
+    /// built-in effect pipelines, and the app's effects it selects (again after
+    /// a reload), on background threads ahead of the frame that first draws
+    /// them. Cheap to call every frame.
+    pub(super) fn warm_backdrop(&mut self) {
+        // GL serialises every call on its one context, and WebGL2 draws no effects.
+        if !gpui::app_effects_prewarm_enabled()
+            || self.uses_texture_instance_data
+            || self.adapter_info.backend == wgpu::Backend::Gl
+            || cfg!(target_family = "wasm")
+        {
+            return;
+        }
+        let resources = &mut self.resources;
+        resources.backdrop.settle(false);
+        match &mut resources.backdrop {
+            BackdropState::Unbuilt => {
+                let device = resources.device.clone();
+                let layouts = resources.bind_group_layouts.clone();
+                let format = self.target_format;
+                let spawned = std::thread::Builder::new()
+                    .name("wgpu-backdrop-warmup".into())
+                    .spawn(move || {
+                        let mut backdrop = WgpuBackdrop::new(&device, &layouts, format)?;
+                        backdrop.warm_app_effects(&device);
+                        Ok(backdrop)
+                    });
+                match spawned {
+                    Ok(build) => resources.backdrop = BackdropState::Building(build),
+                    Err(error) => log::debug!("backdrop pipelines are built on first use: {error}"),
+                }
+            }
+            BackdropState::Ready(backdrop) => backdrop.warm_app_effects(&resources.device),
+            BackdropState::Building(_) | BackdropState::Unavailable => {}
+        }
+    }
+
     pub(super) fn ensure_backdrop(&mut self) -> bool {
         if self.uses_texture_instance_data {
             effects_advisory(
@@ -294,6 +363,7 @@ impl WgpuRendererCore {
             return false;
         }
         let resources = &mut self.resources;
+        resources.backdrop.settle(true);
         if matches!(resources.backdrop, BackdropState::Unbuilt) {
             resources.backdrop = match WgpuBackdrop::new(
                 &resources.device,
@@ -927,13 +997,16 @@ impl WgpuBackdrop {
         })
         .ok();
 
-        let mut backdrop = Self {
+        let backdrop = Self {
             blur_downsample,
             blur_upsample,
             blur_rect,
             frame_copy,
             effects,
             app_effects: Default::default(),
+            app_warmup: Default::default(),
+            #[cfg(test)]
+            app_effects_built_in_sync: 0,
             effect_layout,
             effect_vertex,
             format,
@@ -952,39 +1025,34 @@ impl WgpuBackdrop {
             targets: None,
             idle_frames: 0,
         };
-        backdrop.sync_app_effects(device);
         Ok(backdrop)
     }
 
     pub(super) fn sync_app_effects(&mut self, device: &wgpu::Device) {
         let (layout, vertex, format) = (&self.effect_layout, &self.effect_vertex, self.format);
-        self.app_effects.sync(|effect| {
-            let (_, wgsl) = effect.wgsl.get("WGSL")?;
-            let shade = effect_pipeline(
-                device,
-                layout,
-                vertex,
-                &effect.name,
-                wgsl,
-                format,
-                effect.needs_backdrop,
-            )?;
-            let history = effect
-                .history
-                .then(|| {
-                    effect_pipeline(
-                        device,
-                        layout,
-                        vertex,
-                        &format!("{}_history", effect.name),
-                        wgsl,
-                        HISTORY_FORMAT,
-                        true,
-                    )
-                })
-                .transpose()?;
-            Ok(AppEffectPipeline { shade, history })
+        #[cfg(test)]
+        let built_in_sync = &mut self.app_effects_built_in_sync;
+        self.app_effects.sync_warmed(&self.app_warmup, |effect| {
+            #[cfg(test)]
+            {
+                *built_in_sync += 1;
+            }
+            app_effect_pipeline(device, layout, vertex, format, effect)
         });
+    }
+
+    /// Builds the app's effects changed by a reload on a background thread.
+    fn warm_app_effects(&mut self, device: &std::sync::Arc<wgpu::Device>) {
+        let device = device.clone();
+        let (layout, vertex, format) = (
+            self.effect_layout.clone(),
+            self.effect_vertex.clone(),
+            self.format,
+        );
+        self.app_warmup
+            .start("wgpu-effect-warmup", &self.app_effects, move |effect| {
+                app_effect_pipeline(&device, &layout, &vertex, format, effect)
+            });
     }
 
     /// Group 2 of an effect: the backdrop as blurred and as snapshotted, an
@@ -1266,6 +1334,40 @@ const DESTINATION_OUT: wgpu::BlendState = wgpu::BlendState {
         operation: wgpu::BlendOperation::Add,
     },
 };
+
+fn app_effect_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    vertex: &wgpu::ShaderModule,
+    format: wgpu::TextureFormat,
+    effect: &gpui::AppEffect,
+) -> Result<AppEffectPipeline> {
+    let (_, wgsl) = effect.wgsl.get("WGSL")?;
+    let shade = effect_pipeline(
+        device,
+        layout,
+        vertex,
+        &effect.name,
+        wgsl,
+        format,
+        effect.needs_backdrop,
+    )?;
+    let history = effect
+        .history
+        .then(|| {
+            effect_pipeline(
+                device,
+                layout,
+                vertex,
+                &format!("{}_history", effect.name),
+                wgsl,
+                HISTORY_FORMAT,
+                true,
+            )
+        })
+        .transpose()?;
+    Ok(AppEffectPipeline { shade, history })
+}
 
 fn effect_pipeline(
     device: &wgpu::Device,
@@ -2455,6 +2557,106 @@ pub(super) mod tests {
                 "a replacement that does not compile keeps the last good pipeline"
             );
             Ok(())
+        }
+
+        #[test]
+        fn app_effects_are_built_ahead_as_the_prewarm_setting_says() -> Result<()> {
+            let _app_effects = APP_EFFECTS.lock();
+            let scene = || {
+                let mut scene = Scene::default();
+                scene.insert_primitive(quad(bounds(0., 0., SIDE, SIDE), rgb(0x000000)));
+                scene.insert_primitive(EffectQuad {
+                    effect_id: effect_id::COUNT,
+                    bounds: bounds(8., 8., 48., 48.),
+                    content_mask: mask(SIDE, SIDE),
+                    opacity: 1.,
+                    scale: 1.,
+                    ..Default::default()
+                });
+                scene
+            };
+            let warmed = |renderer: &mut WgpuHeadlessRenderer| -> Result<()> {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                loop {
+                    renderer.core.warm_backdrop();
+                    if renderer
+                        .core
+                        .resources
+                        .backdrop
+                        .ready()
+                        .is_some_and(|backdrop| backdrop.app_warmup.is_idle())
+                    {
+                        return Ok(());
+                    }
+                    anyhow::ensure!(
+                        std::time::Instant::now() < deadline,
+                        "the backdrop warmup did not finish"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            };
+            use gpui::AppEffectsPrewarm;
+            let only = |name: &str| AppEffectsPrewarm::Only(vec![name.to_string()]);
+            for (prewarm, ahead) in [
+                (AppEffectsPrewarm::Off, false),
+                (only("frost"), false),
+                (only("tint"), true),
+                (AppEffectsPrewarm::All, true),
+            ] {
+                let off = prewarm == AppEffectsPrewarm::Off;
+                let _prewarm = Prewarm::set(prewarm);
+                install_app_effect(&solid("1.0, 0.0, 0.0"))?;
+                let mut renderer = WgpuHeadlessRenderer::new()?;
+                if renderer.core.adapter_info.backend == wgpu::Backend::Gl {
+                    return Ok(());
+                }
+                assert_eq!(
+                    matches!(renderer.core.resources.backdrop, BackdropState::Building(_)),
+                    !off,
+                    "a new renderer builds its backdrop pipelines off the frame path when prewarm is on"
+                );
+                if !off {
+                    warmed(&mut renderer)?;
+                }
+                assert_eq!(
+                    pixel(&render(&mut renderer, scene())?, 32, 32),
+                    [255, 0, 0, 255]
+                );
+                assert_eq!(
+                    backdrop(&renderer)?.app_effects_built_in_sync,
+                    usize::from(!ahead)
+                );
+                if ahead {
+                    install_app_effect(&solid("0.0, 1.0, 0.0"))?;
+                    warmed(&mut renderer)?;
+                    assert_eq!(
+                        pixel(&render(&mut renderer, scene())?, 32, 32),
+                        [0, 255, 0, 255]
+                    );
+                    assert_eq!(
+                        backdrop(&renderer)?.app_effects_built_in_sync,
+                        0,
+                        "a reload is built off the frame path too"
+                    );
+                }
+            }
+            Ok(())
+        }
+
+        /// The prewarm setting is process-wide; back to the default when a test ends.
+        struct Prewarm;
+
+        impl Prewarm {
+            fn set(prewarm: gpui::AppEffectsPrewarm) -> Self {
+                gpui::set_app_effects_prewarm(prewarm);
+                Self
+            }
+        }
+
+        impl Drop for Prewarm {
+            fn drop(&mut self) {
+                gpui::set_app_effects_prewarm(gpui::AppEffectsPrewarm::Off);
+            }
         }
 
         #[test]

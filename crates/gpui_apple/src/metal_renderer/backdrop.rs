@@ -78,16 +78,52 @@ pub(super) enum BackdropState {
     /// Built on the first frame that paints a backdrop primitive.
     #[default]
     Unbuilt,
+    /// Being built off the frame path; that first frame waits for it.
+    Building(std::thread::JoinHandle<Result<BuiltBackdrop>>),
     Ready(Box<MetalBackdrop>),
     Unavailable,
 }
+
+/// A backdrop built on the warmup thread, on its way to the render thread.
+pub(super) struct BuiltBackdrop(MetalBackdrop);
+
+// SAFETY: Metal pipelines, functions, samplers and textures may be created on
+// one thread and used on another. The backdrop is moved whole to the render
+// thread when the build finishes and never shared; its caches are empty then.
+unsafe impl Send for BuiltBackdrop {}
 
 impl BackdropState {
     pub(super) fn ready(&self) -> Option<&MetalBackdrop> {
         match self {
             BackdropState::Ready(backdrop) => Some(backdrop),
-            BackdropState::Unbuilt | BackdropState::Unavailable => None,
+            BackdropState::Unbuilt | BackdropState::Building(_) | BackdropState::Unavailable => {
+                None
+            }
         }
+    }
+
+    /// Takes a finished build in; waits for it when `wait`.
+    fn settle(&mut self, wait: bool) {
+        let BackdropState::Building(build) = self else {
+            return;
+        };
+        if !wait && !build.is_finished() {
+            return;
+        }
+        let BackdropState::Building(build) = mem::take(self) else {
+            return;
+        };
+        *self = match build.join() {
+            Ok(Ok(BuiltBackdrop(backdrop))) => BackdropState::Ready(Box::new(backdrop)),
+            Ok(Err(error)) => {
+                effects_advisory(&format!(
+                    "`backdrop-filter` and `--shading` are unavailable — their pipelines \
+                     failed to build: {error:#}"
+                ));
+                BackdropState::Unavailable
+            }
+            Err(_) => BackdropState::Unbuilt,
+        };
     }
 }
 
@@ -101,6 +137,9 @@ pub(super) struct MetalBackdrop {
     effects: Vec<Option<Pipeline>>,
     /// The app's own, `effect_id::COUNT` on.
     app_effects: gpui::AppEffectPipelines<AppEffectPipeline>,
+    app_warmup: gpui::AppEffectWarmup<AppEffectPipeline>,
+    #[cfg(test)]
+    app_effects_built_in_sync: usize,
     effect_vertex: Retained<ProtocolObject<dyn MTLFunction>>,
     /// `gpui::effect_id::PUNCH`.
     punch: Option<Pipeline>,
@@ -180,6 +219,7 @@ impl MetalRenderer {
         scene: &Scene,
         target: &ProtocolObject<dyn MTLTexture>,
     ) -> FrameTarget {
+        self.warm_backdrop();
         let has_primitives = !scene.backdrop_blur_rects.is_empty()
             || !scene.effect_quads.is_empty()
             || !scene.vn_effect_draws.is_empty();
@@ -284,7 +324,40 @@ impl MetalRenderer {
         Ok(())
     }
 
+    /// With `gpui::app_effects_prewarm_enabled`, builds the backdrop and
+    /// built-in effect pipelines, and the app's effects it selects (again after
+    /// a reload), on background threads ahead of the frame that first draws
+    /// them. Cheap to call every frame.
+    pub(super) fn warm_backdrop(&mut self) {
+        if !gpui::app_effects_prewarm_enabled() {
+            return;
+        }
+        self.backdrop.settle(false);
+        match &mut self.backdrop {
+            BackdropState::Unbuilt => {
+                let (device, library) = (self.device.clone(), self.library.clone());
+                let format = self.target_format;
+                let spawned = std::thread::Builder::new()
+                    .name("metal-backdrop-warmup".into())
+                    .spawn(move || {
+                        objc2::rc::autoreleasepool(|_| {
+                            let mut backdrop = MetalBackdrop::new(&device, &library, format)?;
+                            backdrop.warm_app_effects(&device);
+                            Ok(BuiltBackdrop(backdrop))
+                        })
+                    });
+                match spawned {
+                    Ok(build) => self.backdrop = BackdropState::Building(build),
+                    Err(error) => log::debug!("backdrop pipelines are built on first use: {error}"),
+                }
+            }
+            BackdropState::Ready(backdrop) => backdrop.warm_app_effects(&self.device),
+            BackdropState::Building(_) | BackdropState::Unavailable => {}
+        }
+    }
+
     pub(super) fn ensure_backdrop(&mut self) -> bool {
+        self.backdrop.settle(true);
         if matches!(self.backdrop, BackdropState::Unbuilt) {
             self.backdrop =
                 match MetalBackdrop::new(&self.device, &self.library, self.target_format) {
@@ -817,13 +890,16 @@ impl MetalBackdrop {
             .newSamplerStateWithDescriptor(&sampler_descriptor)
             .context("creating the effect image sampler")?;
 
-        let mut backdrop = Self {
+        let backdrop = Self {
             blur_downsample,
             blur_upsample,
             blur_rect,
             frame_copy,
             effects,
             app_effects: Default::default(),
+            app_warmup: Default::default(),
+            #[cfg(test)]
+            app_effects_built_in_sync: 0,
             effect_vertex,
             punch,
             content,
@@ -837,7 +913,6 @@ impl MetalBackdrop {
             idle_frames: 0,
             format,
         };
-        backdrop.sync_app_effects(device);
         Ok(backdrop)
     }
 
@@ -873,33 +948,27 @@ impl MetalBackdrop {
     }
 
     pub(super) fn sync_app_effects(&mut self, device: &ProtocolObject<dyn MTLDevice>) {
-        let vertex = &self.effect_vertex;
-        self.app_effects.sync(|effect| {
-            let (_, msl) = effect.metal.get("Metal shader")?;
-            let library = effect_library(device, msl)?;
-            let shade = effect_pipeline(
-                device,
-                vertex,
-                &library,
-                &effect.name,
-                self.format,
-                effect.needs_backdrop,
-            )?;
-            let history = effect
-                .history
-                .then(|| {
-                    effect_pipeline(
-                        device,
-                        vertex,
-                        &library,
-                        &format!("{}_history", effect.name),
-                        HISTORY_FORMAT,
-                        true,
-                    )
-                })
-                .transpose()?;
-            Ok(AppEffectPipeline { shade, history })
+        let (vertex, format) = (&self.effect_vertex, self.format);
+        #[cfg(test)]
+        let built_in_sync = &mut self.app_effects_built_in_sync;
+        self.app_effects.sync_warmed(&self.app_warmup, |effect| {
+            #[cfg(test)]
+            {
+                *built_in_sync += 1;
+            }
+            app_effect_pipeline(device, vertex, format, effect)
         });
+    }
+
+    /// Builds the app's effects changed by a reload on a background thread.
+    fn warm_app_effects(&mut self, device: &Retained<ProtocolObject<dyn MTLDevice>>) {
+        let (device, vertex, format) = (device.clone(), self.effect_vertex.clone(), self.format);
+        self.app_warmup
+            .start("metal-effect-warmup", &self.app_effects, move |effect| {
+                objc2::rc::autoreleasepool(|_| {
+                    app_effect_pipeline(&device, &vertex, format, effect)
+                })
+            });
     }
 
     /// `needed` counts the snapshot as one more level below the pyramid.
@@ -1153,6 +1222,38 @@ fn effect_library(
             Some(&MTLCompileOptions::new()),
         )
         .context("its Metal source does not compile")
+}
+
+fn app_effect_pipeline(
+    device: &ProtocolObject<dyn MTLDevice>,
+    vertex: &ProtocolObject<dyn MTLFunction>,
+    format: MTLPixelFormat,
+    effect: &gpui::AppEffect,
+) -> Result<AppEffectPipeline> {
+    let (_, msl) = effect.metal.get("Metal shader")?;
+    let library = effect_library(device, msl)?;
+    let shade = effect_pipeline(
+        device,
+        vertex,
+        &library,
+        &effect.name,
+        format,
+        effect.needs_backdrop,
+    )?;
+    let history = effect
+        .history
+        .then(|| {
+            effect_pipeline(
+                device,
+                vertex,
+                &library,
+                &format!("{}_history", effect.name),
+                HISTORY_FORMAT,
+                true,
+            )
+        })
+        .transpose()?;
+    Ok(AppEffectPipeline { shade, history })
 }
 
 /// An effect drawn into the frame, from its MSL.
@@ -2209,6 +2310,101 @@ pub(super) mod tests {
             "a replacement that does not compile keeps the last good pipeline"
         );
         Ok(())
+    }
+
+    #[test]
+    fn app_effects_are_built_ahead_as_the_prewarm_setting_says() -> Result<()> {
+        let _app_effects = APP_EFFECTS.lock();
+        let scene = || {
+            let mut scene = Scene::default();
+            scene.insert_primitive(quad(bounds(0., 0., SIDE, SIDE), rgb(0x000000)));
+            scene.insert_primitive(EffectQuad {
+                effect_id: effect_id::COUNT,
+                bounds: bounds(8., 8., 48., 48.),
+                content_mask: mask(SIDE, SIDE),
+                opacity: 1.,
+                scale: 1.,
+                ..Default::default()
+            });
+            scene
+        };
+        let warmed = |renderer: &mut MetalRenderer| -> Result<()> {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            loop {
+                renderer.warm_backdrop();
+                if renderer
+                    .backdrop
+                    .ready()
+                    .is_some_and(|backdrop| backdrop.app_warmup.is_idle())
+                {
+                    return Ok(());
+                }
+                anyhow::ensure!(
+                    std::time::Instant::now() < deadline,
+                    "the backdrop warmup did not finish"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        use gpui::AppEffectsPrewarm;
+        let only = |name: &str| AppEffectsPrewarm::Only(vec![name.to_string()]);
+        for (prewarm, ahead) in [
+            (AppEffectsPrewarm::Off, false),
+            (only("frost"), false),
+            (only("tint"), true),
+            (AppEffectsPrewarm::All, true),
+        ] {
+            let off = prewarm == AppEffectsPrewarm::Off;
+            let _prewarm = Prewarm::set(prewarm);
+            install_app_effect(&solid("1.0, 0.0, 0.0"))?;
+            let mut renderer = renderer()?;
+            assert_eq!(
+                matches!(renderer.backdrop, BackdropState::Building(_)),
+                !off,
+                "a new renderer builds its backdrop pipelines off the frame path when prewarm is on"
+            );
+            if !off {
+                warmed(&mut renderer)?;
+            }
+            assert_eq!(
+                pixel(&render(&mut renderer, scene())?, 32, 32),
+                [255, 0, 0, 255]
+            );
+            assert_eq!(
+                backdrop(&renderer)?.app_effects_built_in_sync,
+                usize::from(!ahead)
+            );
+            if ahead {
+                install_app_effect(&solid("0.0, 1.0, 0.0"))?;
+                warmed(&mut renderer)?;
+                assert_eq!(
+                    pixel(&render(&mut renderer, scene())?, 32, 32),
+                    [0, 255, 0, 255]
+                );
+                assert_eq!(
+                    backdrop(&renderer)?.app_effects_built_in_sync,
+                    0,
+                    "a reload is built off the frame path too"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The prewarm setting is process-wide; back to the default when a test ends.
+    struct Prewarm;
+
+    impl Prewarm {
+        fn set(prewarm: gpui::AppEffectsPrewarm) -> Self {
+            gpui::set_app_effects_prewarm(prewarm);
+            Self
+        }
+    }
+
+    impl Drop for Prewarm {
+        fn drop(&mut self) {
+            gpui::set_app_effects_prewarm(gpui::AppEffectsPrewarm::Off);
+        }
     }
 
     #[test]

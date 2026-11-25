@@ -149,7 +149,13 @@ fn native_prewarmed_pipelines_serve_their_first_use() -> Result<()> {
     let format = windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
     pipelines.prewarm(format);
     let deadline = Instant::now() + std::time::Duration::from_secs(60);
-    while pipelines.warmed.lock().len() < WARM_MODULES.len() {
+    let primitives = |pipelines: &Pipelines| {
+        let warmed = pipelines.warmed.lock();
+        let primitive =
+            |cached: &&CachedPipeline| matches!(cached.key.kind, PipelineKind::Primitive(_));
+        warmed.iter().filter(primitive).count()
+    };
+    while primitives(&pipelines) < WARM_MODULES.len() {
         ensure!(Instant::now() < deadline, "pipeline warmup did not finish");
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
@@ -171,5 +177,169 @@ fn native_prewarmed_pipelines_serve_their_first_use() -> Result<()> {
         );
     }
     assert_eq!(pipelines.cache.len(), WARM_MODULES.len());
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires a native D3D12 hardware adapter; run explicitly on Windows"]
+fn native_app_effects_are_warmed_before_their_first_frame_and_after_a_reload() -> Result<()> {
+    let install = |rgb: &str| -> Result<()> {
+        gpui::reload_app_effects(
+            gpui::AppEffects::new(
+                "test",
+                r#"{"schema": 12, "effects": [
+                    {"name": "tint", "backdrop": false, "history": true, "hlsl": "tint.hlsl"}
+                ]}"#,
+                [(
+                    "tint.hlsl".to_string(),
+                    format!(
+                        "float4 effect_fragment() : SV_Target {{ return float4({rgb}, 1.0); }}"
+                    ),
+                )],
+            )
+            .map_err(anyhow::Error::msg)?,
+        );
+        Ok(())
+    };
+    let warmed = |pipelines: &Pipelines, kind: fn(u64) -> PipelineKind, format| {
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            let live = pipelines
+                .app_warmup
+                .is_idle()
+                .then(|| pipelines.app_warm.lock().fragments.last().map(|f| f.id))
+                .flatten();
+            let found = live.and_then(|id| {
+                pipelines
+                    .warmed
+                    .lock()
+                    .iter()
+                    .find(|cached| cached.key.kind == kind(id) && cached.key.format == format)
+                    .map(|cached| cached.state.as_raw())
+            });
+            if let Some(found) = found {
+                return Ok(found);
+            }
+            ensure!(
+                Instant::now() < deadline,
+                "app effect warmup did not finish"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    };
+    let _prewarm = Prewarm::set(gpui::AppEffectsPrewarm::All);
+    let device = super::super::device::Device::new()?;
+    let mut pipelines = Pipelines::new(&device.device)?;
+    let format = windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+    let index = EffectShader::ALL.len() as u32;
+    install("1.0, 0.0, 0.0")?;
+    pipelines.prewarm(format);
+    let first = warmed(&pipelines, PipelineKind::AppEffect, format)?;
+    let history = warmed(&pipelines, PipelineKind::AppHistory, HISTORY_FORMAT)?;
+    let (served, _) = pipelines
+        .effect(index, format, 1)?
+        .context("app effect missing")?;
+    assert_eq!(
+        served.as_raw(),
+        first,
+        "the first draw must take the warmed pipeline"
+    );
+    let served = pipelines.history(index)?.context("history missing")?;
+    assert_eq!(served.as_raw(), history);
+
+    install("0.0, 1.0, 0.0")?;
+    pipelines.warm_app_effects();
+    let reloaded = warmed(&pipelines, PipelineKind::AppEffect, format)?;
+    assert_ne!(reloaded, first);
+    let (served, _) = pipelines
+        .effect(index, format, 1)?
+        .context("app effect missing")?;
+    assert_eq!(served.as_raw(), reloaded, "a reload must be warmed again");
+
+    let hdr = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    pipelines.prewarm(hdr);
+    let hdr_warmed = warmed(&pipelines, PipelineKind::AppEffect, hdr)?;
+    let (served, _) = pipelines
+        .effect(index, hdr, 1)?
+        .context("app effect missing")?;
+    assert_eq!(
+        served.as_raw(),
+        hdr_warmed,
+        "a new format warms the synced effects"
+    );
+    assert_eq!(pipelines.app_fragments_compiled_on_frame, 0);
+    Ok(())
+}
+
+/// The prewarm setting is process-wide; back to the default when a test ends.
+struct Prewarm;
+
+impl Prewarm {
+    fn set(prewarm: gpui::AppEffectsPrewarm) -> Self {
+        gpui::set_app_effects_prewarm(prewarm);
+        Self
+    }
+}
+
+impl Drop for Prewarm {
+    fn drop(&mut self) {
+        gpui::set_app_effects_prewarm(gpui::AppEffectsPrewarm::Off);
+    }
+}
+
+#[test]
+#[ignore = "requires a native D3D12 hardware adapter; run explicitly on Windows"]
+fn native_app_effects_are_warmed_only_as_the_prewarm_setting_says() -> Result<()> {
+    let solid = |rgb: &str| {
+        format!("float4 effect_fragment() : SV_Target {{ return float4({rgb}, 1.0); }}")
+    };
+    let format = windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+    let index = EffectShader::ALL.len() as u32;
+    for (prewarm, warmed, on_frame) in [
+        (gpui::AppEffectsPrewarm::Off, 0, 2),
+        (
+            gpui::AppEffectsPrewarm::Only(vec!["other".into(), "missing".into()]),
+            1,
+            1,
+        ),
+    ] {
+        let _prewarm = Prewarm::set(prewarm);
+        gpui::reload_app_effects(
+            gpui::AppEffects::new(
+                "test",
+                r#"{"schema": 12, "effects": [
+                    {"name": "tint", "backdrop": false, "hlsl": "tint.hlsl"},
+                    {"name": "other", "backdrop": false, "hlsl": "other.hlsl"}
+                ]}"#,
+                [
+                    ("tint.hlsl".to_string(), solid("1.0, 0.0, 0.0")),
+                    ("other.hlsl".to_string(), solid("0.0, 1.0, 0.0")),
+                ],
+            )
+            .map_err(anyhow::Error::msg)?,
+        );
+        let device = super::super::device::Device::new()?;
+        let mut pipelines = Pipelines::new(&device.device)?;
+        pipelines.prewarm(format);
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while !pipelines.app_warmup.is_idle() {
+            ensure!(
+                Instant::now() < deadline,
+                "app effect warmup did not finish"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(pipelines.app_warm.lock().fragments.len(), warmed);
+        pipelines
+            .effect(index, format, 1)?
+            .context("app effect missing")?;
+        assert_eq!(pipelines.app_fragments_compiled_on_frame, on_frame);
+        pipelines.prewarm(DXGI_FORMAT_R16G16B16A16_FLOAT);
+        assert_eq!(
+            pipelines.app_warm.lock().fragments.len(),
+            warmed,
+            "an effect built on its frame is not warmed for another format"
+        );
+    }
     Ok(())
 }

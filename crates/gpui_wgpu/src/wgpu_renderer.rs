@@ -210,6 +210,7 @@ struct GroupDraw<'a> {
     effects: &'a vn_effect::VnEffectFrame,
 }
 
+#[derive(Clone)]
 struct WgpuBindGroupLayouts {
     globals: wgpu::BindGroupLayout,
     instances: wgpu::BindGroupLayout,
@@ -1346,7 +1347,7 @@ impl WgpuRendererCore {
         });
         let max_texture_size = device.limits().max_texture_dimension_2d;
 
-        Self {
+        let mut core = Self {
             resources: WgpuResources {
                 device,
                 queue,
@@ -1374,7 +1375,9 @@ impl WgpuRendererCore {
             sdr_format: target_format,
             hdr: None,
             max_texture_size,
-        }
+        };
+        core.warm_backdrop();
+        core
     }
 
     fn resources(&self) -> &WgpuResources {
