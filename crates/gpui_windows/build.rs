@@ -90,6 +90,7 @@ mod shader_compilation {
             // vue-native fork: the isolated layer composite (`clip-path`).
             "vn_layer",
             "vn_underlay",
+            "backdrop_linear",
         ];
 
         let rust_binding_path = format!("{}/shaders_bytes.rs", out_dir);

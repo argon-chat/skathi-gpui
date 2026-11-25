@@ -429,8 +429,8 @@ pub fn check_signed(sdr: &image::RgbaImage, output: &[[f32; 4]]) -> Result<()> {
     check(84, [-green[0], 1., 0.], "linear SVG color matrix")?;
     check(92, [0., 1., 0.], "sRGB SVG color matrix clamp")?;
     check(100, [green[0], 2.5, green[2]], "signed surface headroom")?;
-    check(112, [0., 1., 0.], "backdrop blur clamp")?;
-    check(124, [0., 1., 0.], "frost clamp")?;
+    check(112, [0., 2.5, 0.], "backdrop blur keeps headroom")?;
+    check(124, [0., 2.5, 0.], "frost keeps headroom")?;
 
     assert_eq!(sdr.get_pixel(4, y).0, [255, 0, 0, 255]);
     assert_eq!(sdr.get_pixel(12, y).0, [0, 255, 0, 255]);

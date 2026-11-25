@@ -780,9 +780,10 @@ fn app_effect_blend(needs_backdrop: bool) -> Blend {
 
 fn module_blend(module: ShaderModule) -> Blend {
     match module {
-        ShaderModule::BlurDownsample | ShaderModule::BlurUpsample | ShaderModule::BlurRect => {
-            Blend::Replace
-        }
+        ShaderModule::BlurDownsample
+        | ShaderModule::BlurUpsample
+        | ShaderModule::BlurRect
+        | ShaderModule::BackdropLinear => Blend::Replace,
         ShaderModule::VnLayer => Blend::Premultiplied,
         ShaderModule::VnUnderlay => Blend::DestinationOver,
         ShaderModule::SubpixelSprite => Blend::Subpixel,
@@ -988,6 +989,7 @@ fn compile_module(module: ShaderModule) -> Result<(Vec<u8>, Vec<u8>)> {
         ShaderModule::PolychromeSprite => "polychrome_sprite",
         ShaderModule::VnLayer => "vn_layer",
         ShaderModule::VnUnderlay => "vn_underlay",
+        ShaderModule::BackdropLinear => "backdrop_linear",
         ShaderModule::Effect(_) => bail!("Effect shaders require their shared vertex stage"),
     };
     Ok((

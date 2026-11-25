@@ -5,7 +5,7 @@ use std::{
     process::Command,
 };
 
-const MODULES: [(&str, &str); 12] = [
+const MODULES: [(&str, &str); 13] = [
     ("Quad", "quad"),
     ("Shadow", "shadow"),
     ("BlurDownsample", "blur_downsample"),
@@ -18,6 +18,7 @@ const MODULES: [(&str, &str); 12] = [
     ("PolychromeSprite", "polychrome_sprite"),
     ("VnLayer", "vn_layer"),
     ("VnUnderlay", "vn_underlay"),
+    ("BackdropLinear", "backdrop_linear"),
 ];
 const EFFECTS: [(&str, &str); 3] = [("Frost", "frost"), ("Noise", "noise"), ("Glow", "glow")];
 

@@ -338,7 +338,9 @@ struct GlobalParams {
     grayscale_enhanced_contrast: f32,
     subpixel_enhanced_contrast: f32,
     is_bgr: u32,
-    padding: [u32; 3],
+    /// vue-native: nonzero for a half-float (HDR) frame; see `clamp_premultiplied`.
+    extended_range: u32,
+    padding: [u32; 2],
 }
 
 struct Target {
@@ -578,6 +580,9 @@ struct Renderer {
     /// vue-native: the snapshot with the underlay sources under it, while the scene has some.
     underlaid: Option<Arc<Target>>,
     blur: Vec<Arc<Target>>,
+    /// vue-native: half-float linear light for `BackdropEncoding::Linear`: the
+    /// snapshot's copy, then its pyramid.
+    linear: Vec<Arc<Target>>,
     idle_frames: ScratchIdle,
     timings: Option<RendererTimings>,
     uploads: [UploadPool; BUFFERS],
@@ -738,6 +743,7 @@ impl Renderer {
             snapshot: None,
             underlaid: None,
             blur: Vec::new(),
+            linear: Vec::new(),
             idle_frames: ScratchIdle::default(),
             timings: RendererTimings::from_environment(),
             uploads: std::array::from_fn(|_| UploadPool::default()),
@@ -830,6 +836,7 @@ impl Renderer {
         self.snapshot = None;
         self.underlaid = None;
         self.blur.clear();
+        self.linear.clear();
         self.vn_snapshots.clear();
         self.hdr_scene = None;
         if output.is_some() {
@@ -862,6 +869,7 @@ impl Renderer {
         self.snapshot = None;
         self.underlaid = None;
         self.blur.clear();
+        self.linear.clear();
         self.effect_textures.clear();
         let mut replacement = crate::try_to_recover_from_device_lost(|| {
             let mut replacement = Self::new(self.hwnd, devices, self.disable_direct_composition)?;
@@ -912,6 +920,7 @@ impl Renderer {
         self.snapshot = None;
         self.underlaid = None;
         self.blur.clear();
+        self.linear.clear();
         self.hdr_scene = None;
         Ok(())
     }
@@ -1142,6 +1151,25 @@ impl Renderer {
             self.underlaid = None;
         }
         self.blur.truncate(held.saturating_sub(1));
+        let linear_levels = if needs_backdrop {
+            scene
+                .effect_quads
+                .iter()
+                .chain(scene.vn_effect_draws.iter().map(|draw| &draw.quad))
+                .filter(|quad| quad.backdrop_encoding() == BackdropEncoding::Linear)
+                .map(EffectQuad::effective_kernel_levels)
+                .max()
+                .unwrap_or(0) as usize
+        } else {
+            0
+        };
+        // The linear copy is held with the pyramid, and only for a blur.
+        let needed = if linear_levels > 0 {
+            linear_levels + 1
+        } else {
+            0
+        };
+        trim_scratch(&mut self.linear, needed, &mut self.idle_frames.linear);
         let prepare_time = prepare_started
             .map(|started| started.elapsed())
             .unwrap_or_default();
@@ -1161,7 +1189,8 @@ impl Renderer {
                 grayscale_enhanced_contrast: font.grayscale_enhanced_contrast,
                 subpixel_enhanced_contrast: font.subpixel_enhanced_contrast,
                 is_bgr: font.is_bgr as u32,
-                padding: [0; 3],
+                extended_range: u32::from(self.format == HDR_FORMAT),
+                padding: [0; 2],
             }],
         )?;
         let effect_quads = if effects.quads.is_empty() {
@@ -1270,6 +1299,7 @@ impl Renderer {
                 snapshot: &mut self.snapshot,
                 underlaid: &mut self.underlaid,
                 blur: &mut self.blur,
+                linear: &mut self.linear,
                 bound: BoundState::default(),
                 clip: full_rect(self.width, self.height),
                 reads_backdrop: needs_backdrop,
@@ -1386,6 +1416,21 @@ impl Renderer {
                 .pipeline(ShaderModule::BlurDownsample, self.format, 1)?;
             self.pipelines
                 .pipeline(ShaderModule::BlurUpsample, self.format, 1)?;
+            let layer_quads = scene.vn_effect_draws.iter().map(|draw| &draw.quad);
+            if scene
+                .effect_quads
+                .iter()
+                .chain(layer_quads)
+                .any(|quad| BackdropRequest::layer(quad).linear_blur())
+            {
+                for module in [
+                    ShaderModule::BackdropLinear,
+                    ShaderModule::BlurDownsample,
+                    ShaderModule::BlurUpsample,
+                ] {
+                    self.pipelines.pipeline(module, HDR_FORMAT, 1)?;
+                }
+            }
         }
         Ok(needs_backdrop)
     }
@@ -1611,6 +1656,7 @@ const SCRATCH_RELEASE_FRAMES: u32 = 90;
 struct ScratchIdle {
     layers: u32,
     backdrop: u32,
+    linear: u32,
 }
 
 fn trim_scratch<T>(scratch: &mut Vec<T>, needed: usize, idle: &mut u32) {
@@ -1989,6 +2035,7 @@ struct Encoding<'a> {
     snapshot: &'a mut Option<Arc<Target>>,
     underlaid: &'a mut Option<Arc<Target>>,
     blur: &'a mut Vec<Arc<Target>>,
+    linear: &'a mut Vec<Arc<Target>>,
     bound: BoundState,
     /// Device pixels of the current window-sized target that can still reach
     /// the screen: the whole window, narrowed by each enclosing layer.
@@ -2426,11 +2473,7 @@ impl Encoding<'_> {
                 continue;
             };
             let snapshot = if backdrop {
-                Some(self.backdrop(BackdropRequest {
-                    kernel_levels: quad.effective_kernel_levels() as usize,
-                    samples: None,
-                    underlays: false,
-                })?)
+                Some(self.backdrop(BackdropRequest::layer(&quad))?)
             } else {
                 None
             };
@@ -2597,6 +2640,20 @@ impl Encoding<'_> {
             1,
         )
     }
+    /// The linear copy at full size, then `levels` half-float pyramid levels.
+    fn ensure_linear(&mut self, levels: usize) -> Result<()> {
+        while self.linear.len() <= levels {
+            let divisor = 2u32.saturating_pow(self.linear.len() as u32);
+            self.linear.push(Target::new_in(
+                self.gpu,
+                HDR_FORMAT,
+                (self.width / divisor).max(1),
+                (self.height / divisor).max(1),
+                1,
+            )?);
+        }
+        Ok(())
+    }
     fn ensure_blur(&mut self, levels: usize) -> Result<()> {
         if self.snapshot.is_none() {
             *self.snapshot = Some(Target::new_in(
@@ -2633,7 +2690,7 @@ impl Encoding<'_> {
         let levels = request
             .kernel_levels
             .min(MAX_BACKDROP_BLUR_KERNEL_LEVELS as usize);
-        self.ensure_blur(levels)?;
+        self.ensure_blur(if request.linear_blur() { 0 } else { levels })?;
         let snapshot = self
             .snapshot
             .as_ref()
@@ -2683,33 +2740,48 @@ impl Encoding<'_> {
         };
         let target = self.target.clone();
         self.bind_target(&target)?;
-        let levels = levels.min(self.blur.len());
+        let (mut source, chain, format) = if request.linear_blur() {
+            self.ensure_linear(levels)?;
+            let copy = self
+                .linear
+                .first()
+                .context("D3D12 linear backdrop copy missing")?
+                .clone();
+            self.blur_pass(
+                ShaderModule::BackdropLinear,
+                HDR_FORMAT,
+                &raw,
+                &copy,
+                region,
+            )?;
+            (copy.sampled(), self.linear[1..].to_vec(), HDR_FORMAT)
+        } else {
+            (raw.clone(), self.blur.clone(), self.format)
+        };
+        let levels = levels.min(chain.len());
         if levels == 0 {
             return Ok(Backdrop {
-                blurred: raw.clone(),
+                blurred: source,
                 raw,
                 page,
             });
         }
-        let mut source = raw.clone();
         for level in 0..levels {
-            let target = self
-                .blur
+            let target = chain
                 .get(level)
                 .context("D3D12 blur pyramid level missing")?
                 .clone();
             let rect = scale_down(region, level + 1);
-            self.blur_pass(ShaderModule::BlurDownsample, &source, &target, rect)?;
+            self.blur_pass(ShaderModule::BlurDownsample, format, &source, &target, rect)?;
             source = target.sampled();
         }
         for level in (1..levels).rev() {
-            let target = self
-                .blur
+            let target = chain
                 .get(level - 1)
                 .context("D3D12 blur pyramid target missing")?
                 .clone();
             let rect = scale_down(region, level);
-            self.blur_pass(ShaderModule::BlurUpsample, &source, &target, rect)?;
+            self.blur_pass(ShaderModule::BlurUpsample, format, &source, &target, rect)?;
             source = target.sampled();
         }
         let target = self.target.clone();
@@ -2793,13 +2865,15 @@ impl Encoding<'_> {
     fn blur_pass(
         &mut self,
         module: ShaderModule,
+        format: DXGI_FORMAT,
         source: &AtlasTexture,
         target: &Arc<Target>,
         rect: RECT,
     ) -> Result<()> {
         self.bind_target_rect(target, rect)?;
         let buffer = self.data.dummy;
-        self.draw(module, buffer, 0, 1, 4, Some(source), None, 1)?;
+        let pipeline = self.pipelines.pipeline(module, format, 1)?;
+        self.draw_pipeline(&pipeline, buffer, 0, 1, 4, Some(source), None)?;
         target.to(self.list, SHADER_READ, self.changes);
         Ok(())
     }
@@ -3271,6 +3345,7 @@ mod tests {
             snapshot: None,
             underlaid: None,
             blur: Vec::new(),
+            linear: Vec::new(),
             idle_frames: ScratchIdle::default(),
             timings: None,
             uploads: std::array::from_fn(|_| UploadPool::default()),
@@ -4148,7 +4223,7 @@ mod tests {
             reload_app_effects(
                 AppEffects::new(
                     "test",
-                    r#"{"schema": 13, "effects": [
+                    r#"{"schema": 14, "effects": [
                         {"name": "tint", "backdrop": false, "hlsl": "tint.hlsl"}
                     ]}"#,
                     [("tint.hlsl".to_string(), hlsl.to_string())],
@@ -4523,6 +4598,242 @@ mod tests {
                 "a frame without sources lets the copy go"
             );
         }
+        Ok(())
+    }
+
+    /// `[SkBackdropLinear]` passing its backdrop through, from
+    /// `effects/test/pass_linear.hlsl` (`bun run shaders`).
+    fn install_pass_linear() -> Result<()> {
+        reload_app_effects(
+            AppEffects::new(
+                "test",
+                include_str!("../../effects/test/effects.json"),
+                [(
+                    "pass_linear.hlsl".to_string(),
+                    include_str!("../../effects/test/pass_linear.hlsl").to_string(),
+                )],
+            )
+            .map_err(anyhow::Error::msg)?,
+        );
+        Ok(())
+    }
+
+    const PASS_SIDE: u32 = 32;
+
+    /// A pass-through over the whole window but its two-pixel border:
+    /// `pass-linear` or a `frost(0)`, blurred to `radius`.
+    fn pass_through(linear: bool, radius: f32) -> EffectQuad {
+        let side = PASS_SIDE as f32;
+        let mut quad = EffectQuad {
+            effect_id: if linear {
+                effect_id::COUNT
+            } else {
+                effect_id::FROST
+            },
+            bounds: bounds(2., 2., side - 4., side - 4.),
+            content_mask: mask(side, side),
+            params: if linear {
+                EffectQuad::params_from(&[radius])
+            } else {
+                EffectQuad::params_from(&[0., radius, 0., 0., 1., 1., 1., 0.])
+            },
+            opacity: 1.,
+            backdrop_blur_radius: ScaledPixels(radius),
+            scale: 1.,
+            flags: EFFECT_FLAG_NEEDS_BACKDROP,
+            ..Default::default()
+        };
+        if linear {
+            quad.flags |= EFFECT_FLAG_BACKDROP_LINEAR;
+        }
+        quad
+    }
+
+    /// The window filled from an HDR tile of `texel(x, y)` (straight RGBA).
+    fn hdr_page(
+        renderer: &Renderer,
+        id: u32,
+        texel: impl Fn(u32, u32) -> [f32; 4],
+        effect: Option<EffectQuad>,
+    ) -> Result<Scene> {
+        use gpui::hdr_test_scene::f32_to_half;
+        let side = PASS_SIDE as f32;
+        let bytes: Vec<u8> = (0..PASS_SIDE * PASS_SIDE)
+            .flat_map(|i| texel(i % PASS_SIDE, i / PASS_SIDE))
+            .flat_map(|value| f32_to_half(value).to_le_bytes())
+            .collect();
+        let key = AtlasKey::Image(RenderImageParams {
+            image_id: ImageId(0x4d52_1310 + id as usize),
+            frame_index: 0,
+        });
+        let tile = renderer
+            .atlas
+            .write_hdr_bytes(
+                &key,
+                size(
+                    DevicePixels(PASS_SIDE as i32),
+                    DevicePixels(PASS_SIDE as i32),
+                ),
+                &bytes,
+            )?
+            .context("the HDR page tile was not allocated")?;
+        let mut scene = Scene::default();
+        scene.insert_primitive(PolychromeSprite {
+            order: 0,
+            pad: f32::to_bits(16.0),
+            tile,
+            grayscale: false.into(),
+            opacity: 1.,
+            bounds: bounds(0., 0., side, side),
+            content_mask: mask(side, side),
+            corner_radii: Corners::default(),
+            transformation: TransformationMatrix::unit(),
+            tint: Hsla::transparent_black(),
+            corner_shapes: CornerShapes::default(),
+        });
+        if let Some(effect) = effect {
+            scene.insert_primitive(effect);
+        }
+        scene.finish();
+        Ok(scene)
+    }
+
+    /// The HDR scene target after drawing `scene`, as f32 RGBA.
+    fn render_hdr_scene(renderer: &mut Renderer, scene: &Scene) -> Result<Vec<f32>> {
+        renderer.set_hdr_output(Some(HdrOutput {
+            sdr_white: 2.5,
+            content_headroom: 16.0,
+        }));
+        renderer.apply_hdr_output()?;
+        let output = Target::new_in(&renderer.gpu, HDR_FORMAT, PASS_SIDE, PASS_SIDE, 1)?;
+        let mut uploads = UploadPool::default();
+        uploads.begin(renderer.gpu.completed_value(), 0)?;
+        renderer.render(
+            scene,
+            WindowBackgroundAppearance::Opaque,
+            output,
+            true,
+            &mut uploads,
+        )?;
+        uploads.finish();
+        let encoded = renderer
+            .hdr_scene
+            .clone()
+            .context("the HDR scene target was not made")?;
+        Ok(renderer
+            .read_target(encoded)?
+            .chunks_exact(2)
+            .map(|half| half_to_f32(u16::from_le_bytes([half[0], half[1]])))
+            .collect())
+    }
+
+    /// Linear light from 0 to 12 times SDR white, a quarter of it translucent.
+    fn hdr_ramp(x: u32, y: u32) -> [f32; 4] {
+        let at = (y * PASS_SIDE + x) as f32 / (PASS_SIDE * PASS_SIDE) as f32;
+        let value = 12.0 * at * at;
+        let alpha = if y % 4 == 0 { 0.5 } else { 1.0 };
+        [value, value * 0.5, (12.0 - value) * 0.25, alpha]
+    }
+
+    #[::core::prelude::v1::test]
+    #[ignore = "requires a native D3D12 hardware adapter; run explicitly for renderer qualification"]
+    fn native_backdrop_pass_through_keeps_hdr_values_in_linear_light_and_in_the_frame() -> Result<()>
+    {
+        install_pass_linear()?;
+        let mut renderer = offscreen(PASS_SIDE, PASS_SIDE)?;
+        let page = hdr_page(&renderer, 0, hdr_ramp, None)?;
+        let expected = render_hdr_scene(&mut renderer, &page)?;
+        assert!(
+            expected.iter().any(|&value| value > 2.0),
+            "the fixture holds HDR values"
+        );
+        for linear in [true, false] {
+            let scene = hdr_page(&renderer, 0, hdr_ramp, Some(pass_through(linear, 0.)))?;
+            let shown = render_hdr_scene(&mut renderer, &scene)?;
+            let different = shown
+                .iter()
+                .zip(&expected)
+                .position(|(a, b)| a.to_bits() != b.to_bits());
+            assert!(
+                different.is_none(),
+                "linear {linear}: pixel {} is {:?}, the page {:?}",
+                different.unwrap_or(0) / 4,
+                &shown[different.unwrap_or(0) / 4 * 4..][..4],
+                &expected[different.unwrap_or(0) / 4 * 4..][..4]
+            );
+        }
+
+        let flat = |_, _| [8.0, 2.0, 0.5, 1.0];
+        let at = ((PASS_SIDE / 2 * PASS_SIDE + PASS_SIDE / 2) * 4) as usize;
+        let page = hdr_page(&renderer, 1, flat, None)?;
+        let page = render_hdr_scene(&mut renderer, &page)?;
+        let page = &page[at..at + 4];
+        assert!(page[0] > 2.0, "the flat page is HDR: {page:?}");
+        for linear in [true, false] {
+            let scene = hdr_page(&renderer, 1, flat, Some(pass_through(linear, 8.)))?;
+            let shown = render_hdr_scene(&mut renderer, &scene)?;
+            for channel in 0..4 {
+                assert!(
+                    (shown[at + channel] - page[channel]).abs() <= page[channel] * 2e-3,
+                    "linear {linear}: blurred {:?}, the flat page {page:?}",
+                    &shown[at..at + 4]
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[::core::prelude::v1::test]
+    #[ignore = "requires a native D3D12 hardware adapter; run explicitly for renderer qualification"]
+    fn native_linear_backdrop_blurs_light_and_passes_sdr_through_unchanged() -> Result<()> {
+        install_pass_linear()?;
+        let side = PASS_SIDE as f32;
+        let content_mask = mask(side, side);
+        let scene = |effect: Option<EffectQuad>| {
+            let mut scene = Scene::default();
+            scene.insert_primitive(quad(
+                bounds(0., 0., side, side),
+                rgb(0x000000),
+                content_mask,
+            ));
+            scene.insert_primitive(quad(
+                bounds(side / 2., 0., side / 2., side),
+                rgb(0xffffff),
+                content_mask,
+            ));
+            scene.insert_primitive(quad(bounds(4., 4., 6., 6.), rgba(0x3a7fd480), content_mask));
+            if let Some(effect) = effect {
+                scene.insert_primitive(effect);
+            }
+            scene.finish();
+            scene
+        };
+        let transparent = WindowBackgroundAppearance::Transparent;
+        let mut renderer = offscreen(PASS_SIDE, PASS_SIDE)?;
+        let page = renderer.render_to_image(&scene(None), transparent)?;
+        for linear in [true, false] {
+            let image =
+                renderer.render_to_image(&scene(Some(pass_through(linear, 0.))), transparent)?;
+            assert!(
+                image == page,
+                "linear {linear}: an SDR pass-through is exact"
+            );
+        }
+        // Across the edge between black and white, light averages to half of
+        // white, sRGB code 188; the codes themselves average to 128.
+        let edge = |linear| -> Result<u32> {
+            let mut renderer = offscreen(PASS_SIDE, PASS_SIDE)?;
+            let image =
+                renderer.render_to_image(&scene(Some(pass_through(linear, 12.))), transparent)?;
+            let y = PASS_SIDE / 2 + 8;
+            let code = |x| u32::from(image.get_pixel(x, y).0[0]);
+            Ok((code(PASS_SIDE / 2 - 1) + code(PASS_SIDE / 2)) / 2)
+        };
+        let (light, codes) = (edge(true)?, edge(false)?);
+        assert!(
+            (176..=200).contains(&light) && (116..=140).contains(&codes),
+            "the edge of a blurred black and white page: {light} in linear light, {codes} in codes"
+        );
         Ok(())
     }
     #[::core::prelude::v1::test]

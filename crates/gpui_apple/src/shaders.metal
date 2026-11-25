@@ -2034,9 +2034,12 @@ float2 strip_unit_vertex(uint vertex_id) {
 }
 
 // Keeps rgb <= a, so a premultiplied target never holds an out-of-gamut pixel.
-float4 clamp_premultiplied(float4 color) {
+// vue-native fork: a half-float (EDR) target holds light above SDR white
+// there, so `extended` keeps it only finite and non-negative.
+float4 clamp_premultiplied(float4 color, bool extended) {
   float alpha = saturate(color.a);
-  return float4(clamp(color.rgb, float3(0.), float3(alpha)), alpha);
+  float bound = extended ? 65504. : alpha;
+  return float4(clamp(color.rgb, float3(0.), float3(bound)), alpha);
 }
 
 // The rect cut to its content mask's rectangle. Nothing here is transformed,
@@ -2073,9 +2076,8 @@ vertex BackdropPassVertexOutput backdrop_pass_vertex(uint vertex_id [[vertex_id]
       unit_vertex};
 }
 
-fragment float4 blur_downsample_fragment(
-    BackdropPassVertexOutput input [[stage_in]],
-    texture2d<float> source [[texture(BackdropTextureIndex_Processed)]]) {
+float4 blur_downsample(BackdropPassVertexOutput input, texture2d<float> source,
+                       bool extended) {
   float2 texel = 1. / float2(source.get_width(), source.get_height());
   float2 uv = input.texture_position;
   float4 color = source.sample(backdrop_clamp_sampler, uv) * 0.5;
@@ -2083,12 +2085,11 @@ fragment float4 blur_downsample_fragment(
   color += source.sample(backdrop_clamp_sampler, uv + texel * float2(1., -1.)) * 0.125;
   color += source.sample(backdrop_clamp_sampler, uv + texel * float2(-1., 1.)) * 0.125;
   color += source.sample(backdrop_clamp_sampler, uv + texel * float2(1., 1.)) * 0.125;
-  return clamp_premultiplied(color);
+  return clamp_premultiplied(color, extended);
 }
 
-fragment float4 blur_upsample_fragment(
-    BackdropPassVertexOutput input [[stage_in]],
-    texture2d<float> source [[texture(BackdropTextureIndex_Processed)]]) {
+float4 blur_upsample(BackdropPassVertexOutput input, texture2d<float> source,
+                     bool extended) {
   float2 texel = 1. / float2(source.get_width(), source.get_height());
   float2 uv = input.texture_position;
   float4 color = float4(0.);
@@ -2100,7 +2101,40 @@ fragment float4 blur_upsample_fragment(
   color += source.sample(backdrop_clamp_sampler, uv + texel * float2(1., -1.)) * 0.125;
   color += source.sample(backdrop_clamp_sampler, uv + texel * float2(-1., 1.)) * 0.125;
   color += source.sample(backdrop_clamp_sampler, uv + texel * float2(1., 1.)) * 0.125;
-  return clamp_premultiplied(color);
+  return clamp_premultiplied(color, extended);
+}
+
+#define BACKDROP_PASS(name, body, extended)                                      \
+  fragment float4 name(                                                        \
+      BackdropPassVertexOutput input [[stage_in]],                             \
+      texture2d<float> source [[texture(BackdropTextureIndex_Processed)]]) {   \
+    return body(input, source, extended);                                      \
+  }
+BACKDROP_PASS(blur_downsample_fragment, blur_downsample, false)
+BACKDROP_PASS(blur_downsample_extended_fragment, blur_downsample, true)
+BACKDROP_PASS(blur_upsample_fragment, blur_upsample, false)
+BACKDROP_PASS(blur_upsample_extended_fragment, blur_upsample, true)
+
+float3 srgb_decode_signed(float3 encoded) {
+  float3 m = abs(encoded);
+  float3 curve = exp2(2.4 * log2(max((m + 0.055) / 1.055, float3(1e-30))));
+  return sign(encoded) * select(m / 12.92, curve, m > 0.04045);
+}
+
+// vue-native fork: the snapshot as linear light, into a half-float copy of the
+// same size that the pyramid of a `BackdropEncoding::Linear` request is built
+// from. Keep in sync with `sk_frame_to_linear` in sk.slang.
+fragment float4 backdrop_linear_fragment(
+    BackdropPassVertexOutput input [[stage_in]],
+    texture2d<float> source [[texture(BackdropTextureIndex_Processed)]]) {
+  float4 frame = source.read(uint2(input.position.xy));
+  float a = saturate(frame.a);
+  float safe = a > 0. ? a : 1.;
+  float3 low = srgb_decode_signed(frame.rgb);
+  float knee = srgb_decode_signed(float3(a)).x;
+  float3 high = knee + (srgb_decode_signed(frame.rgb / safe) - 1.) * a;
+  float3 light = a > 0. ? select(low, high, frame.rgb > a) : low;
+  return float4(light, frame.a);
 }
 
 fragment float4 frame_copy_fragment(
@@ -2128,21 +2162,19 @@ vertex BlurRectVertexOutput blur_rect_vertex(
 }
 
 // `above` arrives with straight alpha, `below` is already premultiplied.
-float4 over_straight_on_premultiplied(float4 below, float4 above) {
+float4 over_straight_on_premultiplied(float4 below, float4 above, bool extended) {
   float4 premultiplied = float4(above.rgb * above.a, above.a);
-  return clamp_premultiplied(premultiplied + below * (1. - above.a));
+  return clamp_premultiplied(premultiplied + below * (1. - above.a), extended);
 }
 
 // Drawn with blending disabled: outside the rounded rect the page alone
 // (the snapshot without `<sk-layer>` pictures) is written back, which keeps
 // the antialiased edge correct.
-fragment float4 blur_rect_fragment(
-    BlurRectVertexOutput input [[stage_in]],
-    constant BackdropBlurRect *blur_rects [[buffer(BackdropInputIndex_Instances)]],
-    constant Size_DevicePixels *viewport_size
-    [[buffer(BackdropInputIndex_ViewportSize)]],
-    texture2d<float> processed [[texture(BackdropTextureIndex_Processed)]],
-    texture2d<float> original [[texture(BackdropTextureIndex_Page)]]) {
+float4 blur_rect_color(
+    BlurRectVertexOutput input,
+    constant BackdropBlurRect *blur_rects,
+    constant Size_DevicePixels *viewport_size, texture2d<float> processed,
+    texture2d<float> original, bool extended) {
   BackdropBlurRect blur_rect = blur_rects[input.blur_rect_id];
   float2 position = input.position.xy;
   float2 texture_position =
@@ -2158,12 +2190,27 @@ fragment float4 blur_rect_fragment(
       processed.sample(backdrop_clamp_sampler, texture_position, level(0.));
   float4 tint = hsla_to_rgba(blur_rect.tint);
   float4 tinted =
-      tint.a > 0. ? over_straight_on_premultiplied(blurred, tint) : blurred;
+      tint.a > 0. ? over_straight_on_premultiplied(blurred, tint, extended) : blurred;
   float coverage = shape_alpha * saturate(blur_rect.opacity) *
                    content_mask_coverage(position, blur_rect.content_mask.bounds,
                                          blur_rect.content_mask.corner_radii, blur_rect.content_mask.corner_shapes);
-  return clamp_premultiplied(mix(untouched, tinted, float4(coverage)));
+  return clamp_premultiplied(mix(untouched, tinted, float4(coverage)), extended);
 }
+
+#define BLUR_RECT_FRAGMENT(name, extended)                                     \
+  fragment float4 name(                                                      \
+      BlurRectVertexOutput input [[stage_in]],                               \
+      constant BackdropBlurRect *blur_rects                                  \
+      [[buffer(BackdropInputIndex_Instances)]],                              \
+      constant Size_DevicePixels *viewport_size                              \
+      [[buffer(BackdropInputIndex_ViewportSize)]],                           \
+      texture2d<float> processed [[texture(BackdropTextureIndex_Processed)]], \
+      texture2d<float> original [[texture(BackdropTextureIndex_Page)]]) {    \
+    return blur_rect_color(input, blur_rects, viewport_size, processed,      \
+                           original, extended);                              \
+  }
+BLUR_RECT_FRAGMENT(blur_rect_fragment, false)
+BLUR_RECT_FRAGMENT(blur_rect_extended_fragment, true)
 
 // vue-native fork: an `<sk-layer>` picture (`VnUnderlay`), drawn
 // destination-over into a copy of the snapshot.

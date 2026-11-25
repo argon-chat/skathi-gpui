@@ -8,7 +8,7 @@ use super::backdrop::{
 use super::vn_layer::MAX_DEPTH;
 use super::{GroupDraw, WgpuRendererCore, continue_pass};
 use anyhow::{Context as _, Result};
-use gpui::{EFFECT_FLAG_HISTORY, EffectQuad, Scene, VnEffectLayer, effect_id};
+use gpui::{BackdropRequest, EFFECT_FLAG_HISTORY, EffectQuad, Scene, VnEffectLayer, effect_id};
 
 /// One frame's effect quads as uploaded: the scene's own, then one per
 /// `Scene::vn_effect_draws` entry, then the history steps.
@@ -209,7 +209,7 @@ impl WgpuRendererCore {
                     draw,
                     encoder,
                     frame,
-                    quad.effective_kernel_levels() as usize,
+                    BackdropRequest::layer(&quad),
                     layer,
                     images,
                 )?;
@@ -304,7 +304,7 @@ mod tests {
         gpui::reload_app_effects(
             gpui::AppEffects::new(
                 "test",
-                r#"{"schema": 13, "effects": [
+                r#"{"schema": 14, "effects": [
                     {"name": "swap", "backdrop": false, "wgsl": "fx.wgsl"},
                     {"name": "count", "backdrop": false, "history": true, "wgsl": "fx.wgsl"}
                 ]}"#,

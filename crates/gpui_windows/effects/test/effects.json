@@ -1,0 +1,121 @@
+{
+  "schema": 14,
+  "slang": "2026.12",
+  "compiler": "redslangc 0.1.1",
+  "kind": "user",
+  "preludeSha256": "03e1097001f20f424c8d2c5c1d56fbad7fa91c9378c02f8c380325fddaec236f",
+  "effects": [
+    {
+      "id": 0,
+      "name": "pass-linear",
+      "struct": "PassLinear",
+      "doc": null,
+      "backdrop": true,
+      "content": false,
+      "history": false,
+      "backdropLinear": true,
+      "hlsl": "pass_linear.hlsl",
+      "wgsl": "pass_linear.wgsl",
+      "metal": "pass_linear.metal",
+      "source": "shaders/pass_linear.slang",
+      "sourceSha256": "489e5c10e22d2ce44d9b7259fef753fa2a9c57eaa48f7cec5f43c4c1ac685818",
+      "generatedSha256": {
+        "hlsl": "941dcd937350e53c76c94bd2f5c4dbe0517f8d96328d22287fa2fcb82840a673",
+        "wgsl": "4b4df063f30880fc789660b8f9d7ea80c6f1bf3dd15189d88c9312e3cfbd0db2",
+        "metal": "0894cc61e203fc5746b55d75fec20bc26bd8ba5447abc0fd309cce77a17ea298"
+      },
+      "signature": "pass-linear(<length:radius>)",
+      "backdropRadiusParam": 0,
+      "backdropReachParam": null,
+      "bleedParam": null,
+      "animatedParam": null,
+      "pointerParam": null,
+      "pointerTimesParam": null,
+      "qualityParam": null,
+      "clockSlots": [],
+      "clockWindow": null,
+      "params": [
+        {
+          "name": "radius",
+          "kind": "length",
+          "slot": 0,
+          "required": true,
+          "default": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "range": null
+        }
+      ],
+      "bindings": [
+        {
+          "name": "sk_effect_quads",
+          "kind": "shaderResource",
+          "index": 1
+        },
+        {
+          "name": "sk_backdrop_input",
+          "kind": "shaderResource",
+          "index": 0
+        },
+        {
+          "name": "sk_backdrop_original",
+          "kind": "shaderResource",
+          "index": 2
+        },
+        {
+          "name": "sk_backdrop_page",
+          "kind": "shaderResource",
+          "index": 13
+        },
+        {
+          "name": "sk_clamp_sampler",
+          "kind": "samplerState",
+          "index": 1
+        },
+        {
+          "name": "sk_content",
+          "kind": "shaderResource",
+          "index": 7
+        },
+        {
+          "name": "sk_history",
+          "kind": "shaderResource",
+          "index": 8
+        },
+        {
+          "name": "sk_texture0",
+          "kind": "shaderResource",
+          "index": 3
+        },
+        {
+          "name": "sk_texture1",
+          "kind": "shaderResource",
+          "index": 4
+        },
+        {
+          "name": "sk_texture2",
+          "kind": "shaderResource",
+          "index": 5
+        },
+        {
+          "name": "sk_texture3",
+          "kind": "shaderResource",
+          "index": 6
+        },
+        {
+          "name": "sk_repeat_sampler",
+          "kind": "samplerState",
+          "index": 2
+        },
+        {
+          "name": "GlobalParams",
+          "kind": "constantBuffer",
+          "index": 0
+        }
+      ]
+    }
+  ]
+}

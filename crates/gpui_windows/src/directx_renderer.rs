@@ -3642,6 +3642,9 @@ pub(crate) mod shader_resources {
         /// vue-native fork: an underlay source drawn under a backdrop snapshot
         /// (`vn_underlay_*`); the D3D12 renderer's only, D3D11 composites none.
         VnUnderlay,
+        /// vue-native fork: a backdrop snapshot as linear light (`backdrop_linear_*`),
+        /// for `gpui::BackdropEncoding::Linear`; the D3D12 renderer's only.
+        BackdropLinear,
         /// A `--shading` effect. Its two halves come from two different files:
         /// the shared engine vertex stage from `src/effects.hlsl`, the
         /// per-effect fragment stage from the checked-in slangc output under
@@ -3907,6 +3910,10 @@ pub(crate) mod shader_resources {
                     ShaderTarget::Vertex => VN_UNDERLAY_VERTEX_BYTES,
                     ShaderTarget::Fragment => VN_UNDERLAY_FRAGMENT_BYTES,
                 },
+                ShaderModule::BackdropLinear => match target {
+                    ShaderTarget::Vertex => BACKDROP_LINEAR_VERTEX_BYTES,
+                    ShaderTarget::Fragment => BACKDROP_LINEAR_FRAGMENT_BYTES,
+                },
                 // One vertex shader serves every effect; only the fragment
                 // half differs.
                 ShaderModule::Effect(effect) => match target {
@@ -3995,6 +4002,7 @@ pub(crate) mod shader_resources {
                 ShaderModule::PolychromeSprite => "polychrome_sprite",
                 ShaderModule::VnLayer => "vn_layer",
                 ShaderModule::VnUnderlay => "vn_underlay",
+                ShaderModule::BackdropLinear => "backdrop_linear",
             }
         }
     }
@@ -4107,7 +4115,7 @@ pub(crate) mod effect_layer_tests {
         reload_app_effects(
             AppEffects::new(
                 "test",
-                r#"{"schema": 13, "effects": [
+                r#"{"schema": 14, "effects": [
                     {"name": "swap", "backdrop": false, "hlsl": "fx.hlsl"},
                     {"name": "count", "backdrop": false, "history": true, "hlsl": "fx.hlsl"}
                 ]}"#,

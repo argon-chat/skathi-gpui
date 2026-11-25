@@ -252,7 +252,7 @@ impl MetalRenderer {
                     draw,
                     command_buffer,
                     frame,
-                    quad.effective_kernel_levels() as usize,
+                    gpui::BackdropRequest::layer(&quad),
                 )?)
             } else {
                 None
@@ -344,7 +344,7 @@ mod tests {
         gpui::reload_app_effects(
             gpui::AppEffects::new(
                 "test",
-                r#"{"schema": 13, "effects": [
+                r#"{"schema": 14, "effects": [
                     {"name": "swap", "backdrop": false, "metal": "fx.metal"},
                     {"name": "count", "backdrop": false, "history": true, "metal": "fx.metal"}
                 ]}"#,

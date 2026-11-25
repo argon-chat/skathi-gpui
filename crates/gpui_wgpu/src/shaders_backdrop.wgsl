@@ -40,16 +40,19 @@ fn load_blur_rect(instance_id: u32) -> BlurRect {
     );
 }
 
-// Keeps rgb <= a, so a premultiplied target never holds an out-of-gamut pixel.
-fn clamp_premultiplied(color: vec4<f32>) -> vec4<f32> {
+// Keeps rgb <= a, so a premultiplied target never holds an out-of-gamut pixel;
+// a half-float (HDR) target holds light above SDR white there, so `extended`
+// keeps it only finite and non-negative.
+fn clamp_premultiplied(color: vec4<f32>, extended: bool) -> vec4<f32> {
     let alpha = saturate(color.a);
-    return vec4<f32>(clamp(color.rgb, vec3<f32>(0.0), vec3<f32>(alpha)), alpha);
+    let bound = select(alpha, 65504.0, extended);
+    return vec4<f32>(clamp(color.rgb, vec3<f32>(0.0), vec3<f32>(bound)), alpha);
 }
 
 // `above` arrives with straight alpha, `below` is already premultiplied.
-fn over_straight_on_premultiplied(below: vec4<f32>, above: vec4<f32>) -> vec4<f32> {
+fn over_straight_on_premultiplied(below: vec4<f32>, above: vec4<f32>, extended: bool) -> vec4<f32> {
     let premultiplied = vec4<f32>(above.rgb * above.a, above.a);
-    return clamp_premultiplied(premultiplied + below * (1.0 - above.a));
+    return clamp_premultiplied(premultiplied + below * (1.0 - above.a), extended);
 }
 
 // The rect cut to its content mask's rectangle. Nothing here is transformed,
@@ -78,8 +81,7 @@ fn vs_blur_rect(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) 
 
 // Drawn with blending disabled: outside the rounded rect the page alone is
 // written back, which keeps the antialiased edge correct.
-@fragment
-fn fs_blur_rect(input: BlurRectVarying) -> @location(0) vec4<f32> {
+fn composite_blur_rect(input: BlurRectVarying, extended: bool) -> vec4<f32> {
     let blur_rect = load_blur_rect(input.blur_rect_id);
     let position = input.position.xy;
     let texture_position = position / globals.viewport_size;
@@ -90,10 +92,20 @@ fn fs_blur_rect(input: BlurRectVarying) -> @location(0) vec4<f32> {
     let original = textureSampleLevel(t_backdrop_page, s_sprite, texture_position, 0.0);
     let blurred = textureSampleLevel(t_sprite, s_sprite, texture_position, 0.0);
     let tint = hsla_to_rgba(blur_rect.tint);
-    let tinted = select(blurred, over_straight_on_premultiplied(blurred, tint), tint.a > 0.0);
+    let tinted = select(blurred, over_straight_on_premultiplied(blurred, tint, extended), tint.a > 0.0);
     let coverage = shape_alpha * saturate(blur_rect.opacity) *
         content_mask_coverage(position, blur_rect.content_mask, blur_rect.content_mask_radii, blur_rect.content_mask_shapes);
-    return clamp_premultiplied(mix(original, tinted, vec4<f32>(coverage)));
+    return clamp_premultiplied(mix(original, tinted, vec4<f32>(coverage)), extended);
+}
+
+@fragment
+fn fs_blur_rect(input: BlurRectVarying) -> @location(0) vec4<f32> {
+    return composite_blur_rect(input, false);
+}
+
+@fragment
+fn fs_blur_rect_extended(input: BlurRectVarying) -> @location(0) vec4<f32> {
+    return composite_blur_rect(input, true);
 }
 
 // vue-native fork: an `<sk-layer>` picture (`gpui::VnUnderlay`), drawn

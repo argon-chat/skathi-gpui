@@ -42,7 +42,9 @@ struct EffectGlobals {
     grayscale_enhanced_contrast: f32,
     subpixel_enhanced_contrast: f32,
     is_bgr: u32,
-    pad: [u32; 3],
+    /// Nonzero for a half-float (HDR) frame: `sk_extended_range`.
+    extended_range: u32,
+    pad: [u32; 2],
 }
 
 #[derive(Default)]
@@ -101,6 +103,11 @@ pub(super) struct WgpuBackdrop {
     blur_downsample: wgpu::RenderPipeline,
     blur_upsample: wgpu::RenderPipeline,
     blur_rect: wgpu::RenderPipeline,
+    /// vue-native fork: `BackdropEncoding::Linear`: the snapshot into linear
+    /// light, and the pyramid built from it, all in `LINEAR_FORMAT`.
+    backdrop_linear: wgpu::RenderPipeline,
+    linear_downsample: wgpu::RenderPipeline,
+    linear_upsample: wgpu::RenderPipeline,
     frame_copy: wgpu::RenderPipeline,
     /// vue-native fork: `<sk-layer>` pictures, destination-over.
     vn_underlay: wgpu::RenderPipeline,
@@ -167,7 +174,29 @@ struct BackdropTargets {
     frame: Option<TargetTexture>,
     /// vue-native fork: the snapshot with `<sk-layer>` pictures under it; only while a frame has one.
     underlaid: Option<TargetTexture>,
+    /// vue-native fork: `BackdropEncoding::Linear` in half float: the snapshot's
+    /// linear copy at full size, then its pyramid.
+    linear: Vec<TargetTexture>,
 }
+
+impl BackdropTargets {
+    fn ensure_linear(&mut self, device: &wgpu::Device, kernel_levels: usize) {
+        while self.linear.len() <= kernel_levels {
+            let divisor = 2u32.saturating_pow(self.linear.len() as u32);
+            self.linear.push(create_target_texture(
+                device,
+                "backdrop_linear",
+                LINEAR_FORMAT,
+                (self.width / divisor).max(1),
+                (self.height / divisor).max(1),
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            ));
+        }
+    }
+}
+
+/// `BackdropEncoding::Linear`'s copy and pyramid.
+const LINEAR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// Where a frame renders. A backdrop needs to copy what has been drawn so far,
 /// and a surface that is not a copy source (GL) gets an intermediate the frame
@@ -238,11 +267,19 @@ impl WgpuRendererCore {
                 .chain(effect_quads().map(EffectQuad::effective_kernel_levels))
                 .max()
                 .unwrap_or(0) as usize;
-            state.trim_targets(if backdrop && snapshots {
-                kernel_levels.min(BLUR_TEXTURE_LEVELS) + 1
-            } else {
-                0
-            });
+            let linear_levels = effect_quads()
+                .filter(|quad| BackdropRequest::layer(quad).linear_blur())
+                .map(EffectQuad::effective_kernel_levels)
+                .max()
+                .map_or(0, |levels| levels as usize + 1);
+            state.trim_targets(
+                if backdrop && snapshots {
+                    kernel_levels.min(BLUR_TEXTURE_LEVELS) + 1
+                } else {
+                    0
+                },
+                if backdrop { linear_levels } else { 0 },
+            );
             if !scene.vn_underlays.iter().any(gpui::VnUnderlay::has_picture)
                 && let Some(targets) = &mut state.targets
             {
@@ -259,7 +296,8 @@ impl WgpuRendererCore {
             grayscale_enhanced_contrast: self.rendering_params.grayscale_enhanced_contrast,
             subpixel_enhanced_contrast: self.rendering_params.subpixel_enhanced_contrast,
             is_bgr: self.is_bgr as u32,
-            pad: [0; 3],
+            extended_range: u32::from(self.target_format == LINEAR_FORMAT),
+            pad: [0; 2],
         };
         let color_format = self.atlas.color_texture_format();
         let resources = &mut self.resources;
@@ -566,13 +604,17 @@ impl WgpuRendererCore {
             anyhow::bail!("backdrop pipelines missing");
         };
         let (width, height) = (frame.texture.width(), frame.texture.height());
+        let linear = request.linear_blur();
         let targets = state.targets(
             &resources.device,
             self.target_format,
             width,
             height,
-            kernel_levels,
+            if linear { 0 } else { kernel_levels },
         );
+        if linear {
+            targets.ensure_linear(&resources.device, kernel_levels);
+        }
         if underlays.is_some() && targets.underlaid.is_none() {
             targets.underlaid = Some(create_target_texture(
                 &resources.device,
@@ -704,15 +746,31 @@ impl WgpuRendererCore {
             pass.draw(0..4, 0..1);
         };
 
-        let blurred = if kernel_levels == 0 {
-            &raw.view
+        let (source, levels, downsample, upsample) = if linear {
+            let copy = &targets.linear[0];
+            blur_pass(encoder, &state.backdrop_linear, &raw.view, copy, 0);
+            (
+                copy,
+                &targets.linear[1..=kernel_levels],
+                &state.linear_downsample,
+                &state.linear_upsample,
+            )
         } else {
-            let levels = &targets.levels[..kernel_levels];
-            blur_pass(encoder, &state.blur_downsample, &raw.view, &levels[0], 1);
+            (
+                raw,
+                &targets.levels[..kernel_levels],
+                &state.blur_downsample,
+                &state.blur_upsample,
+            )
+        };
+        let blurred = if kernel_levels == 0 {
+            &source.view
+        } else {
+            blur_pass(encoder, downsample, &source.view, &levels[0], 1);
             for level in 1..kernel_levels {
                 blur_pass(
                     encoder,
-                    &state.blur_downsample,
+                    downsample,
                     &levels[level - 1].view,
                     &levels[level],
                     level + 1,
@@ -721,7 +779,7 @@ impl WgpuRendererCore {
             for level in (1..kernel_levels).rev() {
                 blur_pass(
                     encoder,
-                    &state.blur_upsample,
+                    upsample,
                     &levels[level].view,
                     &levels[level - 1],
                     level,
@@ -744,15 +802,10 @@ impl WgpuRendererCore {
         draw: &GroupDraw<'_>,
         encoder: &mut wgpu::CommandEncoder,
         frame: &FrameTarget,
-        kernel_levels: usize,
+        request: BackdropRequest,
         layer: [Option<&wgpu::TextureView>; 2],
         images: Option<usize>,
     ) -> Result<wgpu::BindGroup> {
-        let request = BackdropRequest {
-            kernel_levels,
-            samples: None,
-            underlays: false,
-        };
         self.snapshot_backdrop(draw, encoder, frame, request, layer, images)
     }
 
@@ -1012,47 +1065,74 @@ impl WgpuBackdrop {
             &[&layouts.globals, &layouts.instances, &layouts.texture],
         );
 
-        let (blur_downsample, blur_upsample, blur_rect, frame_copy, vn_underlay, effect_vertex) =
-            capture_validation(device, || {
-                let blur = shader_module(device, "backdrop_blur_shaders", BLUR_SHADERS);
-                let composite = shader_module(device, "backdrop_shaders", BACKDROP_SHADERS);
-                let effect_vertex = shader_module(device, "effect_vertex", EFFECT_VERTEX_SHADER);
-                let pass = |label, fragment| {
-                    render_pipeline(
-                        device,
-                        label,
-                        &pass_layout,
-                        (&blur, "vs_blur_pass"),
-                        (&blur, fragment),
-                        format,
-                        None,
-                    )
-                };
-                (
-                    pass("backdrop_blur_downsample", "fs_blur_downsample"),
-                    pass("backdrop_blur_upsample", "fs_blur_upsample"),
-                    render_pipeline(
-                        device,
-                        "backdrop_blur_rect",
-                        &blur_rect_layout,
-                        (&composite, "vs_blur_rect"),
-                        (&composite, "fs_blur_rect"),
-                        format,
-                        None,
-                    ),
-                    pass("backdrop_frame_copy", "fs_frame_copy"),
-                    render_pipeline(
-                        device,
-                        "vn_underlay",
-                        &underlay_layout,
-                        (&composite, "vs_vn_underlay"),
-                        (&composite, "fs_vn_underlay"),
-                        format,
-                        Some(DESTINATION_OVER),
-                    ),
-                    effect_vertex,
+        // A half-float frame is an HDR window's: its blur keeps light above
+        // SDR white, as `sk_finish` does with `sk_extended_range`.
+        let extended = format == LINEAR_FORMAT;
+        let variant = |name: &'static str, extended_name: &'static str| {
+            if extended { extended_name } else { name }
+        };
+        let (
+            blur_downsample,
+            blur_upsample,
+            blur_rect,
+            frame_copy,
+            vn_underlay,
+            effect_vertex,
+            linear_pipelines,
+        ) = capture_validation(device, || {
+            let blur = shader_module(device, "backdrop_blur_shaders", BLUR_SHADERS);
+            let composite = shader_module(device, "backdrop_shaders", BACKDROP_SHADERS);
+            let effect_vertex = shader_module(device, "effect_vertex", EFFECT_VERTEX_SHADER);
+            let pass_in = |label, fragment, format| {
+                render_pipeline(
+                    device,
+                    label,
+                    &pass_layout,
+                    (&blur, "vs_blur_pass"),
+                    (&blur, fragment),
+                    format,
+                    None,
                 )
-            })?;
+            };
+            let pass = |label, fragment| pass_in(label, fragment, format);
+            (
+                pass(
+                    "backdrop_blur_downsample",
+                    variant("fs_blur_downsample", "fs_blur_downsample_extended"),
+                ),
+                pass(
+                    "backdrop_blur_upsample",
+                    variant("fs_blur_upsample", "fs_blur_upsample_extended"),
+                ),
+                render_pipeline(
+                    device,
+                    "backdrop_blur_rect",
+                    &blur_rect_layout,
+                    (&composite, "vs_blur_rect"),
+                    (&composite, variant("fs_blur_rect", "fs_blur_rect_extended")),
+                    format,
+                    None,
+                ),
+                pass("backdrop_frame_copy", "fs_frame_copy"),
+                render_pipeline(
+                    device,
+                    "vn_underlay",
+                    &underlay_layout,
+                    (&composite, "vs_vn_underlay"),
+                    (&composite, "fs_vn_underlay"),
+                    format,
+                    Some(DESTINATION_OVER),
+                ),
+                effect_vertex,
+                [
+                    ("backdrop_linear", "fs_backdrop_linear"),
+                    ("backdrop_linear_downsample", "fs_blur_downsample_extended"),
+                    ("backdrop_linear_upsample", "fs_blur_upsample_extended"),
+                ]
+                .map(|(label, fragment)| pass_in(label, fragment, LINEAR_FORMAT)),
+            )
+        })?;
+        let [backdrop_linear, linear_downsample, linear_upsample] = linear_pipelines;
 
         let effects =
             build_builtin_effect_pipelines(device, &effect_layout, &effect_vertex, format);
@@ -1097,6 +1177,9 @@ impl WgpuBackdrop {
             blur_downsample,
             blur_upsample,
             blur_rect,
+            backdrop_linear,
+            linear_downsample,
+            linear_upsample,
             frame_copy,
             vn_underlay,
             effects,
@@ -1215,13 +1298,13 @@ impl WgpuBackdrop {
         self.app_effects.get(index as usize)?.history.as_ref()
     }
 
-    /// `needed` counts the snapshot as one more level below the pyramid.
-    fn trim_targets(&mut self, needed: usize) {
-        let held = self
-            .targets
-            .as_ref()
-            .map_or(0, |targets| targets.levels.len() + 1);
-        if needed >= held {
+    /// `needed` counts the snapshot as one more level below the pyramid,
+    /// `linear` the linear copy below the linear pyramid.
+    fn trim_targets(&mut self, needed: usize, linear: usize) {
+        let held = self.targets.as_ref().map_or((0, 0), |targets| {
+            (targets.levels.len() + 1, targets.linear.len())
+        });
+        if needed >= held.0 && linear >= held.1 {
             self.idle_frames = 0;
             return;
         }
@@ -1230,9 +1313,12 @@ impl WgpuBackdrop {
             return;
         }
         self.idle_frames = 0;
-        match (needed, &mut self.targets) {
+        match (needed.max(linear), &mut self.targets) {
             (0, targets) => *targets = None,
-            (needed, Some(targets)) => targets.levels.truncate(needed - 1),
+            (_, Some(targets)) => {
+                targets.levels.truncate(needed.saturating_sub(1));
+                targets.linear.truncate(linear);
+            }
             (_, None) => {}
         }
     }
@@ -1282,6 +1368,7 @@ impl WgpuBackdrop {
             levels: Vec::new(),
             frame: None,
             underlaid: None,
+            linear: Vec::new(),
         });
         while targets.levels.len() < kernel_levels {
             let divisor = 2u32.saturating_pow(targets.levels.len() as u32 + 1);
@@ -1748,9 +1835,9 @@ pub(super) mod tests {
             offset_of!(EffectGlobals, grayscale_enhanced_contrast),
             offset_of!(EffectGlobals, subpixel_enhanced_contrast),
             offset_of!(EffectGlobals, is_bgr),
+            offset_of!(EffectGlobals, extended_range),
             pad,
             pad + 4,
-            pad + 8,
         ]
         .into_iter()
         .map(|offset| offset as u32)
@@ -1811,7 +1898,16 @@ pub(super) mod tests {
             bindings.sort_unstable();
             assert_eq!(
                 bindings,
-                [(0, 0), (1, 0), (2, 0), (2, 1), (2, 7), (2, 8), (2, 10)],
+                [
+                    (0, 0),
+                    (1, 0),
+                    (2, 0),
+                    (2, 1),
+                    (2, 2),
+                    (2, 7),
+                    (2, 8),
+                    (2, 10)
+                ],
                 "{name}"
             );
             assert!(
@@ -2698,7 +2794,7 @@ pub(super) mod tests {
             gpui::reload_app_effects(
                 gpui::AppEffects::new(
                     "test",
-                    r#"{"schema": 13, "effects": [
+                    r#"{"schema": 14, "effects": [
                         {"name": "tint", "backdrop": false, "wgsl": "tint.wgsl"}
                     ]}"#,
                     [("tint.wgsl".to_string(), wgsl.to_string())],
@@ -2972,6 +3068,178 @@ pub(super) mod tests {
                     effect.name
                 );
                 assert_eq!(pixel(&image, 2, 2), [0, 0, 0, 255], "{}", effect.name);
+            }
+            Ok(())
+        }
+
+        /// `[SkBackdropLinear]` passing its backdrop through (`bun run shaders`).
+        fn install_pass_linear() -> Result<()> {
+            gpui::reload_app_effects(
+                gpui::AppEffects::new(
+                    "test",
+                    r#"{"schema": 14, "effects": [
+                        {"name": "pass-linear", "backdrop": true, "wgsl": "pass_linear.wgsl"}
+                    ]}"#,
+                    [(
+                        "pass_linear.wgsl".to_string(),
+                        include_str!("../../effects/test/pass_linear.wgsl").to_string(),
+                    )],
+                )
+                .map_err(anyhow::Error::msg)?,
+            );
+            Ok(())
+        }
+
+        /// `pass-linear` or `frost(0)` over the frame but a two-pixel border.
+        fn pass_through(linear: bool, radius: f32, side: f32) -> EffectQuad {
+            EffectQuad {
+                effect_id: if linear {
+                    effect_id::COUNT
+                } else {
+                    effect_id::FROST
+                },
+                bounds: bounds(2., 2., side - 4., side - 4.),
+                content_mask: mask(side, side),
+                params: if linear {
+                    EffectQuad::params_from(&[radius])
+                } else {
+                    EffectQuad::params_from(&[0., radius, 0., 0., 1., 1., 1., 0.])
+                },
+                opacity: 1.,
+                backdrop_blur_radius: ScaledPixels(radius),
+                scale: 1.,
+                flags: EFFECT_FLAG_NEEDS_BACKDROP
+                    | if linear {
+                        gpui::EFFECT_FLAG_BACKDROP_LINEAR
+                    } else {
+                        0
+                    },
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn a_linear_backdrop_blurs_light_and_an_sdr_pass_through_is_exact() -> Result<()> {
+            let _app_effects = APP_EFFECTS.lock();
+            install_pass_linear()?;
+            let scene = |effect: Option<EffectQuad>| {
+                let mut scene = split_scene();
+                if let Some(effect) = effect {
+                    scene.insert_primitive(effect);
+                }
+                scene.finish();
+                scene
+            };
+            let mut renderer = WgpuHeadlessRenderer::new()?;
+            let page = renderer.render_scene_to_image(&scene(None), frame_size())?;
+            for linear in [true, false] {
+                let image = renderer.render_scene_to_image(
+                    &scene(Some(pass_through(linear, 0., SIDE))),
+                    frame_size(),
+                )?;
+                assert!(
+                    image == page,
+                    "linear {linear}: an SDR pass-through is exact"
+                );
+            }
+            // Across the edge, light averages to half of white, sRGB code 188;
+            // the codes themselves average to 128.
+            let mut edge = |linear| -> Result<u32> {
+                let image = renderer.render_scene_to_image(
+                    &scene(Some(pass_through(linear, 12., SIDE))),
+                    frame_size(),
+                )?;
+                let code = |x| u32::from(pixel(&image, x, 32)[0]);
+                Ok((code(31) + code(32)) / 2)
+            };
+            let (light, codes) = (edge(true)?, edge(false)?);
+            assert!(
+                (176..=200).contains(&light) && (116..=140).contains(&codes),
+                "the edge of a blurred white and black page: {light} in linear light, {codes} in codes"
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn pass_throughs_keep_hdr_light_in_an_hdr_frame() -> Result<()> {
+            use gpui::PlatformAtlas as _;
+            use gpui::hdr_test_scene::{SDR_WHITE, f32_to_half};
+            let _app_effects = APP_EFFECTS.lock();
+            install_pass_linear()?;
+            const SIDE: u32 = 32;
+            let size = size(DevicePixels(SIDE as i32), DevicePixels(SIDE as i32));
+            let mut renderer = WgpuHeadlessRenderer::new()?;
+            let atlas = renderer.core.atlas.clone();
+            let page = |texel: &dyn Fn(u32, u32) -> [f32; 4],
+                        id: usize,
+                        effect: Option<EffectQuad>|
+             -> Result<Scene> {
+                let bytes: Vec<u8> = (0..SIDE * SIDE)
+                    .flat_map(|i| texel(i % SIDE, i / SIDE))
+                    .flat_map(|value| f32_to_half(value).to_le_bytes())
+                    .collect();
+                let key = gpui::AtlasKey::Image(gpui::RenderImageParams {
+                    image_id: gpui::ImageId(0x4d52_1320 + id),
+                    frame_index: 0,
+                });
+                let tile = atlas
+                    .write_hdr_bytes(&key, size, &bytes)?
+                    .context("the HDR page tile was not allocated")?;
+                let mut scene = Scene::default();
+                scene.insert_primitive(gpui::PolychromeSprite {
+                    order: 0,
+                    pad: f32::to_bits(16.0),
+                    tile,
+                    grayscale: false.into(),
+                    opacity: 1.,
+                    bounds: bounds(0., 0., SIDE as f32, SIDE as f32),
+                    content_mask: mask(SIDE as f32, SIDE as f32),
+                    corner_radii: gpui::Corners::default(),
+                    transformation: gpui::TransformationMatrix::unit(),
+                    tint: Hsla::transparent_black(),
+                    corner_shapes: gpui::CornerShapes::default(),
+                });
+                if let Some(effect) = effect {
+                    scene.insert_primitive(effect);
+                }
+                scene.finish();
+                Ok(scene)
+            };
+            let output = gpui::HdrOutput {
+                sdr_white: SDR_WHITE,
+                content_headroom: 16.0,
+            };
+            let ramp = |x: u32, y: u32| {
+                let at = (y * SIDE + x) as f32 / (SIDE * SIDE) as f32;
+                let value = 12.0 * at * at;
+                [value, value * 0.5, (12.0 - value) * 0.25, 1.0]
+            };
+            let (_, expected) = renderer.render_hdr(&page(&ramp, 0, None)?, size, output)?;
+            assert!(expected.iter().any(|pixel| pixel[0] > 4.0 * SDR_WHITE));
+            for linear in [true, false] {
+                let scene = page(&ramp, 0, Some(pass_through(linear, 0., SIDE as f32)))?;
+                let (_, shown) = renderer.render_hdr(&scene, size, output)?;
+                let different = shown.iter().zip(&expected).position(|(a, b)| a != b);
+                assert!(
+                    different.is_none(),
+                    "linear {linear}: pixel {different:?} differs from the page"
+                );
+            }
+            let flat = |_, _| [8.0, 2.0, 0.5, 1.0];
+            let at = (SIDE / 2 * SIDE + SIDE / 2) as usize;
+            let (_, plain) = renderer.render_hdr(&page(&flat, 1, None)?, size, output)?;
+            for linear in [true, false] {
+                let scene = page(&flat, 1, Some(pass_through(linear, 8., SIDE as f32)))?;
+                let (_, shown) = renderer.render_hdr(&scene, size, output)?;
+                for channel in 0..4 {
+                    assert!(
+                        (shown[at][channel] - plain[at][channel]).abs()
+                            <= plain[at][channel] * 2e-3,
+                        "linear {linear}: blurred {:?}, the flat page {:?}",
+                        shown[at],
+                        plain[at]
+                    );
+                }
             }
             Ok(())
         }

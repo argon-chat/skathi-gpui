@@ -6,7 +6,9 @@ cbuffer GlobalParams: register(b0) {
     float grayscale_enhanced_contrast;
     float subpixel_enhanced_contrast;
     uint is_bgr;
-    uint3 global_pad;
+    // vue-native fork: nonzero when the frame is half float (an HDR window).
+    uint extended_range;
+    uint2 global_pad;
 };
 
 cbuffer BatchParams: register(b1) {
@@ -291,10 +293,13 @@ float4 over(float4 below, float4 above) {
 }
 
 // The DirectComposition swap chain is premultiplied; keep rgb <= a so the
-// compositor never sees an out-of-gamut pixel.
+// compositor never sees an out-of-gamut pixel. vue-native fork: a half-float
+// frame goes through the HDR output pass, where rgb above alpha is light above
+// SDR white, so there it is only kept finite and non-negative.
 float4 clamp_premultiplied(float4 color) {
     color.a = saturate(color.a);
-    color.rgb = clamp(color.rgb, 0.0, float3(color.a, color.a, color.a));
+    float bound = extended_range != 0u ? 65504.0 : color.a;
+    color.rgb = clamp(color.rgb, 0.0, float3(bound, bound, bound));
     return color;
 }
 
@@ -1402,6 +1407,30 @@ float4 blur_upsample_fragment(BlurPassVertexOutput input): SV_Target {
     color += t_sprite.Sample(s_clamp, uv + texel * float2(-1.0,  1.0)) * 0.125;
     color += t_sprite.Sample(s_clamp, uv + texel * float2( 1.0,  1.0)) * 0.125;
     return clamp_premultiplied(color);
+}
+
+// vue-native fork: the snapshot as linear light into a half-float copy of the
+// same size, which the pyramid of a `BackdropEncoding::Linear` request is
+// built from. Keep in sync with `sk_frame_to_linear` in sk.slang.
+BlurPassVertexOutput backdrop_linear_vertex(uint vertex_id: SV_VertexID) {
+    return blur_downsample_vertex(vertex_id);
+}
+
+float3 srgb_decode_signed(float3 encoded) {
+    float3 m = abs(encoded);
+    float3 curve = exp2(2.4 * log2(max((m + 0.055) / 1.055, 1e-30)));
+    return sign(encoded) * (m > 0.04045 ? curve : m / 12.92);
+}
+
+float4 backdrop_linear_fragment(BlurPassVertexOutput input): SV_Target {
+    float4 frame = t_sprite.Load(int3(input.position.xy, 0));
+    float a = saturate(frame.a);
+    float safe = a > 0.0 ? a : 1.0;
+    float3 low = srgb_decode_signed(frame.rgb);
+    float knee = srgb_decode_signed(float3(a, a, a)).x;
+    float3 high = knee + (srgb_decode_signed(frame.rgb / safe) - 1.0) * a;
+    float3 light = a > 0.0 ? (frame.rgb > a ? high : low) : low;
+    return float4(light, frame.a);
 }
 
 struct BlurRectVertexOutput {

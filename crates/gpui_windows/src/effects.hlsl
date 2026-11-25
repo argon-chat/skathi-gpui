@@ -44,7 +44,9 @@ cbuffer GlobalParams: register(b0) {
     float grayscale_enhanced_contrast;
     float subpixel_enhanced_contrast;
     uint is_bgr;
-    uint3 global_pad;
+    // vue-native fork: nonzero when the frame is half float (an HDR window).
+    uint extended_range;
+    uint2 global_pad;
 };
 
 cbuffer BatchParams: register(b1) {

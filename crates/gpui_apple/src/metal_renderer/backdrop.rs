@@ -53,7 +53,7 @@ fn builtin_needs_backdrop(index: usize) -> bool {
 
 /// The DirectX `GlobalParams` constant buffer, which `modules/sk.slang`
 /// declares for every target and the generated stages bind at `[[buffer(0)]]`.
-/// They read only the viewport size; Metal has no text gamma to pass.
+/// They read the viewport size and `extended_range`; Metal has no text gamma to pass.
 #[repr(C)]
 struct EffectGlobals {
     gamma_ratios: [f32; 4],
@@ -61,7 +61,9 @@ struct EffectGlobals {
     grayscale_enhanced_contrast: f32,
     subpixel_enhanced_contrast: f32,
     is_bgr: u32,
-    pad: [u32; 3],
+    /// Nonzero for a half-float (EDR) frame: `sk_extended_range`.
+    extended_range: u32,
+    pad: [u32; 2],
 }
 
 const _: () = assert!(mem::size_of::<EffectGlobals>() == 48);
@@ -131,6 +133,11 @@ pub(super) struct MetalBackdrop {
     blur_downsample: Pipeline,
     blur_upsample: Pipeline,
     blur_rect: Pipeline,
+    /// vue-native fork: `BackdropEncoding::Linear`: the snapshot into linear
+    /// light, and the pyramid built from it, all in `LINEAR_FORMAT`.
+    backdrop_linear: Pipeline,
+    linear_downsample: Pipeline,
+    linear_upsample: Pipeline,
     frame_copy: Pipeline,
     /// vue-native fork: `<sk-layer>` pictures, destination-over.
     vn_underlay: Pipeline,
@@ -180,7 +187,13 @@ struct BackdropTargets {
     frame: Option<Texture>,
     /// vue-native fork: the snapshot with `<sk-layer>` pictures under it; only while a frame has one.
     underlaid: Option<Texture>,
+    /// vue-native fork: `BackdropEncoding::Linear` in half float: the snapshot's
+    /// linear copy at full size, then its pyramid.
+    linear: Vec<Texture>,
 }
+
+/// `BackdropEncoding::Linear`'s copy and pyramid.
+const LINEAR_FORMAT: MTLPixelFormat = MTLPixelFormat::RGBA16Float;
 
 /// Where a frame renders. A backdrop copies what has been drawn so far, which
 /// a framebuffer-only drawable does not allow; such a frame is drawn into an
@@ -256,11 +269,19 @@ impl MetalRenderer {
                 .chain(effect_quads().map(EffectQuad::effective_kernel_levels))
                 .max()
                 .unwrap_or(0) as usize;
-            state.trim_targets(if backdrop && snapshots {
-                kernel_levels.min(BLUR_TEXTURE_LEVELS) + 1
-            } else {
-                0
-            });
+            let linear_levels = effect_quads()
+                .filter(|quad| BackdropRequest::layer(quad).linear_blur())
+                .map(EffectQuad::effective_kernel_levels)
+                .max()
+                .map_or(0, |levels| levels as usize + 1);
+            state.trim_targets(
+                if backdrop && snapshots {
+                    kernel_levels.min(BLUR_TEXTURE_LEVELS) + 1
+                } else {
+                    0
+                },
+                if backdrop { linear_levels } else { 0 },
+            );
             if !scene.vn_underlays.iter().any(gpui::VnUnderlay::has_picture)
                 && let Some(targets) = &mut state.targets
             {
@@ -553,13 +574,8 @@ impl MetalRenderer {
         draw: &GroupDraw<'_>,
         command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
         frame: &FrameTarget,
-        kernel_levels: usize,
+        request: BackdropRequest,
     ) -> Result<BackdropTextures> {
-        let request = BackdropRequest {
-            kernel_levels,
-            samples: None,
-            underlays: false,
-        };
         self.snapshot_backdrop(draw, command_buffer, frame, request)
     }
 
@@ -593,7 +609,14 @@ impl MetalRenderer {
         };
         let (width, height) = (frame.texture.width(), frame.texture.height());
         let format = state.format;
-        let targets = state.ensure_targets(&self.device, width, height, kernel_levels)?;
+        let linear = request.linear_blur();
+        let targets = state.ensure_targets(
+            &self.device,
+            width,
+            height,
+            if linear { 0 } else { kernel_levels },
+            linear.then_some(kernel_levels),
+        )?;
         if underlays.is_some() && targets.underlaid.is_none() {
             targets.underlaid = Some(create_target_texture(
                 &self.device,
@@ -753,29 +776,41 @@ impl MetalRenderer {
             Ok(())
         };
 
-        let processed = if kernel_levels == 0 {
-            raw
+        let (source, levels, downsample, upsample) = if linear {
+            let copy = targets
+                .linear
+                .first()
+                .context("missing linear backdrop copy")?;
+            blur_pass(&state.backdrop_linear, raw, copy, 0)?;
+            (
+                copy,
+                targets
+                    .linear
+                    .get(1..=kernel_levels)
+                    .context("missing linear blur pyramid levels")?,
+                &state.linear_downsample,
+                &state.linear_upsample,
+            )
         } else {
-            let levels = targets
-                .levels
-                .get(..kernel_levels)
-                .context("missing blur pyramid levels")?;
-            blur_pass(&state.blur_downsample, raw, &levels[0], 1)?;
+            (
+                raw,
+                targets
+                    .levels
+                    .get(..kernel_levels)
+                    .context("missing blur pyramid levels")?,
+                &state.blur_downsample,
+                &state.blur_upsample,
+            )
+        };
+        let processed = if kernel_levels == 0 {
+            source
+        } else {
+            blur_pass(downsample, source, &levels[0], 1)?;
             for level in 1..kernel_levels {
-                blur_pass(
-                    &state.blur_downsample,
-                    &levels[level - 1],
-                    &levels[level],
-                    level + 1,
-                )?;
+                blur_pass(downsample, &levels[level - 1], &levels[level], level + 1)?;
             }
             for level in (1..kernel_levels).rev() {
-                blur_pass(
-                    &state.blur_upsample,
-                    &levels[level],
-                    &levels[level - 1],
-                    level,
-                )?;
+                blur_pass(upsample, &levels[level], &levels[level - 1], level)?;
             }
             &levels[0]
         };
@@ -924,12 +959,40 @@ impl MetalBackdrop {
                 .with_context(|| format!("locating function {name}"))
         };
         let pass_vertex = function("backdrop_pass_vertex")?;
-        let pass = |label: &str, fragment: &str| {
+        let pass_in = |label: &str, fragment: &str, format| {
             let fragment = function(fragment)?;
             backdrop_pipeline(device, label, &pass_vertex, &fragment, format, Blend::Off)
         };
-        let blur_downsample = pass("backdrop_blur_downsample", "blur_downsample_fragment")?;
-        let blur_upsample = pass("backdrop_blur_upsample", "blur_upsample_fragment")?;
+        let pass = |label: &str, fragment: &str| pass_in(label, fragment, format);
+        // A half-float frame is an EDR window's: its blur keeps light above
+        // SDR white, as `sk_finish` does with `sk_extended_range`.
+        let extended = format == LINEAR_FORMAT;
+        let variant = |name: &'static str, extended_name: &'static str| {
+            if extended { extended_name } else { name }
+        };
+        let blur_downsample = pass(
+            "backdrop_blur_downsample",
+            variant(
+                "blur_downsample_fragment",
+                "blur_downsample_extended_fragment",
+            ),
+        )?;
+        let blur_upsample = pass(
+            "backdrop_blur_upsample",
+            variant("blur_upsample_fragment", "blur_upsample_extended_fragment"),
+        )?;
+        let backdrop_linear =
+            pass_in("backdrop_linear", "backdrop_linear_fragment", LINEAR_FORMAT)?;
+        let linear_downsample = pass_in(
+            "backdrop_linear_downsample",
+            "blur_downsample_extended_fragment",
+            LINEAR_FORMAT,
+        )?;
+        let linear_upsample = pass_in(
+            "backdrop_linear_upsample",
+            "blur_upsample_extended_fragment",
+            LINEAR_FORMAT,
+        )?;
         let frame_copy = pass("backdrop_frame_copy", "frame_copy_fragment")?;
         let (underlay_vertex, underlay_fragment) = (
             function("vn_underlay_vertex")?,
@@ -944,7 +1007,8 @@ impl MetalBackdrop {
             Blend::DestinationOver,
         )?;
         let blur_rect_vertex = function("blur_rect_vertex")?;
-        let blur_rect_fragment = function("blur_rect_fragment")?;
+        let blur_rect_fragment =
+            function(variant("blur_rect_fragment", "blur_rect_extended_fragment"))?;
         let blur_rect = backdrop_pipeline(
             device,
             "backdrop_blur_rect",
@@ -1020,6 +1084,9 @@ impl MetalBackdrop {
             blur_downsample,
             blur_upsample,
             blur_rect,
+            backdrop_linear,
+            linear_downsample,
+            linear_upsample,
             frame_copy,
             vn_underlay,
             effects,
@@ -1098,13 +1165,13 @@ impl MetalBackdrop {
             });
     }
 
-    /// `needed` counts the snapshot as one more level below the pyramid.
-    fn trim_targets(&mut self, needed: usize) {
-        let held = self
-            .targets
-            .as_ref()
-            .map_or(0, |targets| targets.levels.len() + 1);
-        if needed >= held {
+    /// `needed` counts the snapshot as one more level below the pyramid,
+    /// `linear` the linear copy below the linear pyramid.
+    fn trim_targets(&mut self, needed: usize, linear: usize) {
+        let held = self.targets.as_ref().map_or((0, 0), |targets| {
+            (targets.levels.len() + 1, targets.linear.len())
+        });
+        if needed >= held.0 && linear >= held.1 {
             self.idle_frames = 0;
             return;
         }
@@ -1113,9 +1180,12 @@ impl MetalBackdrop {
             return;
         }
         self.idle_frames = 0;
-        match (needed, &mut self.targets) {
+        match (needed.max(linear), &mut self.targets) {
             (0, targets) => *targets = None,
-            (needed, Some(targets)) => targets.levels.truncate(needed - 1),
+            (_, Some(targets)) => {
+                targets.levels.truncate(needed.saturating_sub(1));
+                targets.linear.truncate(linear);
+            }
             (_, None) => {}
         }
     }
@@ -1145,6 +1215,7 @@ impl MetalBackdrop {
         width: usize,
         height: usize,
         kernel_levels: usize,
+        linear: Option<usize>,
     ) -> Result<&mut BackdropTargets> {
         let targets = match self
             .targets
@@ -1166,9 +1237,21 @@ impl MetalBackdrop {
                 levels: Vec::new(),
                 frame: None,
                 underlaid: None,
+                linear: Vec::new(),
             },
         };
         let targets = self.targets.insert(targets);
+        while linear.is_some_and(|levels| targets.linear.len() <= levels) {
+            let divisor = 1usize << targets.linear.len();
+            targets.linear.push(create_target_texture(
+                device,
+                "backdrop_linear",
+                (width / divisor).max(1),
+                (height / divisor).max(1),
+                MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead,
+                LINEAR_FORMAT,
+            )?);
+        }
         while targets.levels.len() < kernel_levels {
             let divisor = 1usize << (targets.levels.len() + 1);
             targets.levels.push(create_target_texture(
@@ -1190,7 +1273,7 @@ impl MetalBackdrop {
         height: usize,
     ) -> Result<Texture> {
         let format = self.format;
-        let targets = self.ensure_targets(device, width, height, 0)?;
+        let targets = self.ensure_targets(device, width, height, 0, None)?;
         if let Some(frame) = &targets.frame {
             return Ok(frame.clone());
         }
@@ -1229,7 +1312,8 @@ impl MetalBackdrop {
             grayscale_enhanced_contrast: 0.,
             subpixel_enhanced_contrast: 0.,
             is_bgr: 0,
-            pad: [0; 3],
+            extended_range: u32::from(self.format == LINEAR_FORMAT),
+            pad: [0; 2],
         };
         let (processed, original, page) = match textures {
             Some(textures) => (&textures.processed, &textures.original, &textures.page),
@@ -2456,7 +2540,7 @@ pub(super) mod tests {
         gpui::reload_app_effects(
             gpui::AppEffects::new(
                 "test",
-                r#"{"schema": 13, "effects": [
+                r#"{"schema": 14, "effects": [
                     {"name": "tint", "backdrop": false, "metal": "tint.metal"}
                 ]}"#,
                 [("tint.metal".to_string(), msl.to_string())],
@@ -2718,6 +2802,190 @@ pub(super) mod tests {
         )?;
         for (x, y, expected, what) in expectations() {
             assert_close(pixel(&image, x, y), expected, what);
+        }
+        Ok(())
+    }
+
+    /// `[SkBackdropLinear]` passing its backdrop through (`bun run shaders`).
+    fn install_pass_linear() -> Result<()> {
+        gpui::reload_app_effects(
+            gpui::AppEffects::new(
+                "test",
+                r#"{"schema": 14, "effects": [
+                    {"name": "pass-linear", "backdrop": true, "metal": "pass_linear.metal"}
+                ]}"#,
+                [(
+                    "pass_linear.metal".to_string(),
+                    include_str!("../../effects/test/pass_linear.metal").to_string(),
+                )],
+            )
+            .map_err(anyhow::Error::msg)?,
+        );
+        Ok(())
+    }
+
+    /// `pass-linear` or `frost(0)` over the frame but a two-pixel border.
+    fn pass_through(linear: bool, radius: f32, side: f32) -> EffectQuad {
+        EffectQuad {
+            effect_id: if linear {
+                effect_id::COUNT
+            } else {
+                effect_id::FROST
+            },
+            bounds: bounds(2., 2., side - 4., side - 4.),
+            content_mask: mask(side, side),
+            params: if linear {
+                EffectQuad::params_from(&[radius])
+            } else {
+                EffectQuad::params_from(&[0., radius, 0., 0., 1., 1., 1., 0.])
+            },
+            opacity: 1.,
+            backdrop_blur_radius: ScaledPixels(radius),
+            scale: 1.,
+            flags: EFFECT_FLAG_NEEDS_BACKDROP
+                | if linear {
+                    gpui::EFFECT_FLAG_BACKDROP_LINEAR
+                } else {
+                    0
+                },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_linear_backdrop_blurs_light_and_an_sdr_pass_through_is_exact() -> Result<()> {
+        let _app_effects = APP_EFFECTS.lock();
+        install_pass_linear()?;
+        let scene = |effect: Option<EffectQuad>| {
+            let mut scene = split_scene();
+            if let Some(effect) = effect {
+                scene.insert_primitive(effect);
+            }
+            scene
+        };
+        let mut renderer = renderer()?;
+        let page = render(&mut renderer, scene(None))?;
+        for linear in [true, false] {
+            let image = render(&mut renderer, scene(Some(pass_through(linear, 0., SIDE))))?;
+            assert!(
+                image == page,
+                "linear {linear}: an SDR pass-through is exact"
+            );
+        }
+        // Across the edge, light averages to half of white, sRGB code 188;
+        // the codes themselves average to 128.
+        let mut edge = |linear| -> Result<u32> {
+            let image = render(&mut renderer, scene(Some(pass_through(linear, 12., SIDE))))?;
+            let code = |x| u32::from(pixel(&image, x, 32)[0]);
+            Ok((code(31) + code(32)) / 2)
+        };
+        let (light, codes) = (edge(true)?, edge(false)?);
+        assert!(
+            (176..=200).contains(&light) && (116..=140).contains(&codes),
+            "the edge of a blurred white and black page: {light} in linear light, {codes} in codes"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pass_throughs_keep_hdr_light_in_an_edr_frame() -> Result<()> {
+        use crate::metal_renderer::read_texture_halves;
+        use gpui::PlatformAtlas as _;
+        use gpui::half_to_f32;
+        use gpui::hdr_test_scene::f32_to_half;
+        let _app_effects = APP_EFFECTS.lock();
+        install_pass_linear()?;
+        const SIDE: u32 = 32;
+        let size = size(DevicePixels(SIDE as i32), DevicePixels(SIDE as i32));
+        let mut renderer = renderer()?;
+        let atlas = renderer.sprite_atlas().clone();
+        let page = |texel: &dyn Fn(u32, u32) -> [f32; 4],
+                    id: usize,
+                    effect: Option<EffectQuad>|
+         -> Result<Scene> {
+            let bytes: Vec<u8> = (0..SIDE * SIDE)
+                .flat_map(|i| texel(i % SIDE, i / SIDE))
+                .flat_map(|value| f32_to_half(value).to_le_bytes())
+                .collect();
+            let key = gpui::AtlasKey::Image(gpui::RenderImageParams {
+                image_id: gpui::ImageId(0x4d52_1330 + id),
+                frame_index: 0,
+            });
+            let tile = atlas
+                .write_hdr_bytes(&key, size, &bytes)?
+                .context("the HDR page tile was not allocated")?;
+            let mut scene = Scene::default();
+            scene.insert_primitive(gpui::PolychromeSprite {
+                order: 0,
+                pad: f32::to_bits(16.0),
+                tile,
+                grayscale: false.into(),
+                opacity: 1.,
+                bounds: bounds(0., 0., SIDE as f32, SIDE as f32),
+                content_mask: mask(SIDE as f32, SIDE as f32),
+                corner_radii: Corners::default(),
+                transformation: gpui::TransformationMatrix::unit(),
+                tint: Hsla::transparent_black(),
+                corner_shapes: gpui::CornerShapes::default(),
+            });
+            if let Some(effect) = effect {
+                scene.insert_primitive(effect);
+            }
+            scene.finish();
+            Ok(scene)
+        };
+        assert!(renderer.set_hdr_output(Some(gpui::HdrOutput {
+            sdr_white: 1.0,
+            content_headroom: 16.0,
+        })));
+        let mut frame = |scene: &Scene| -> Result<Vec<f32>> {
+            let texture =
+                objc2::rc::autoreleasepool(|_| renderer.render_offscreen_texture(scene, size))?;
+            Ok(read_texture_halves(&texture)
+                .into_iter()
+                .map(half_to_f32)
+                .collect())
+        };
+        let ramp = |x: u32, y: u32| {
+            let at = (y * SIDE + x) as f32 / (SIDE * SIDE) as f32;
+            let value = 12.0 * at * at;
+            let alpha = if y % 4 == 0 { 0.5 } else { 1.0 };
+            [value, value * 0.5, (12.0 - value) * 0.25, alpha]
+        };
+        let expected = frame(&page(&ramp, 0, None)?)?;
+        assert!(expected.iter().any(|&value| value > 2.0), "the page is HDR");
+        for linear in [true, false] {
+            let shown = frame(&page(
+                &ramp,
+                0,
+                Some(pass_through(linear, 0., SIDE as f32)),
+            )?)?;
+            let different = shown
+                .iter()
+                .zip(&expected)
+                .position(|(a, b)| a.to_bits() != b.to_bits());
+            assert!(
+                different.is_none(),
+                "linear {linear}: value {different:?} differs from the page"
+            );
+        }
+        let flat = |_, _| [8.0, 2.0, 0.5, 1.0];
+        let at = ((SIDE / 2 * SIDE + SIDE / 2) * 4) as usize;
+        let plain = frame(&page(&flat, 1, None)?)?;
+        for linear in [true, false] {
+            let shown = frame(&page(
+                &flat,
+                1,
+                Some(pass_through(linear, 8., SIDE as f32)),
+            )?)?;
+            for channel in 0..4 {
+                assert!(
+                    (shown[at + channel] - plain[at + channel]).abs() <= plain[at + channel] * 2e-3,
+                    "linear {linear}: blurred {:?}, the flat page {:?}",
+                    &shown[at..at + 4],
+                    &plain[at..at + 4]
+                );
+            }
         }
         Ok(())
     }

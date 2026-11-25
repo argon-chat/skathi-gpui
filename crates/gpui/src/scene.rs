@@ -2512,6 +2512,10 @@ pub(crate) const EFFECT_FLAG_AUTO_QUALITY: u32 = 16;
 /// its snapshot can be bounded; samples beyond it are clamped to that edge.
 pub const EFFECT_FLAG_BACKDROP_REACH: u32 = 32;
 
+/// Bit 6 of [`EffectQuad::flags`]: the effect reads its backdrop in linear,
+/// extended light (`[SkBackdropLinear]`), see [`BackdropEncoding::Linear`].
+pub const EFFECT_FLAG_BACKDROP_LINEAR: u32 = 64;
+
 /// CSS quality choice for an effect with a host-filled quality slot.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(JsonSchema))]
@@ -3005,6 +3009,15 @@ impl EffectQuad {
     /// Whether this quad reads and steps a history ([`EFFECT_FLAG_HISTORY`]).
     pub fn has_history(&self) -> bool {
         self.flags & EFFECT_FLAG_HISTORY != 0
+    }
+
+    /// How this quad's backdrop is encoded ([`EFFECT_FLAG_BACKDROP_LINEAR`]).
+    pub fn backdrop_encoding(&self) -> crate::BackdropEncoding {
+        if self.flags & EFFECT_FLAG_BACKDROP_LINEAR != 0 {
+            crate::BackdropEncoding::Linear
+        } else {
+            crate::BackdropEncoding::Frame
+        }
     }
 
     /// What this quad samples of its backdrop: `bounds` grown by its reach, or

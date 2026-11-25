@@ -7,6 +7,26 @@ use crate::{
     size,
 };
 
+/// What the values of a backdrop's blurred texture (t0) mean.
+///
+/// The frame holds premultiplied, sRGB-encoded values; in a half-float (HDR)
+/// frame they may exceed 1.0. Its linear light is what an HDR output pass shows,
+/// per channel with `a` the alpha: `decode(min(c, a)) + a * (decode(max(c / a, 1)) - 1)`,
+/// `decode(c)` at `a == 0`, with `decode` the sign-preserving sRGB curve. 1.0 is
+/// SDR white. The effect prelude converts both ways with the same function
+/// (`sk_frame_to_linear`, `sk_linear_to_frame`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BackdropEncoding {
+    /// The frame's own values and format.
+    #[default]
+    Frame,
+    /// With a blur, t0 is a half-float pyramid built from the snapshot's linear
+    /// light, unclamped above 1.0. Without one, t0 is the snapshot as for
+    /// [`Self::Frame`]. The raw and page-only snapshots stay in the frame's
+    /// encoding: the shader decodes them exactly.
+    Linear,
+}
+
 /// One group's backdrop: blur rects, or effect quads of one pipeline, that
 /// share a kernel depth and do not overlap.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -18,9 +38,27 @@ pub struct BackdropRequest {
     /// Whether the scene's underlay sources ([`VnUnderlay`]) are composited
     /// under the snapshot: only a snapshot of the window's own target has them.
     pub underlays: bool,
+    /// What the blurred texture holds.
+    pub encoding: BackdropEncoding,
 }
 
 impl BackdropRequest {
+    /// An effect layer's effect, which may sample its backdrop anywhere.
+    pub fn layer(quad: &EffectQuad) -> Self {
+        Self {
+            kernel_levels: quad.effective_kernel_levels() as usize,
+            samples: None,
+            underlays: false,
+            encoding: quad.backdrop_encoding(),
+        }
+    }
+
+    /// Whether the blurred texture is a linear half-float pyramid rather than
+    /// one in the frame's encoding.
+    pub fn linear_blur(&self) -> bool {
+        self.encoding == BackdropEncoding::Linear && self.kernel_levels > 0
+    }
+
     /// Blur rects composite only their own bounds.
     pub fn blur_rects(rects: &[BackdropBlurRect]) -> Self {
         Self {
@@ -32,6 +70,7 @@ impl BackdropRequest {
                 .map(|rect| rect.bounds)
                 .reduce(|union, bounds| union.union(&bounds)),
             underlays: false,
+            encoding: BackdropEncoding::Frame,
         }
     }
 
@@ -48,6 +87,9 @@ impl BackdropRequest {
                 .reduce(|union, samples| Some(union?.union(&samples?)))
                 .flatten(),
             underlays: false,
+            encoding: quads
+                .first()
+                .map_or(BackdropEncoding::Frame, EffectQuad::backdrop_encoding),
         }
     }
 
