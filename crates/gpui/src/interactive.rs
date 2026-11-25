@@ -719,6 +719,34 @@ pub enum ScrollDelta {
     Lines(Point<f32>),
 }
 
+/// vue-native fork: the pixels of one wheel line, Chromium's figure for the platform: 100/3 on
+/// Windows (`kScrollbarPixelsPerLine`), 40 on macOS (`kScrollbarPixelsPerCocoaTick`), and 40 on
+/// Linux, where gpui reports a notch as 3 lines and Chromium as 120 px (`kWheelDelta`).
+pub const fn vn_wheel_line() -> Pixels {
+    if cfg!(any(
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "freebsd"
+    )) {
+        crate::px(40.0)
+    } else {
+        crate::px(100.0 / 3.0)
+    }
+}
+
+static VN_WHEEL_SCROLL_SCALE: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(1.0f32.to_bits());
+
+/// vue-native fork: the factor on line deltas in [`ScrollDelta::vn_scroll_pixels`]; 1 unless set.
+pub fn vn_wheel_scroll_scale() -> f32 {
+    f32::from_bits(VN_WHEEL_SCROLL_SCALE.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// vue-native fork: sets [`vn_wheel_scroll_scale`] for the process; the caller validates it.
+pub fn vn_set_wheel_scroll_scale(scale: f32) {
+    VN_WHEEL_SCROLL_SCALE.store(scale.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
 impl Default for ScrollDelta {
     fn default() -> Self {
         Self::Lines(Default::default())
@@ -777,6 +805,18 @@ impl ScrollDelta {
             ScrollDelta::Pixels(delta) => *delta,
             ScrollDelta::Lines(delta) => point(line_height * delta.x, line_height * delta.y),
         }
+    }
+
+    /// vue-native fork: the delta in pixels with a line of [`vn_wheel_line`], as a browser reports
+    /// it in `WheelEvent`.
+    pub fn vn_event_pixels(&self) -> Point<Pixels> {
+        self.pixel_delta(vn_wheel_line())
+    }
+
+    /// vue-native fork: how far the app's own scrolling moves for this delta: lines are
+    /// [`vn_event_pixels`](Self::vn_event_pixels) times [`vn_wheel_scroll_scale`], pixels as they are.
+    pub fn vn_scroll_pixels(&self) -> Point<Pixels> {
+        self.pixel_delta(vn_wheel_line() * vn_wheel_scroll_scale())
     }
 
     /// Combines two scroll deltas into one.
@@ -1182,5 +1222,48 @@ mod test {
         cx.simulate_modifiers_change(Modifiers::shift());
         cx.simulate_modifiers_change(Modifiers::none());
         assert!(test_view.read_with(cx, |test_view, _| test_view.saw_action));
+    }
+}
+
+#[cfg(test)]
+mod vn_wheel_test {
+    use super::*;
+    use crate::px;
+
+    fn close(a: Pixels, b: f32) -> bool {
+        (f32::from(a) - b).abs() < 1e-3
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn a_notch_is_chromiums_distance_at_any_system_lines_setting() {
+        assert!(close(
+            ScrollDelta::Lines(point(0., 3.)).vn_event_pixels().y,
+            100.
+        ));
+        assert!(close(
+            ScrollDelta::Lines(point(0., -6.)).vn_event_pixels().y,
+            -200.
+        ));
+        assert!(close(
+            ScrollDelta::Lines(point(3., 0.)).vn_event_pixels().x,
+            100.
+        ));
+    }
+
+    #[test]
+    fn the_scale_moves_line_scrolling_only() {
+        let notch = ScrollDelta::Lines(point(0., 3.));
+        let touchpad = ScrollDelta::Pixels(point(px(4.), px(-7.)));
+        let event = notch.vn_event_pixels().y;
+        vn_set_wheel_scroll_scale(2.);
+        let scaled = notch.vn_scroll_pixels().y;
+        let pan = touchpad.vn_scroll_pixels();
+        let event_after = notch.vn_event_pixels().y;
+        vn_set_wheel_scroll_scale(1.);
+        assert!(close(scaled, 2. * f32::from(event)));
+        assert_eq!(event_after, event);
+        assert_eq!(pan, point(px(4.), px(-7.)));
+        assert_eq!(notch.vn_scroll_pixels().y, event);
     }
 }
