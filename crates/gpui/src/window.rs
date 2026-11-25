@@ -6942,6 +6942,13 @@ impl Window {
             .unwrap_or_default()
     }
 
+    /// The opacity the element being painted is shown at: its own and every ancestor's, multiplied.
+    /// For embedders that show something of their own under an element and must fade it with the
+    /// element. Paint or prepaint only.
+    pub fn vn_element_opacity(&self) -> f32 {
+        self.element_opacity()
+    }
+
     /// Obtain the current element opacity. This method should only be called during the
     /// prepaint phase of element drawing.
     #[inline]
