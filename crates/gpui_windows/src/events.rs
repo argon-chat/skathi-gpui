@@ -148,6 +148,7 @@ impl WindowsWindowInner {
             WM_SIZE => self.handle_size_msg(wparam, lparam),
             WM_GETMINMAXINFO => self.handle_get_min_max_info_msg(lparam),
             WM_SIZING => self.handle_sizing(handle, wparam.0 as u32, lparam),
+            WM_WINDOWPOSCHANGING => self.handle_window_pos_changing(handle, wparam, lparam),
             WM_ENTERSIZEMOVE | WM_ENTERMENULOOP => self.handle_size_move_loop(handle),
             WM_EXITSIZEMOVE | WM_EXITMENULOOP => self.handle_size_move_loop_exit(handle),
             WM_TIMER => self.handle_timer_msg(handle, wparam),
@@ -345,6 +346,50 @@ impl WindowsWindowInner {
         Some(1)
     }
 
+    /// In the sizing loop DWM shows a new rect at its next composition, and a frame drawn after
+    /// `WM_SIZE` lands a composition later: the strip a window grew by shows what is behind it, and
+    /// a left or top edge shifts the old content. A window that only grows presents its new size first
+    /// (clipped by the old rect until the rect follows); one that shrinks in either direction does not,
+    /// since its new frame would leave part of the old rect uncovered.
+    fn handle_window_pos_changing(
+        &self,
+        handle: HWND,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> Option<isize> {
+        if !self.size_move_loop.get() {
+            return None;
+        }
+        // The size after the default handling, which applies WM_GETMINMAXINFO.
+        let result = unsafe { DefWindowProcW(handle, WM_WINDOWPOSCHANGING, wparam, lparam) };
+        // SAFETY: WM_WINDOWPOSCHANGING's lparam is a valid WINDOWPOS for the duration of the message.
+        let pos = unsafe { &*(lparam.0 as *const WINDOWPOS) };
+        if pos.flags.contains(SWP_NOSIZE) {
+            return Some(result.0);
+        }
+        let mut frame = RECT::default();
+        let mut client = RECT::default();
+        unsafe {
+            if GetWindowRect(handle, &mut frame).is_err()
+                || GetClientRect(handle, &mut client).is_err()
+            {
+                return Some(result.0);
+            }
+        }
+        let width = pos.cx - (frame.right - frame.left - client.right);
+        let height = pos.cy - (frame.bottom - frame.top - client.bottom);
+        if width < client.right
+            || height < client.bottom
+            || (width, height) == (client.right, client.bottom)
+        {
+            return Some(result.0);
+        }
+        let new_size = size(DevicePixels(width.max(1)), DevicePixels(height.max(1)));
+        self.handle_size_change(new_size, self.state.scale_factor.get(), true);
+        self.draw_window(handle, true);
+        Some(result.0)
+    }
+
     fn handle_size_msg(self: &Rc<Self>, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
         // Minimizing and restoring both arrive as `WM_SIZE`; the deferred report
         // reads `IsIconic` at delivery, so one call covers both directions.
@@ -408,6 +453,7 @@ impl WindowsWindowInner {
         // after the cursor. Drop frames instead while the loop runs (see
         // DirectXRenderer::present_no_wait).
         self.state.renderer.borrow_mut().set_present_no_wait(true);
+        self.size_move_loop.set(true);
         unsafe {
             let ret = SetTimer(
                 Some(handle),
@@ -427,6 +473,7 @@ impl WindowsWindowInner {
 
     fn handle_size_move_loop_exit(&self, handle: HWND) -> Option<isize> {
         self.state.renderer.borrow_mut().set_present_no_wait(false);
+        self.size_move_loop.set(false);
         unsafe {
             win32_call(|| KillTimer(Some(handle), SIZE_MOVE_LOOP_TIMER_ID)).log_err();
         }
