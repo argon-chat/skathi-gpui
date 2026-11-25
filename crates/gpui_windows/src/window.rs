@@ -770,6 +770,35 @@ impl PlatformWindow for WindowsWindow {
         }
     }
 
+    fn start_window_resize(&self, edge: ResizeEdge) {
+        // Modal like the move loop, so it starts from the posted message too.
+        if !self.is_resizable || self.window_move_pending.replace(true) {
+            return;
+        }
+        let wmsz = match edge {
+            ResizeEdge::Left => WMSZ_LEFT,
+            ResizeEdge::Right => WMSZ_RIGHT,
+            ResizeEdge::Top => WMSZ_TOP,
+            ResizeEdge::TopLeft => WMSZ_TOPLEFT,
+            ResizeEdge::TopRight => WMSZ_TOPRIGHT,
+            ResizeEdge::Bottom => WMSZ_BOTTOM,
+            ResizeEdge::BottomLeft => WMSZ_BOTTOMLEFT,
+            ResizeEdge::BottomRight => WMSZ_BOTTOMRIGHT,
+        };
+        if unsafe {
+            PostMessageW(
+                Some(self.hwnd),
+                crate::events::WM_GPUI_WINDOW_RESIZE,
+                WPARAM(wmsz as usize),
+                LPARAM(0),
+            )
+        }
+        .is_err()
+        {
+            self.window_move_pending.set(false);
+        }
+    }
+
     fn bounds(&self) -> Bounds<Pixels> {
         self.state.bounds()
     }

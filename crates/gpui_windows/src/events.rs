@@ -35,11 +35,13 @@ pub(crate) const WM_GPUI_DISPLAYS_CHANGED: u32 = WM_USER + 10;
 pub(crate) const WM_GPUI_DOCUMENT_DRAG: u32 = WM_USER + 11;
 pub(crate) const WM_GPUI_WINDOW_MOVE: u32 = WM_USER + 12;
 pub(crate) const WM_GPUI_PRESENTABILITY_CHANGED: u32 = WM_USER + 13;
+pub(crate) const WM_GPUI_WINDOW_RESIZE: u32 = WM_USER + 14;
 
 const SIZE_MOVE_LOOP_TIMER_ID: usize = 1;
 
-/// `SK_WINDOW_MOVE=fake`, for a test host: a window move runs a one-second modal loop that pumps
-/// messages as the system's does, without the button held and without following the real cursor.
+/// `SK_WINDOW_MOVE=fake`, for a test host: a window move or resize runs a one-second modal loop that
+/// pumps messages as the system's does, without the button held and without following the real cursor.
+/// A resize moves its edge out by [`FAKE_RESIZE_DRAG`] once, through `WM_SIZING` and `SetWindowPos`.
 fn fake_window_move() -> bool {
     static FAKE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *FAKE.get_or_init(|| {
@@ -47,7 +49,44 @@ fn fake_window_move() -> bool {
     })
 }
 
-fn run_fake_move_loop(handle: HWND) {
+const FAKE_RESIZE_DRAG: i32 = 40;
+
+fn fake_resize_step(handle: HWND, wmsz: u32) {
+    let mut rect = RECT::default();
+    if unsafe { GetWindowRect(handle, &mut rect) }.is_err() {
+        return;
+    }
+    match wmsz {
+        WMSZ_LEFT | WMSZ_TOPLEFT | WMSZ_BOTTOMLEFT => rect.left -= FAKE_RESIZE_DRAG,
+        WMSZ_RIGHT | WMSZ_TOPRIGHT | WMSZ_BOTTOMRIGHT => rect.right += FAKE_RESIZE_DRAG,
+        _ => {}
+    }
+    match wmsz {
+        WMSZ_TOP | WMSZ_TOPLEFT | WMSZ_TOPRIGHT => rect.top -= FAKE_RESIZE_DRAG,
+        WMSZ_BOTTOM | WMSZ_BOTTOMLEFT | WMSZ_BOTTOMRIGHT => rect.bottom += FAKE_RESIZE_DRAG,
+        _ => {}
+    }
+    unsafe {
+        SendMessageW(
+            handle,
+            WM_SIZING,
+            Some(WPARAM(wmsz as usize)),
+            Some(LPARAM(&mut rect as *mut RECT as isize)),
+        );
+        SetWindowPos(
+            handle,
+            None,
+            rect.left,
+            rect.top,
+            rect.right - rect.left,
+            rect.bottom - rect.top,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+        .log_err();
+    }
+}
+
+fn run_fake_move_loop(handle: HWND, resize: Option<u32>) {
     let wall_ms = || {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -57,6 +96,9 @@ fn run_fake_move_loop(handle: HWND) {
     let end = std::time::Instant::now() + std::time::Duration::from_secs(1);
     unsafe {
         SendMessageW(handle, WM_ENTERSIZEMOVE, None, None);
+        if let Some(wmsz) = resize {
+            fake_resize_step(handle, wmsz);
+        }
         let mut msg = MSG::default();
         'pump: loop {
             let left = end.saturating_duration_since(std::time::Instant::now());
@@ -75,7 +117,13 @@ fn run_fake_move_loop(handle: HWND) {
         }
         SendMessageW(handle, WM_EXITSIZEMOVE, None, None);
     }
-    eprintln!("[window-move] fake move loop {began}..{}", wall_ms());
+    match resize {
+        Some(wmsz) => eprintln!(
+            "[window-resize] fake size loop {wmsz} {began}..{}",
+            wall_ms()
+        ),
+        None => eprintln!("[window-move] fake move loop {began}..{}", wall_ms()),
+    }
 }
 
 /// Coordinates window draws on the UI thread. Owned by the platform and
@@ -235,6 +283,7 @@ impl WindowsWindowInner {
                 Some(0)
             }
             WM_GPUI_WINDOW_MOVE => self.handle_window_move(handle),
+            WM_GPUI_WINDOW_RESIZE => self.handle_window_resize(handle, wparam.0 as u32),
             WM_GPUI_PRESENTABILITY_CHANGED => self.handle_presentability_changed(wparam),
             WM_GPUI_CURSOR_STYLE_CHANGED
             | WM_GPUI_FORCE_UPDATE_WINDOW
@@ -476,7 +525,7 @@ impl WindowsWindowInner {
         }
         if fake_window_move() {
             unsafe { ReleaseCapture().log_err() };
-            run_fake_move_loop(handle);
+            run_fake_move_loop(handle, None);
             return Some(0);
         }
         // The press can end between the request and this message: the loop starts only while the
@@ -494,6 +543,35 @@ impl WindowsWindowInner {
                 handle,
                 WM_NCLBUTTONDOWN,
                 WPARAM(HTCAPTION as usize),
+                LPARAM(at as isize),
+            );
+        }
+        Some(0)
+    }
+
+    fn handle_window_resize(&self, handle: HWND, wmsz: u32) -> Option<isize> {
+        self.window_move_pending.set(false);
+        // The system offers no border resize on these either.
+        if self.state.is_fullscreen() || self.state.is_maximized() {
+            return Some(0);
+        }
+        if fake_window_move() {
+            unsafe { ReleaseCapture().log_err() };
+            run_fake_move_loop(handle, Some(wmsz));
+            return Some(0);
+        }
+        if unsafe { GetKeyState(VK_LBUTTON.0 as i32) } >= 0 {
+            return Some(0);
+        }
+        let mut cursor = POINT::default();
+        unsafe { GetCursorPos(&mut cursor) }.log_err()?;
+        let at = (cursor.x as u16 as u32) | ((cursor.y as u16 as u32) << 16);
+        unsafe {
+            ReleaseCapture().log_err();
+            DefWindowProcW(
+                handle,
+                WM_SYSCOMMAND,
+                WPARAM((SC_SIZE | wmsz) as usize),
                 LPARAM(at as isize),
             );
         }
