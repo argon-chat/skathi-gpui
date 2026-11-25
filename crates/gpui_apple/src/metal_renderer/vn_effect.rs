@@ -313,7 +313,7 @@ mod tests {
             texture2d<float> content [[texture(7)]],
             texture2d<float> history [[texture(8)]],
             sampler clamp_sampler [[sampler(1)]]) {
-            constant float *quad = quads + input.id * 64;
+            constant float *quad = quads + input.id * 66;
             uint flags = as_type<uint>(quad[59]);
             float2 origin = float2(quad[2], quad[3]);
             bool step = (flags & 8u) != 0u;
@@ -343,7 +343,7 @@ mod tests {
         gpui::reload_app_effects(
             gpui::AppEffects::new(
                 "test",
-                r#"{"schema": 11, "effects": [
+                r#"{"schema": 12, "effects": [
                     {"name": "swap", "backdrop": false, "metal": "fx.metal"},
                     {"name": "count", "backdrop": false, "history": true, "metal": "fx.metal"}
                 ]}"#,

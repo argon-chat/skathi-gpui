@@ -8,8 +8,8 @@ use super::{
 };
 use anyhow::{Context as _, Result};
 use gpui::{
-    BackdropBlurRect, Bounds, DevicePixels, EffectQuad, MAX_BACKDROP_BLUR_KERNEL_LEVELS,
-    ScaledPixels, Scene, Size, effect_id,
+    BackdropBlurRect, BackdropRequest, Bounds, DevicePixels, EffectQuad,
+    MAX_BACKDROP_BLUR_KERNEL_LEVELS, ScaledPixels, Scene, Size, effect_id,
 };
 use objc2::{Message, rc::Retained, runtime::ProtocolObject};
 use objc2_foundation::NSString;
@@ -321,12 +321,8 @@ impl MetalRenderer {
         for group in backdrop_groups(blur_rects, |rect| {
             (rect.effective_kernel_levels() as usize, rect.bounds)
         }) {
-            let kernel_levels = blur_rects[group.start].effective_kernel_levels() as usize;
-            let Some(union) = blur_rects[group.clone()]
-                .iter()
-                .map(|rect| rect.bounds)
-                .reduce(|union, bounds| union.union(&bounds))
-            else {
+            let request = BackdropRequest::blur_rects(&blur_rects[group.clone()]);
+            let Some(union) = request.samples else {
                 continue;
             };
             let frame_rect = PixelRect::of(&frame.texture);
@@ -336,15 +332,9 @@ impl MetalRenderer {
             {
                 continue;
             }
-            // Only the pixels the composite reads, plus the kernel's reach.
-            let region = PixelRect::round_out(&union, blur_reach(kernel_levels));
-            #[cfg(test)]
-            let region = (!tests::FULL_WINDOW_BACKDROP.get()).then_some(region);
-            #[cfg(not(test))]
-            let region = Some(region);
 
             encoder.endEncoding();
-            let textures = self.snapshot_backdrop(command_buffer, frame, kernel_levels, region)?;
+            let textures = self.snapshot_backdrop(command_buffer, frame, request)?;
             let state = self
                 .backdrop
                 .ready()
@@ -439,10 +429,9 @@ impl MetalRenderer {
         for group in backdrop_groups(effect_quads, |quad| {
             (quad.effective_kernel_levels() as usize, quad.bounds)
         }) {
-            let kernel_levels = effect_quads[group.start].effective_kernel_levels() as usize;
+            let request = BackdropRequest::effects(&effect_quads[group.clone()]);
             encoder.endEncoding();
-            // An effect may sample its backdrop anywhere, as on D3D12.
-            let textures = self.snapshot_backdrop(command_buffer, frame, kernel_levels, None)?;
+            let textures = self.snapshot_backdrop(command_buffer, frame, request)?;
             let state = self
                 .backdrop
                 .ready()
@@ -476,20 +465,25 @@ impl MetalRenderer {
         frame: &FrameTarget,
         kernel_levels: usize,
     ) -> Result<BackdropTextures> {
-        self.snapshot_backdrop(command_buffer, frame, kernel_levels, None)
+        let request = BackdropRequest {
+            kernel_levels,
+            samples: None,
+        };
+        self.snapshot_backdrop(command_buffer, frame, request)
     }
 
-    /// Copies what the frame holds so far and blurs it `kernel_levels` deep,
-    /// within `region` (frame pixels, the kernel's reach included) or the
-    /// whole frame. Called between encoders: it opens and ends its own.
+    /// Copies what the frame holds so far and blurs it as `request` asks.
+    /// Called between encoders: it opens and ends its own.
     fn snapshot_backdrop(
         &mut self,
         command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
         frame: &FrameTarget,
-        kernel_levels: usize,
-        region: Option<PixelRect>,
+        request: BackdropRequest,
     ) -> Result<BackdropTextures> {
-        let kernel_levels = kernel_levels.min(BLUR_TEXTURE_LEVELS);
+        let region = request.region().map(PixelRect::from);
+        #[cfg(test)]
+        let region = region.filter(|_| !tests::FULL_WINDOW_BACKDROP.get());
+        let kernel_levels = request.kernel_levels.min(BLUR_TEXTURE_LEVELS);
         let BackdropState::Ready(state) = &mut self.backdrop else {
             anyhow::bail!("backdrop pipelines missing");
         };
@@ -682,12 +676,15 @@ impl PixelRect {
     }
 }
 
-/// Frame pixels a blur of `levels` pyramid levels can carry into a pixel; the
-/// D3D12 renderer's bound. Each pass reads a texel to either side of its own,
-/// `2 * 2^level` frame pixels at level `level`, both chains together stay
-/// below `4 * 2^levels`, and the composite's bilinear read adds a few more.
-fn blur_reach(levels: usize) -> i32 {
-    (4 << levels) + 8
+impl From<Bounds<DevicePixels>> for PixelRect {
+    fn from(bounds: Bounds<DevicePixels>) -> Self {
+        Self {
+            left: bounds.origin.x.0,
+            top: bounds.origin.y.0,
+            right: bounds.origin.x.0.saturating_add(bounds.size.width.0),
+            bottom: bounds.origin.y.0.saturating_add(bounds.size.height.0),
+        }
+    }
 }
 
 /// Splits a batch into runs that share a kernel depth and do not overlap.
@@ -1735,6 +1732,18 @@ pub(super) mod tests {
 
     /// Stripes under a blurred `rect`.
     fn striped_blur(side: f32, rect: Bounds<ScaledPixels>) -> Scene {
+        let mut scene = stripes(side);
+        scene.insert_primitive(BackdropBlurRect {
+            bounds: rect,
+            content_mask: mask(side, side),
+            blur_radius: ScaledPixels(6.),
+            ..Default::default()
+        });
+        scene.finish();
+        scene
+    }
+
+    fn stripes(side: f32) -> Scene {
         let mut scene = Scene::default();
         let content_mask = mask(side, side);
         scene.insert_primitive(Quad {
@@ -1748,13 +1757,6 @@ pub(super) mod tests {
                 ..quad(bounds(x, 0., 12., side), rgb(0xffffff))
             });
         }
-        scene.insert_primitive(BackdropBlurRect {
-            bounds: rect,
-            content_mask,
-            blur_radius: ScaledPixels(6.),
-            ..Default::default()
-        });
-        scene.finish();
         scene
     }
 
@@ -1778,7 +1780,7 @@ pub(super) mod tests {
         let reference = reference?;
         let full_passes = BLUR_PASS_RECTS.take();
 
-        let region = PixelRect::round_out(&rect, blur_reach(levels));
+        let region = PixelRect::round_out(&rect, gpui::backdrop_blur_reach(levels));
         let level_rect = |level: usize| PixelRect {
             left: 0,
             top: 0,
@@ -1819,6 +1821,90 @@ pub(super) mod tests {
                 red > 16 && red < 240
             }),
             "the fixture must blur"
+        );
+        Ok(())
+    }
+
+    fn reaching_frost(rect: Bounds<ScaledPixels>, reach: Option<f32>, side: f32) -> EffectQuad {
+        EffectQuad {
+            effect_id: effect_id::FROST,
+            bounds: rect,
+            content_mask: mask(side, side),
+            params: EffectQuad::params_from(&[1., 6., 0., 0., 1., 1., 1., 0.]),
+            opacity: 1.,
+            backdrop_blur_radius: ScaledPixels(6.),
+            scale: 1.,
+            flags: EFFECT_FLAG_NEEDS_BACKDROP
+                | reach.map_or(0, |_| gpui::EFFECT_FLAG_BACKDROP_REACH),
+            backdrop_reach: ScaledPixels(reach.unwrap_or(0.)),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_bounded_effect_blurs_its_reach_only_and_a_mixed_group_the_frame() -> Result<()> {
+        const LARGE: i32 = 256;
+        let size = size(DevicePixels(LARGE), DevicePixels(LARGE));
+        let rect = bounds(96., 96., 64., 64.);
+        let scene = |effects: &[EffectQuad]| {
+            let mut scene = stripes(LARGE as f32);
+            for effect in effects {
+                scene.insert_primitive(*effect);
+            }
+            scene.finish();
+            scene
+        };
+        let bounded = scene(&[reaching_frost(rect, Some(10.), LARGE as f32)]);
+        let levels = bounded.effect_quads[0].effective_kernel_levels() as usize;
+        assert_eq!(levels, 2);
+
+        BLUR_PASS_RECTS.with_borrow_mut(Vec::clear);
+        let limited = renderer()?.render_scene_to_image(&bounded, size)?;
+        let limited_passes = BLUR_PASS_RECTS.take();
+        FULL_WINDOW_BACKDROP.set(true);
+        let reference =
+            renderer().and_then(|mut renderer| renderer.render_scene_to_image(&bounded, size));
+        FULL_WINDOW_BACKDROP.set(false);
+        let reference = reference?;
+        BLUR_PASS_RECTS.take();
+
+        let region = PixelRect::round_out(&rect, 10 + gpui::backdrop_blur_reach(levels));
+        assert_eq!(
+            limited_passes,
+            [
+                region.scale_down(1),
+                region.scale_down(2),
+                region.scale_down(1)
+            ],
+            "the quad grown by its reach and the kernel's"
+        );
+        let mut largest = 0;
+        for y in 96..160 {
+            for x in 96..160 {
+                let (limited, reference) = (pixel(&limited, x, y), pixel(&reference, x, y));
+                for channel in 0..4 {
+                    largest = largest.max(limited[channel].abs_diff(reference[channel]));
+                }
+            }
+        }
+        assert!(largest <= 2, "the bounded effect is off by {largest}");
+
+        let mixed = scene(&[
+            reaching_frost(rect, Some(10.), LARGE as f32),
+            reaching_frost(bounds(8., 8., 32., 32.), None, LARGE as f32),
+        ]);
+        BLUR_PASS_RECTS.with_borrow_mut(Vec::clear);
+        renderer()?.render_scene_to_image(&mixed, size)?;
+        let level_rect = |level: usize| PixelRect {
+            left: 0,
+            top: 0,
+            right: LARGE >> level,
+            bottom: LARGE >> level,
+        };
+        assert_eq!(
+            BLUR_PASS_RECTS.take(),
+            [level_rect(1), level_rect(2), level_rect(1)],
+            "one group, and an unbounded quad in it makes it whole"
         );
         Ok(())
     }
@@ -2070,7 +2156,7 @@ pub(super) mod tests {
         gpui::reload_app_effects(
             gpui::AppEffects::new(
                 "test",
-                r#"{"schema": 11, "effects": [
+                r#"{"schema": 12, "effects": [
                     {"name": "tint", "backdrop": false, "metal": "tint.metal"}
                 ]}"#,
                 [("tint.metal".to_string(), msl.to_string())],

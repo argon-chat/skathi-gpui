@@ -1,9 +1,9 @@
 {
-  "schema": 11,
+  "schema": 12,
   "slang": "2026.12",
   "compiler": "redslangc 0.1.1",
   "kind": "builtin",
-  "preludeSha256": "b939152907af0027b7f919886163a03471038c59daa425dd21d030990a968775",
+  "preludeSha256": "3351987ab06ce7d60309932a7988713cf885569d847529b014bffac68db2b641",
   "effects": [
     {
       "id": 0,
@@ -19,12 +19,13 @@
       "source": "crates/sk-effects/shaders/frost.slang",
       "sourceSha256": "9024d32ca088179a5696533d2e2277f02d429ad8a9b78b9e09f279a3ab5615da",
       "generatedSha256": {
-        "hlsl": "4f738840906d54956a349181b6e91b78fe822ec937e8b2efe8308ebc7f696644",
-        "wgsl": "3e30face6e0615d22c439aee1438f7574a127a058f8bf1292e59bf5e236db8af",
-        "metal": "f6c62d19f0704d0bb17814edf6a3f57f68ccdfc1ff2aed57a2e353aa3e0bbcb6"
+        "hlsl": "b2ec555b7b5e48db3bdbe8c549f68af4976b4a2e695f9a122b5ce6957adff388",
+        "wgsl": "d6ac363e35fda92eab06c23676bfe83321f9e26d62c197ed5e116ff32cdcaae4",
+        "metal": "074e2bffd597dc24bf0549f434766111b434ecf5da897d5fb4a08246f5ed4159"
       },
       "signature": "frost(<number:strength>, <length:radius>?, <color:tint>?)",
       "backdropRadiusParam": 1,
+      "backdropReachParam": null,
       "bleedParam": null,
       "animatedParam": null,
       "pointerParam": null,
@@ -156,12 +157,13 @@
       "source": "crates/sk-effects/shaders/noise.slang",
       "sourceSha256": "4dca94745eb5795fef3b21c9d73c37a1c39707bf030e58a748f0ba393529ca9f",
       "generatedSha256": {
-        "hlsl": "64e65fbed616c5c52f28c0adfd229b492dc50f80e3eda7cdb6a74e7db54bdb67",
-        "wgsl": "ed6d49f68433e8c48b8733779cce6250a916a5ef0ebbbc18ce4a6b6e26c733e0",
-        "metal": "38192f8f7547f33d2b3d6b7df1ea1c5187e6fb696c4291eba961b749f99424b2"
+        "hlsl": "75b55921c7cf85a5c1eea2e28716ef916fe4207b0ce1801de349d7e78e3eac31",
+        "wgsl": "ab08f82fd12eb0dfbd2e4bb45341c9e41d3ba0f00801dde5255b3854baae6238",
+        "metal": "2ed611545bbfc634f7261823f83fb1559fbc19d4ab63bfa500c5c8a7274528d3"
       },
       "signature": "noise(<number:amount>, <length:scale>?, <number:speed>?)",
       "backdropRadiusParam": null,
+      "backdropReachParam": null,
       "bleedParam": null,
       "animatedParam": 2,
       "pointerParam": null,
@@ -296,12 +298,13 @@
       "source": "crates/sk-effects/shaders/glow.slang",
       "sourceSha256": "de1d06dddb28503e5a23a3494d73227436591594943428bd0ecec042d3926caa",
       "generatedSha256": {
-        "hlsl": "449870fed34bed30c01c72eb5fcd1886f970468e00478fc6b1ab615cfe12a573",
-        "wgsl": "74df038bda06c7624946e2938568a286df43b5746e611bb062063abbd2859868",
-        "metal": "8ddaf63a85ad2c069be73d4f98efdf91396022abf73408b2cdf412544d7501ab"
+        "hlsl": "da8dd5bafb0484cefcc0e0ae486e02fb2ec1ef4edb69aa23cdf87d39a24c03af",
+        "wgsl": "d2b8dd6176e4fc9d97afd64be188de868051cd821f000b71aebe325cf7b610c5",
+        "metal": "a143e84bd89873b98b35336263c8e8a4c0612c9ff3417388289d8b7d8515b259"
       },
       "signature": "glow(<color>?, <length:radius>, <number:strength>)",
       "backdropRadiusParam": null,
+      "backdropReachParam": null,
       "bleedParam": 0,
       "animatedParam": null,
       "pointerParam": null,

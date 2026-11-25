@@ -4055,6 +4055,8 @@ pub(crate) mod effect_layer_tests {
             float scale;
             uint flags;
             uint4 corner_shapes;
+            float backdrop_reach;
+            uint pad;
         };
         StructuredBuffer<Quad> quads: register(t1);
         Texture2D<float4> image: register(t3);
@@ -4090,7 +4092,7 @@ pub(crate) mod effect_layer_tests {
         reload_app_effects(
             AppEffects::new(
                 "test",
-                r#"{"schema": 11, "effects": [
+                r#"{"schema": 12, "effects": [
                     {"name": "swap", "backdrop": false, "hlsl": "fx.hlsl"},
                     {"name": "count", "backdrop": false, "history": true, "hlsl": "fx.hlsl"}
                 ]}"#,

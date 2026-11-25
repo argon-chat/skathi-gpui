@@ -1651,13 +1651,13 @@ fn scale_down(rect: RECT, level: usize) -> RECT {
         bottom: (rect.bottom + divisor - 1).div_euclid(divisor) + 1,
     }
 }
-/// Window pixels a blur of `levels` pyramid levels can carry into a pixel.
-/// Each down- and up-sample pass reads two source texels to either side
-/// (one-texel offsets, bilinear), i.e. `2 * 2^level` window pixels at level
-/// `level`; both chains together stay below `4 * 2^levels`, and the final
-/// bilinear read of the half-resolution level adds a few pixels more.
-fn blur_reach(levels: usize) -> i32 {
-    (4 << levels) + 8
+fn rect_of(bounds: Bounds<DevicePixels>) -> RECT {
+    RECT {
+        left: bounds.origin.x.0,
+        top: bounds.origin.y.0,
+        right: bounds.origin.x.0.saturating_add(bounds.size.width.0),
+        bottom: bounds.origin.y.0.saturating_add(bounds.size.height.0),
+    }
 }
 
 fn layer_depth(scene: &Scene, group: usize, depth: usize) -> Result<usize> {
@@ -2401,8 +2401,10 @@ impl Encoding<'_> {
                 continue;
             };
             let (blurred, original) = if backdrop {
-                let levels = quad.effective_kernel_levels() as usize;
-                let (blurred, original) = self.backdrop(levels, None)?;
+                let (blurred, original) = self.backdrop(BackdropRequest {
+                    kernel_levels: quad.effective_kernel_levels() as usize,
+                    samples: None,
+                })?;
                 (Some(blurred), Some(original))
             } else {
                 (None, None)
@@ -2591,15 +2593,17 @@ impl Encoding<'_> {
         }
         Ok(())
     }
-    /// Snapshots the current target and blurs it. `region` limits the work to
-    /// the window pixels the consumer reads, already including the kernel's
-    /// reach; `None` keeps the whole window for effects that sample freely.
-    fn backdrop(
-        &mut self,
-        levels: usize,
-        region: Option<RECT>,
-    ) -> Result<(AtlasTexture, AtlasTexture)> {
-        let levels = levels.min(MAX_BACKDROP_BLUR_KERNEL_LEVELS as usize);
+    /// Snapshots the current target and blurs it as `request` asks, within the
+    /// pixels that can still reach the screen.
+    fn backdrop(&mut self, request: BackdropRequest) -> Result<(AtlasTexture, AtlasTexture)> {
+        let region = request
+            .region()
+            .map(|region| intersect(rect_of(region), self.clip));
+        #[cfg(test)]
+        let region = region.filter(|_| !tests::FULL_WINDOW_BACKDROP.with(|full| full.get()));
+        let levels = request
+            .kernel_levels
+            .min(MAX_BACKDROP_BLUR_KERNEL_LEVELS as usize);
         self.ensure_blur(levels)?;
         let snapshot = self
             .snapshot
@@ -2608,6 +2612,8 @@ impl Encoding<'_> {
             .clone();
         let full = full_rect(self.width, self.height);
         let region = region.map_or(full, |region| intersect(region, full));
+        #[cfg(test)]
+        tests::SNAPSHOT_REGIONS.with_borrow_mut(|regions| regions.push(region));
         self.target
             .to(self.list, D3D12_RESOURCE_STATE_COPY_SOURCE, self.changes);
         snapshot.to(self.list, D3D12_RESOURCE_STATE_COPY_DEST, self.changes);
@@ -2700,20 +2706,13 @@ impl Encoding<'_> {
                 }
                 next += 1;
             }
-            let mut union = self.scene.backdrop_blur_rects[first].bounds;
-            for rect in &self.scene.backdrop_blur_rects[first + 1..next] {
-                union = union.union(&rect.bounds);
-            }
-            let region = intersect(round_out(&union, blur_reach(levels)), self.clip);
+            let request = BackdropRequest::blur_rects(&self.scene.backdrop_blur_rects[first..next]);
+            let union = request.samples.context("empty D3D12 backdrop group")?;
             if is_empty(&intersect(round_out(&union, 0), self.clip)) {
                 first = next;
                 continue;
             }
-            #[cfg(test)]
-            let region = (!tests::FULL_WINDOW_BACKDROP.with(|full| full.get())).then_some(region);
-            #[cfg(not(test))]
-            let region = Some(region);
-            let (blurred, original) = self.backdrop(levels, region)?;
+            let (blurred, original) = self.backdrop(request)?;
             let buffer = self.data.blur_rects;
             self.draw(
                 ShaderModule::BlurRect,
@@ -2767,7 +2766,8 @@ impl Encoding<'_> {
                 }
                 next += 1;
             }
-            let (blurred, original) = self.backdrop(levels, None)?;
+            let request = BackdropRequest::effects(&self.scene.effect_quads[first..next]);
+            let (blurred, original) = self.backdrop(request)?;
             self.bind_effect_textures(&textures)?;
             self.draw_pipeline(
                 &pipeline,
@@ -3007,6 +3007,9 @@ mod tests {
         /// Forces whole-window backdrops to produce a region-test reference.
         pub(super) static FULL_WINDOW_BACKDROP: std::cell::Cell<bool> =
             const { std::cell::Cell::new(false) };
+        /// The window pixels every backdrop snapshot on this thread copied.
+        pub(super) static SNAPSHOT_REGIONS: std::cell::RefCell<Vec<RECT>> =
+            const { std::cell::RefCell::new(Vec::new()) };
     }
 
     #[::core::prelude::v1::test]
@@ -3871,7 +3874,7 @@ mod tests {
             reload_app_effects(
                 AppEffects::new(
                     "test",
-                    r#"{"schema": 11, "effects": [
+                    r#"{"schema": 12, "effects": [
                         {"name": "tint", "backdrop": false, "hlsl": "tint.hlsl"}
                     ]}"#,
                     [("tint.hlsl".to_string(), hlsl.to_string())],
@@ -4100,8 +4103,10 @@ mod tests {
         let levels = scene.backdrop_blur_rects[0].effective_kernel_levels() as usize;
         assert!(levels > 0, "the fixture must blur");
         assert!(
-            intersect(round_out(&small, blur_reach(levels)), full_rect(256, 256))
-                != full_rect(256, 256),
+            intersect(
+                round_out(&small, backdrop_blur_reach(levels)),
+                full_rect(256, 256)
+            ) != full_rect(256, 256),
             "the fixture must exercise the region-limited path"
         );
         let mut limited = offscreen(256, 256)?;
@@ -4122,6 +4127,80 @@ mod tests {
                 }
             }
         }
+        Ok(())
+    }
+
+    #[::core::prelude::v1::test]
+    #[ignore = "requires a native D3D12 hardware adapter; run explicitly for renderer qualification"]
+    fn native_bounded_effect_snapshots_its_reach_and_a_mixed_group_the_window() -> Result<()> {
+        let content_mask = mask(256., 256.);
+        let frost = |rect: Bounds<ScaledPixels>, reach: Option<f32>| EffectQuad {
+            effect_id: effect_id::FROST,
+            bounds: rect,
+            content_mask,
+            params: EffectQuad::params_from(&[1., 6., 0., 0., 1., 1., 1., 0.]),
+            opacity: 1.,
+            backdrop_blur_radius: ScaledPixels(6.),
+            scale: 1.,
+            flags: EFFECT_FLAG_NEEDS_BACKDROP | reach.map_or(0, |_| EFFECT_FLAG_BACKDROP_REACH),
+            backdrop_reach: ScaledPixels(reach.unwrap_or(0.)),
+            ..Default::default()
+        };
+        let scene = |effects: &[EffectQuad]| {
+            let mut scene = Scene::default();
+            scene.insert_primitive(quad(
+                bounds(0., 0., 256., 256.),
+                rgb(0x000000),
+                content_mask,
+            ));
+            for index in 0..8 {
+                let x = 16. + index as f32 * 28.;
+                scene.insert_primitive(quad(bounds(x, 0., 12., 256.), rgb(0xffffff), content_mask));
+            }
+            for effect in effects {
+                scene.insert_primitive(*effect);
+            }
+            scene.finish();
+            scene
+        };
+        let small = bounds(96., 96., 64., 64.);
+        let bounded = scene(&[frost(small, Some(10.))]);
+        let levels = bounded.effect_quads[0].effective_kernel_levels() as usize;
+
+        SNAPSHOT_REGIONS.with_borrow_mut(Vec::clear);
+        let limited = offscreen(256, 256)?
+            .render_to_image(&bounded, WindowBackgroundAppearance::Transparent)?;
+        assert_eq!(
+            SNAPSHOT_REGIONS.take(),
+            [round_out(&small, 10 + backdrop_blur_reach(levels))],
+            "the quad grown by its reach and the kernel's"
+        );
+        FULL_WINDOW_BACKDROP.with(|full| full.set(true));
+        let reference = offscreen(256, 256).and_then(|mut renderer| {
+            renderer.render_to_image(&bounded, WindowBackgroundAppearance::Transparent)
+        });
+        FULL_WINDOW_BACKDROP.with(|full| full.set(false));
+        let reference = reference?;
+        for y in 96..160 {
+            for x in 96..160 {
+                let (a, b) = (limited.get_pixel(x, y).0, reference.get_pixel(x, y).0);
+                for channel in 0..4 {
+                    close_channel(a[channel], b[channel]);
+                }
+            }
+        }
+
+        let mixed = scene(&[
+            frost(small, Some(10.)),
+            frost(bounds(8., 8., 32., 32.), None),
+        ]);
+        SNAPSHOT_REGIONS.with_borrow_mut(Vec::clear);
+        offscreen(256, 256)?.render_to_image(&mixed, WindowBackgroundAppearance::Transparent)?;
+        assert_eq!(
+            SNAPSHOT_REGIONS.take(),
+            [full_rect(256, 256)],
+            "one group, and an unbounded quad in it makes it whole"
+        );
         Ok(())
     }
     #[::core::prelude::v1::test]

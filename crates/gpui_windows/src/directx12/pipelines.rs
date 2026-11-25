@@ -119,6 +119,8 @@ struct EffectQuad {
     float scale;
     uint flags;
     uint4 corner_shapes;
+    float backdrop_reach;
+    uint pad;
 };
 StructuredBuffer<EffectQuad> effect_quads: register(t1);
 

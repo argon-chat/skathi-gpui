@@ -36,7 +36,7 @@ struct EffectCornerShapes {
     bottom_left: u32,
 }
 
-// 64 words / 256 bytes, `gpui::EffectQuad`.
+// 66 words / 264 bytes, `gpui::EffectQuad`.
 struct EffectQuad {
     order: u32,
     effect_id: u32,
@@ -53,6 +53,8 @@ struct EffectQuad {
     scale: f32,
     flags: u32,
     corner_shapes: EffectCornerShapes,
+    backdrop_reach: f32,
+    pad: u32,
 }
 
 @group(0) @binding(0) var<uniform> effect_globals: EffectGlobals;

@@ -73,7 +73,7 @@ struct CornerShapes {
 
 // Keep in sync with Rust `EffectQuad` (crates/gpui/src/scene.rs) and with
 // `struct VnEffectQuad` in the generated fragment wrapper
-// (scripts/shaders.ts). 64 words / 256 bytes.
+// (scripts/shaders.ts). 66 words / 264 bytes.
 //
 // The whole struct is declared even though the vertex stage reads only three
 // fields: D3D11 validates a StructuredBuffer's declared stride against the
@@ -95,6 +95,8 @@ struct EffectQuad {
     float scale;
     uint flags;
     CornerShapes corner_shapes;
+    float backdrop_reach;
+    uint pad;
 };
 
 StructuredBuffer<EffectQuad> effect_quads: register(t1);

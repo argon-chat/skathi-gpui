@@ -260,7 +260,7 @@ mod tests {
     /// `count` shows the red of its history, and each step adds 0.25 to it.
     const EFFECTS_WGSL: &str = r#"
         @group(0) @binding(0) var<uniform> globals: array<vec4<f32>, 3>;
-        @group(1) @binding(0) var<storage, read> quads: array<array<f32, 64>>;
+        @group(1) @binding(0) var<storage, read> quads: array<array<f32, 66>>;
         @group(2) @binding(1) var clamp_sampler: sampler;
         @group(2) @binding(3) var image: texture_2d<f32>;
         @group(2) @binding(7) var content: texture_2d<f32>;
@@ -303,7 +303,7 @@ mod tests {
         gpui::reload_app_effects(
             gpui::AppEffects::new(
                 "test",
-                r#"{"schema": 11, "effects": [
+                r#"{"schema": 12, "effects": [
                     {"name": "swap", "backdrop": false, "wgsl": "fx.wgsl"},
                     {"name": "count", "backdrop": false, "history": true, "wgsl": "fx.wgsl"}
                 ]}"#,

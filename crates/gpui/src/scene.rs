@@ -2356,6 +2356,11 @@ pub const EFFECT_FLAG_HISTORY_PASS: u32 = 8;
 /// Host-only flag identifying visible consumers of automatic effect quality.
 pub(crate) const EFFECT_FLAG_AUTO_QUALITY: u32 = 16;
 
+/// Bit 5 of [`EffectQuad::flags`]: the effect samples the backdrop only within
+/// [`EffectQuad::backdrop_reach`] of its drawn quad (`[SkBackdropReach]`), so
+/// its snapshot can be bounded; samples beyond it are clamped to that edge.
+pub const EFFECT_FLAG_BACKDROP_REACH: u32 = 32;
+
 /// CSS quality choice for an effect with a host-filled quality slot.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(JsonSchema))]
@@ -2647,6 +2652,10 @@ pub struct EffectSpec {
     /// `Some(i)`: `params[i]` (a logical-pixel length) is the backdrop blur
     /// radius. Only meaningful with [`EFFECT_FLAG_NEEDS_BACKDROP`].
     pub backdrop_radius_param: Option<u8>,
+    /// `Some(i)`: `params[i]` (a logical-pixel length) is how far outside the
+    /// drawn quad the effect samples its backdrop. `None` samples anywhere.
+    #[serde(default)]
+    pub backdrop_reach_param: Option<u8>,
     /// `Some(i)`: `params[i]` (a logical-pixel length) dilates the painted
     /// quad, giving an outer glow somewhere to land.
     pub bleed_param: Option<u8>,
@@ -2690,6 +2699,7 @@ impl EffectSpec {
         flags: 0,
         length_mask: 0,
         backdrop_radius_param: None,
+        backdrop_reach_param: None,
         bleed_param: None,
         animated: false,
         animated_param: None,
@@ -2750,6 +2760,13 @@ impl EffectSpec {
     pub fn backdrop_blur_radius(&self) -> f32 {
         self.param(self.backdrop_radius_param).max(0.)
     }
+
+    /// How far outside the drawn quad the backdrop is sampled, in logical
+    /// pixels; `None` when it may be sampled anywhere.
+    pub fn backdrop_reach(&self) -> Option<f32> {
+        let reach = self.param(Some(self.backdrop_reach_param?));
+        (reach.is_finite() && self.flags & EFFECT_FLAG_NEEDS_BACKDROP != 0).then(|| reach.max(0.))
+    }
 }
 
 /// A `--shading` transition between two different effects: `from` paints at
@@ -2780,7 +2797,7 @@ pub struct EffectCrossFade {
 /// Keep the field order in sync with `struct EffectQuad` in
 /// `gpui_windows/src/effects.hlsl` and with `struct VnEffectQuad` in the
 /// generated wrapper (`scripts/shaders.ts`).
-/// 64 words / 256 bytes.
+/// 66 words / 264 bytes: the shaders' `float2` bounds align it to 8.
 #[derive(Debug, Copy, Clone, Default)]
 #[repr(C)]
 #[expect(missing_docs)]
@@ -2809,6 +2826,10 @@ pub struct EffectQuad {
     pub flags: u32,
     /// The element's CSS `corner-shape`.
     pub corner_shapes: CornerShapes,
+    /// How far outside `bounds` the effect samples its backdrop. Ignored
+    /// without [`EFFECT_FLAG_BACKDROP_REACH`].
+    pub backdrop_reach: ScaledPixels,
+    pub pad: u32,
 }
 
 impl EffectQuad {
@@ -2833,6 +2854,15 @@ impl EffectQuad {
     /// Whether this quad reads and steps a history ([`EFFECT_FLAG_HISTORY`]).
     pub fn has_history(&self) -> bool {
         self.flags & EFFECT_FLAG_HISTORY != 0
+    }
+
+    /// What this quad samples of its backdrop: `bounds` grown by its reach, or
+    /// `None` for anywhere in the frame.
+    pub fn backdrop_samples(&self) -> Option<Bounds<ScaledPixels>> {
+        (self.flags & EFFECT_FLAG_BACKDROP_REACH != 0).then(|| {
+            self.bounds
+                .dilate(ScaledPixels(self.backdrop_reach.0.max(0.)))
+        })
     }
 
     /// The device-pixel size of this quad's history texture.
@@ -2872,7 +2902,7 @@ impl From<EffectQuad> for Primitive {
     }
 }
 
-const _: () = assert!(std::mem::size_of::<EffectQuad>() == 256);
+const _: () = assert!(std::mem::size_of::<EffectQuad>() == 264);
 const _: () = assert!(EFFECT_PARAM_SLOTS == 32);
 
 // The four primitives that carry a CSS `transform`. Their Rust layout IS the

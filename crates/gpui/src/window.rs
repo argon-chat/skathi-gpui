@@ -7976,6 +7976,13 @@ impl Window {
             }
         }
 
+        let backdrop_reach = spec
+            .backdrop_reach()
+            .map(|reach| px(reach).scale(scale_factor));
+        if backdrop_reach.is_some() {
+            flags |= crate::EFFECT_FLAG_BACKDROP_REACH;
+        }
+
         let mut clocked = spec;
         clocked.params = params;
         if spec.animated || clocked.clock_running(real_time) {
@@ -8005,6 +8012,8 @@ impl Window {
             scale: scale_factor,
             flags,
             corner_shapes: CornerShapes::new(&corner_shapes),
+            backdrop_reach: backdrop_reach.unwrap_or_default(),
+            pad: 0,
         })
     }
 
@@ -8044,6 +8053,8 @@ impl Window {
             scale: scale_factor,
             flags: 0,
             corner_shapes: CornerShapes::default(),
+            backdrop_reach: ScaledPixels(0.),
+            pad: 0,
         });
     }
 
