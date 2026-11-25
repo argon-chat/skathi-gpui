@@ -1374,7 +1374,7 @@ vertex NativeViewVertexOutput native_view_vertex(
     uint vertex_id [[vertex_id]], uint native_view_id [[instance_id]],
     constant SurfaceBounds *native_views [[buffer(SurfaceInputIndex_Surfaces)]],
     constant Size_DevicePixels *viewport_size
-    [[buffer(GlobalInputIndex_ViewportSize)]]) {
+    [[buffer(SurfaceInputIndex_ViewportSize)]]) {
   float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
   SurfaceBounds native_view = native_views[native_view_id];
   Bounds_ScaledPixels clipped = clip_to_mask(native_view.bounds, native_view.content_mask.bounds);

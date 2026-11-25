@@ -1128,9 +1128,12 @@ impl MetalRenderer {
                         return Err(error);
                     }
                 }
-                PrimitiveBatch::NativeViews(range) => {
-                    self.draw_native_views(range, instance_bindings, &command_encoder)
-                }
+                PrimitiveBatch::NativeViews(range) => self.draw_native_views(
+                    range,
+                    instance_bindings,
+                    viewport_size,
+                    &command_encoder,
+                ),
                 PrimitiveBatch::SubpixelSprites { .. } => unreachable!(),
             }
         }
@@ -1143,6 +1146,7 @@ impl MetalRenderer {
         &self,
         native_views: Range<usize>,
         instance_bindings: &InstanceBindings,
+        viewport_size: Size<DevicePixels>,
         command_encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
     ) {
         if native_views.is_empty() {
@@ -1157,6 +1161,11 @@ impl MetalRenderer {
                 Some(&instance_bindings.native_views.buffer),
                 instance_bindings.native_views.offset,
                 SurfaceInputIndex::Surfaces as usize,
+            );
+            command_encoder.setVertexBytes_length_atIndex(
+                ptr::NonNull::from(&viewport_size).cast(),
+                mem::size_of_val(&viewport_size),
+                SurfaceInputIndex::ViewportSize as usize,
             );
             command_encoder.drawPrimitives_vertexStart_vertexCount_instanceCount_baseInstance(
                 MTLPrimitiveType::TriangleStrip,
