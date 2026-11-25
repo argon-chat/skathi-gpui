@@ -3217,6 +3217,143 @@ mod tests {
         Ok(())
     }
 
+    /// A glow's halo, frost and a faint fill over a transparent window: the
+    /// scRGB output decodes the premultiplied pixel the 8-bit swap chain
+    /// holds, and a half-transparent HDR tile still passes SDR white.
+    #[::core::prelude::v1::test]
+    #[ignore = "requires a native D3D12 hardware adapter; run explicitly for renderer qualification"]
+    fn native_hdr_output_composites_translucent_pixels_as_the_8_bit_swap_chain() -> Result<()> {
+        use gpui::hdr_test_scene::{SDR_WHITE, encode_signed as encode, f32_to_half};
+        const W: u32 = 96;
+        const H: u32 = 48;
+        let mut renderer = offscreen(W, H)?;
+        let content_mask = mask(W as f32, H as f32);
+        let mut scene = Scene::default();
+        scene.insert_primitive(quad(
+            bounds(0., 0., 96., 48.),
+            rgba(0xffffff0a),
+            content_mask,
+        ));
+        scene.insert_primitive(EffectQuad {
+            effect_id: effect_id::GLOW,
+            bounds: bounds(4., 0., 56., 40.),
+            content_mask,
+            corner_radii: Corners::all(ScaledPixels(18.)),
+            params: EffectQuad::params_from(&[12., 1., 0., 0., 1., 0.176, 0.584, 1.]),
+            opacity: 1.,
+            bleed: ScaledPixels(12.),
+            scale: 1.,
+            ..Default::default()
+        });
+        scene.insert_primitive(Quad {
+            corner_radii: Corners::all(ScaledPixels(6.)),
+            ..quad(bounds(16., 12., 32., 16.), rgb(0x1d2233), content_mask)
+        });
+        scene.insert_primitive(EffectQuad {
+            effect_id: effect_id::FROST,
+            bounds: bounds(64., 0., 32., 24.),
+            content_mask,
+            corner_radii: Corners::all(ScaledPixels(8.)),
+            params: EffectQuad::params_from(&[0.85, 8., 0., 0., 0.81, 0.91, 1., 0.12]),
+            opacity: 1.,
+            backdrop_blur_radius: ScaledPixels(8.),
+            scale: 1.,
+            flags: EFFECT_FLAG_NEEDS_BACKDROP,
+            ..Default::default()
+        });
+        let tile_size = size(DevicePixels(8), DevicePixels(8));
+        let half = f32_to_half(4.0);
+        let one = f32_to_half(1.0);
+        let bytes: Vec<u8> = (0..64)
+            .flat_map(|_| [half, half, half, one])
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let key = AtlasKey::Image(RenderImageParams {
+            image_id: ImageId(0x4d52_0200),
+            frame_index: 0,
+        });
+        let tile = renderer
+            .atlas
+            .write_hdr_bytes(&key, tile_size, &bytes)?
+            .context("the HDR tile was not allocated")?;
+        scene.insert_primitive(PolychromeSprite {
+            order: 0,
+            pad: f32::to_bits(4.0),
+            tile,
+            grayscale: false.into(),
+            opacity: 0.5,
+            bounds: bounds(72., 32., 8., 8.),
+            content_mask,
+            corner_radii: Corners::default(),
+            transformation: TransformationMatrix::unit(),
+            tint: Hsla::transparent_black(),
+            corner_shapes: CornerShapes::default(),
+        });
+        scene.finish();
+
+        let transparent = WindowBackgroundAppearance::Transparent;
+        let sdr = renderer.render_to_image(&scene, transparent)?;
+        renderer.set_hdr_output(Some(HdrOutput {
+            sdr_white: SDR_WHITE,
+            content_headroom: 4.0,
+        }));
+        renderer.apply_hdr_output()?;
+        let output = Target::new_in(&renderer.gpu, HDR_FORMAT, W, H, 1)?;
+        let mut uploads = UploadPool::default();
+        uploads.begin(renderer.gpu.completed_value(), 0)?;
+        renderer.render(&scene, transparent, output.clone(), true, &mut uploads)?;
+        uploads.finish();
+        let shown: Vec<f32> = renderer
+            .read_target(output)?
+            .chunks_exact(2)
+            .map(|half| half_to_f32(u16::from_le_bytes([half[0], half[1]])))
+            .collect();
+
+        let mut translucent = 0;
+        let mut worst = (0.0f32, 0, 0);
+        for (x, y, expected) in sdr.enumerate_pixels() {
+            if (72..80).contains(&x) && (32..40).contains(&y) {
+                continue;
+            }
+            let at = ((y * W + x) * 4) as usize;
+            let alpha = expected.0[3];
+            if alpha < 255 && expected.0[..3].iter().any(|&c| c > 8) {
+                translucent += 1;
+            }
+            for channel in 0..3 {
+                let code = encode(shown[at + channel] / SDR_WHITE) * 255.0;
+                let error = (code - f32::from(expected.0[channel])).abs();
+                if error > worst.0 {
+                    worst = (error, x, y);
+                }
+                assert!(
+                    error <= 1.0,
+                    "({x}, {y}): scRGB {:?} is code {code} where the 8-bit target holds {:?}",
+                    &shown[at..at + 4],
+                    expected.0
+                );
+            }
+            assert!(
+                (shown[at + 3] * 255.0 - f32::from(alpha)).abs() <= 1.0,
+                "({x}, {y}): alpha {} for {alpha}",
+                shown[at + 3]
+            );
+        }
+        assert!(translucent > 200, "{translucent} translucent pixels");
+        eprintln!(
+            "largest difference {:.2} at ({}, {})",
+            worst.0, worst.1, worst.2
+        );
+        let at = ((36 * W + 76) * 4) as usize;
+        eprintln!("half-transparent 4.0 tile: scRGB {:?}", &shown[at..at + 4]);
+        assert!(
+            shown[at] > SDR_WHITE && (shown[at + 3] - 0.52).abs() < 0.01,
+            "the half-transparent HDR tile: {:?}",
+            &shown[at..at + 4]
+        );
+        Ok(())
+    }
+
     fn bounds(x: f32, y: f32, width: f32, height: f32) -> Bounds<ScaledPixels> {
         Bounds::new(
             point(ScaledPixels(x), ScaledPixels(y)),

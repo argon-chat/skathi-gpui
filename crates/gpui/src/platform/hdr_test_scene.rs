@@ -40,7 +40,8 @@ fn encode(linear: f32) -> f32 {
     }
 }
 
-fn encode_signed(linear: f32) -> f32 {
+/// Encode one channel for an extended sRGB render target.
+pub fn encode_signed(linear: f32) -> f32 {
     encode(linear.abs()).copysign(linear)
 }
 
