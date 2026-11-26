@@ -70,12 +70,12 @@ struct EffectInput_0
 };
 
 
-#line 1117
+#line 1119
 float sk_hash12_0(float2 p_0)
 {
     float _S1 = p_0.x;
 
-#line 1119
+#line 1121
     float3 p3_0 = fract(float3(_S1, p_0.y, _S1) * float3(0.1031000018119812) );
     float3 p3_1 = p3_0 + float3(dot(p3_0, float3(p3_0.y + 33.3300018310546875, p3_0.z + 33.3300018310546875, p3_0.x + 33.3300018310546875))) ;
     return fract((p3_1.x + p3_1.y) * p3_1.z);
@@ -533,22 +533,22 @@ float4 sk_linear_to_frame_0(float4 light_2)
 }
 
 
-#line 1051
+#line 1053
 float4 sk_finish_0(const Noise_0 thread* material_0, const EffectInput_0 thread* i_1, KernelContext_0 thread* kernelContext_1)
 {
     if(i_1->historyPass_0)
     {
 
-#line 1053
+#line 1055
         float4 _S23 = IEffect_updatex24defaultImpl_0(material_0, i_1);
 
         return _S23;
     }
 
-#line 1055
+#line 1057
     float4 _S24 = Noise_shade_1(material_0, i_1);
 
-#line 1055
+#line 1057
     float4 shaded_0;
 
 
@@ -556,21 +556,21 @@ float4 sk_finish_0(const Noise_0 thread* material_0, const EffectInput_0 thread*
     {
         float _S25 = _S24.w;
 
-#line 1060
+#line 1062
         shaded_0 = float4(_S24.xyz * float3(_S25) , _S25);
 
-#line 1058
+#line 1060
     }
     else
     {
 
-#line 1058
+#line 1060
         shaded_0 = _S24;
 
-#line 1058
+#line 1060
     }
 
-#line 1058
+#line 1060
     bool extended_0;
 
 
@@ -578,119 +578,119 @@ float4 sk_finish_0(const Noise_0 thread* material_0, const EffectInput_0 thread*
     if((kernelContext_1->GlobalParams_0->sk_extended_range_0) != 0U)
     {
 
-#line 1062
+#line 1064
         if(i_1->hasBackdrop_0)
         {
 
-#line 1062
+#line 1064
             extended_0 = true;
 
-#line 1062
+#line 1064
         }
         else
         {
 
-#line 1062
+#line 1064
             extended_0 = i_1->hasContent_0;
 
-#line 1062
+#line 1064
         }
 
-#line 1062
+#line 1064
     }
     else
     {
 
-#line 1062
+#line 1064
         extended_0 = false;
 
-#line 1062
+#line 1064
     }
 
-#line 1062
+#line 1064
     bool _S26 = i_1->backdropLinear_0;
 
-#line 1062
+#line 1064
     float headroom_1;
     if(i_1->backdropLinear_0)
     {
 
-#line 1063
+#line 1065
         headroom_1 = 65504.0;
 
-#line 1063
+#line 1065
     }
     else
     {
 
-#line 1063
+#line 1065
         if(extended_0)
         {
 
-#line 1063
+#line 1065
             float _S27 = sk_frame_headroom_0(i_1, kernelContext_1);
 
-#line 1063
+#line 1065
             headroom_1 = _S27;
 
-#line 1063
+#line 1065
         }
         else
         {
 
-#line 1063
+#line 1065
             headroom_1 = 1.0;
 
-#line 1063
+#line 1065
         }
 
-#line 1063
+#line 1065
     }
 
-#line 1063
+#line 1065
     bool _S28;
     if(extended_0)
     {
 
-#line 1064
+#line 1066
         _S28 = true;
 
-#line 1064
+#line 1066
     }
     else
     {
 
-#line 1064
+#line 1066
         _S28 = _S26;
 
-#line 1064
+#line 1066
     }
 
-#line 1064
+#line 1066
     if(_S28)
     {
 
-#line 1064
+#line 1066
         shaded_0 = sk_clamp_extended_0(shaded_0, headroom_1);
 
-#line 1064
+#line 1066
     }
     else
     {
 
-#line 1064
+#line 1066
         shaded_0 = sk_clamp_premultiplied_0(shaded_0);
 
-#line 1064
+#line 1066
     }
 
 
     float coverage_1 = saturate(0.5 - (i_1->sd_0 - i_1->bleed_0)) * saturate(i_1->opacity_0) * i_1->clip_0;
 
-#line 1067
+#line 1069
     float4 result_0;
 
-#line 1072
+#line 1074
     if(i_1->hasBackdrop_0)
     {
         float4 page_1 = ((kernelContext_1->sk_backdrop_page_0).sample((kernelContext_1->sk_clamp_sampler_0), (i_1->uv_0), level((0.0))));
@@ -700,53 +700,53 @@ float4 sk_finish_0(const Noise_0 thread* material_0, const EffectInput_0 thread*
         if(_S26)
         {
 
-#line 1078
+#line 1080
             shaded_0 = sk_linear_to_frame_0(mix(sk_frame_to_linear_0(page_1), shaded_0, float4(coverage_1) )) * float4(1.0000152587890625, 1.0000152587890625, 1.0000152587890625, 1.0);
 
-#line 1078
+#line 1080
         }
         else
         {
 
-#line 1078
+#line 1080
             shaded_0 = mix(page_1, shaded_0, float4(coverage_1) );
 
-#line 1078
+#line 1080
         }
 
-#line 1078
+#line 1080
         result_0 = shaded_0;
 
-#line 1072
+#line 1074
     }
     else
     {
 
-#line 1072
+#line 1074
         result_0 = shaded_0 * float4(coverage_1) ;
 
-#line 1072
+#line 1074
     }
 
-#line 1085
+#line 1087
     if(extended_0)
     {
 
-#line 1085
+#line 1087
         shaded_0 = sk_clamp_extended_0(result_0, headroom_1);
 
-#line 1085
+#line 1087
     }
     else
     {
 
-#line 1085
+#line 1087
         shaded_0 = sk_clamp_premultiplied_0(result_0);
 
-#line 1085
+#line 1087
     }
 
-#line 1085
+#line 1087
     return shaded_0;
 }
 
@@ -1587,68 +1587,68 @@ float sk_content_mask_coverage_0(float2 position_0, const SkBounds_natural_0 thr
 }
 
 
-#line 967
-EffectInput_0 sk_begin_0(uint id_0, float4 frag_position_0, KernelContext_0 thread* kernelContext_7)
+#line 969
+EffectInput_0 sk_begin_0(uint id_0, float4 frag_position_0, bool linear_0, KernelContext_0 thread* kernelContext_7)
 {
 
-#line 967
+#line 969
     SkEffectQuad_natural_0 device* _S65 = kernelContext_7->sk_effect_quads_0+id_0;
 
-#line 967
+#line 969
     uint _S66 = _S65->flags_0;
 
 
     bool history_pass_0 = ((_S65->flags_0) & 8U) != 0U;
 
-#line 970
+#line 972
     float2 position_1;
 
 
     if(history_pass_0)
     {
 
-#line 973
+#line 975
         position_1 = float2(_S65->bounds_0.origin_0)  + frag_position_0.xy;
 
-#line 973
+#line 975
     }
     else
     {
 
-#line 973
+#line 975
         position_1 = frag_position_0.xy;
 
-#line 973
+#line 975
     }
 
 
     float2 uv_5 = position_1 / kernelContext_7->GlobalParams_0->sk_viewport_size_0;
 
-#line 976
+#line 978
     SkCorners_0 _S67 = _S65->corner_radii_0;
 
-#line 976
+#line 978
     thread SkBounds_natural_0 _S68 = _S65->bounds_0;
 
-#line 976
+#line 978
     thread SkCorners_0 _S69 = _S65->corner_radii_0;
 
-#line 976
+#line 978
     float _S70 = sk_quad_sdf_0(position_1, &_S68, &_S69);
 
-#line 976
+#line 978
     float _S71 = _S65->bleed_1;
 
-#line 984
+#line 986
     float _S72 = _S70 + _S65->bleed_1;
 
     float2 element_origin_0 = float2((&_S68)->origin_0)  + float2(_S65->bleed_1) ;
     float2 element_size_0 = max(float2((&_S68)->size_1)  - float2((2.0 * _S65->bleed_1)) , float2(1.0, 1.0));
 
-#line 987
+#line 989
     SkCornerShapes_0 shapes_4 = _S65->corner_shapes_0;
 
-#line 987
+#line 989
     float sd_element_0;
 
 
@@ -1664,40 +1664,40 @@ EffectInput_0 sk_begin_0(uint id_0, float4 frag_position_0, KernelContext_0 thre
         (&radii_7)->bottom_right_0 = max(_S67.bottom_right_0 - _S71, 0.0);
         (&radii_7)->bottom_left_0 = max(_S67.bottom_left_0 - _S71, 0.0);
 
-#line 1000
+#line 1002
         thread SkBounds_0 _S73 = element_0;
 
-#line 1000
+#line 1002
         thread SkCorners_0 _S74 = radii_7;
 
-#line 1000
+#line 1002
         thread SkCornerShapes_0 _S75 = shapes_4;
 
-#line 1000
+#line 1002
         float _S76 = sk_shaped_quad_sdf_1(position_1, &_S73, &_S74, &_S75);
 
-#line 1000
+#line 1002
         sd_element_0 = _S76;
 
-#line 991
+#line 993
     }
     else
     {
 
-#line 991
+#line 993
         sd_element_0 = _S72;
 
-#line 991
+#line 993
     }
 
-#line 1004
+#line 1006
     bool has_backdrop_0 = (_S66 & 1U) != 0U;
 
     thread EffectInput_0 i_2;
     (&i_2)->uv_0 = uv_5;
     float2 _S77 = position_1 - element_origin_0;
 
-#line 1008
+#line 1010
     (&i_2)->px_0 = _S77;
     (&i_2)->size_0 = element_size_0;
     (&i_2)->local_0 = _S77 / element_size_0;
@@ -1708,68 +1708,86 @@ EffectInput_0 sk_begin_0(uint id_0, float4 frag_position_0, KernelContext_0 thre
     (&i_2)->quad_0 = id_0;
     (&i_2)->backdropBounded_0 = (_S66 & 32U) != 0U;
 
-#line 1016
+#line 1018
     bool _S78;
-    if(has_backdrop_0)
+    if(linear_0)
     {
 
-#line 1017
-        _S78 = (_S66 & 64U) != 0U;
+#line 1019
+        _S78 = has_backdrop_0;
 
-#line 1017
+#line 1019
     }
     else
     {
 
-#line 1017
+#line 1019
         _S78 = false;
 
-#line 1017
+#line 1019
     }
 
-#line 1017
+#line 1019
+    if(_S78)
+    {
+
+#line 1019
+        _S78 = (_S66 & 64U) != 0U;
+
+#line 1019
+    }
+    else
+    {
+
+#line 1019
+        _S78 = false;
+
+#line 1019
+    }
+
+#line 1019
     (&i_2)->backdropLinear_0 = _S78;
 
 
     if(_S78)
     {
 
-#line 1020
+#line 1022
         _S78 = !((_S65->backdrop_blur_radius_0) <= 0.0);
 
-#line 1020
+#line 1022
     }
     else
     {
 
-#line 1020
+#line 1022
         _S78 = false;
 
-#line 1020
+#line 1022
     }
 
-#line 1020
+#line 1022
     (&i_2)->backdropLinearBlur_0 = _S78;
     (&i_2)->bleed_0 = _S71;
 
-#line 1021
+#line 1023
     thread EffectInput_0 _S79 = i_2;
 
-#line 1021
+#line 1023
     float4 _S80 = EffectInput_backdropAt_0(&_S79, uv_5, kernelContext_7);
     (&i_2)->backdrop_0 = _S80;
 
-#line 1022
+#line 1024
     thread EffectInput_0 _S81 = i_2;
 
-#line 1022
+#line 1024
     float4 _S82 = EffectInput_contentAt_0(&_S81, uv_5, kernelContext_7);
     (&i_2)->content_0 = _S82;
 
-#line 1023
+#line 1025
     thread EffectInput_0 _S83 = i_2;
 
-#line 1023
+#line 1025
     float4 _S84 = EffectInput_historyAtPx_0(&_S83, (&i_2)->px_0, kernelContext_7);
     (&i_2)->history_0 = _S84;
     (&i_2)->sd_0 = sd_element_0;
@@ -1778,16 +1796,16 @@ EffectInput_0 sk_begin_0(uint id_0, float4 frag_position_0, KernelContext_0 thre
     (&i_2)->scale_1 = _S65->scale_2;
     (&i_2)->opacity_0 = _S65->opacity_1;
 
-#line 1029
+#line 1031
     thread SkBounds_natural_0 _S85 = _S65->content_mask_0;
 
-#line 1029
+#line 1031
     thread SkCorners_0 _S86 = _S65->content_mask_radii_0;
 
-#line 1029
+#line 1031
     thread SkCornerShapes_0 _S87 = _S65->content_mask_shapes_0;
 
-#line 1029
+#line 1031
     float _S88 = sk_content_mask_coverage_0(position_1, &_S85, &_S86, &_S87);
     (&i_2)->clip_0 = _S88;
     return i_2;
@@ -1847,7 +1865,7 @@ struct pixelInput_0
     (&kernelContext_9)->sk_backdrop_page_0 = sk_backdrop_page_1;
 
 #line 84
-    EffectInput_0 _S90 = sk_begin_0(_S89.sk_id_0, sk_position_0, &kernelContext_9);
+    EffectInput_0 _S90 = sk_begin_0(_S89.sk_id_0, sk_position_0, false, &kernelContext_9);
 
 #line 90
     thread Noise_0 sk_material_0;

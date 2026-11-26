@@ -858,7 +858,7 @@ fn sk_content_mask_coverage_0( position_0 : vec2<f32>,  mask_0 : ptr<function, S
     return saturate(0.5f - _S47);
 }
 
-fn sk_begin_0( id_0 : u32,  frag_position_0 : vec4<f32>) -> EffectInput_0
+fn sk_begin_0( id_0 : u32,  frag_position_0 : vec4<f32>,  linear_0 : bool) -> EffectInput_0
 {
     var _S48 : u32 = sk_effect_quads_0[id_0].flags_0;
     var history_pass_0 : bool = (((sk_effect_quads_0[id_0].flags_0) & (u32(8)))) != u32(0);
@@ -912,7 +912,15 @@ fn sk_begin_0( id_0 : u32,  frag_position_0 : vec4<f32>) -> EffectInput_0
     i_2.quad_0 = id_0;
     i_2.backdropBounded_0 = ((_S48 & (u32(32)))) != u32(0);
     var _S57 : bool;
-    if(has_backdrop_0)
+    if(linear_0)
+    {
+        _S57 = has_backdrop_0;
+    }
+    else
+    {
+        _S57 = false;
+    }
+    if(_S57)
     {
         _S57 = ((_S48 & (u32(64)))) != u32(0);
     }
@@ -965,7 +973,7 @@ struct pixelInput_0
 @fragment
 fn effect_fragment( _S62 : pixelInput_0, @builtin(position) sk_position_0 : vec4<f32>) -> pixelOutput_0
 {
-    var sk_in_0 : EffectInput_0 = sk_begin_0(_S62.sk_id_0, sk_position_0);
+    var sk_in_0 : EffectInput_0 = sk_begin_0(_S62.sk_id_0, sk_position_0, true);
     var sk_material_0 : PassLinear_0;
     sk_material_0.radius_0 = EffectInput_param_0(sk_in_0, u32(0));
     var _S63 : pixelOutput_0 = pixelOutput_0( sk_finish_0(sk_material_0, sk_in_0) );

@@ -3,7 +3,7 @@
   "slang": "2026.12",
   "compiler": "redslangc 0.1.1",
   "kind": "user",
-  "preludeSha256": "03e1097001f20f424c8d2c5c1d56fbad7fa91c9378c02f8c380325fddaec236f",
+  "preludeSha256": "eff9abea40eae8abae382e3ce12a6e73f23c03baf8f0610c68e6dc23fc761748",
   "effects": [
     {
       "id": 0,
@@ -20,9 +20,9 @@
       "source": "shaders/pass_linear.slang",
       "sourceSha256": "489e5c10e22d2ce44d9b7259fef753fa2a9c57eaa48f7cec5f43c4c1ac685818",
       "generatedSha256": {
-        "hlsl": "941dcd937350e53c76c94bd2f5c4dbe0517f8d96328d22287fa2fcb82840a673",
-        "wgsl": "4b4df063f30880fc789660b8f9d7ea80c6f1bf3dd15189d88c9312e3cfbd0db2",
-        "metal": "0894cc61e203fc5746b55d75fec20bc26bd8ba5447abc0fd309cce77a17ea298"
+        "hlsl": "59f95d47154add6c47af04a9b8342c6ca6851a678be7b0ef5b753786a0a22a60",
+        "wgsl": "99e1c672130df8e726eb3dca459714233f451034565d0b7abb4b9ed6f8ff8f9e",
+        "metal": "2e1e9dcf931ab5f395f771e358e5fdeb0e4fe9eba32899743cfcf0673083fc57"
       },
       "signature": "pass-linear(<length:radius>)",
       "backdropRadiusParam": 0,

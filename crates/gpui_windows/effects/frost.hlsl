@@ -152,29 +152,29 @@ struct EffectInput_0
 };
 
 
-#line 1117
+#line 1119
 float sk_hash12_0(float2 p_0)
 {
     float _S1 = p_0.x;
 
-#line 1119
+#line 1121
     float3 p3_0 = frac(float3(_S1, p_0.y, _S1) * 0.1031000018119812f);
     float3 p3_1 = p3_0 + dot(p3_0, float3(p3_0.y + 33.3300018310546875f, p3_0.z + 33.3300018310546875f, p3_0.x + 33.3300018310546875f));
     return frac((p3_1.x + p3_1.y) * p3_1.z);
 }
 
 
-#line 1133
+#line 1135
 float sk_value_noise_0(float2 p_1)
 {
     float2 i_0 = floor(p_1);
     float2 f_0 = frac(p_1);
     float2 u_0 = f_0 * f_0 * (3.0f - 2.0f * f_0);
 
-#line 1142
+#line 1144
     float _S2 = u_0.x;
 
-#line 1142
+#line 1144
     return lerp(lerp(sk_hash12_0(i_0), sk_hash12_0(i_0 + float2(1.0f, 0.0f)), _S2), lerp(sk_hash12_0(i_0 + float2(0.0f, 1.0f)), sk_hash12_0(i_0 + float2(1.0f, 1.0f)), _S2), u_0.y);
 }
 
@@ -189,12 +189,12 @@ float sk_fbm_0(float2 p_2)
 }
 
 
-#line 1105
+#line 1107
 float4 sk_premultiply_0(float4 color_0)
 {
     float _S3 = color_0.w;
 
-#line 1107
+#line 1109
     return float4(color_0.xyz * _S3, _S3);
 }
 
@@ -573,7 +573,7 @@ float4 sk_linear_to_frame_0(float4 light_2)
 }
 
 
-#line 1051
+#line 1053
 float4 sk_finish_0(Frost_0 material_0, EffectInput_0 i_2)
 {
     if(i_2.historyPass_0)
@@ -582,27 +582,27 @@ float4 sk_finish_0(Frost_0 material_0, EffectInput_0 i_2)
     }
     float4 shaded_0 = Frost_shade_0(material_0, i_2);
 
-#line 1057
+#line 1059
     float4 shaded_1;
     if(IEffect_straightAlphax24defaultImpl_0())
     {
         float _S17 = shaded_0.w;
 
-#line 1060
+#line 1062
         shaded_1 = float4(shaded_0.xyz * _S17, _S17);
 
-#line 1058
+#line 1060
     }
     else
     {
 
-#line 1058
+#line 1060
         shaded_1 = shaded_0;
 
-#line 1058
+#line 1060
     }
 
-#line 1058
+#line 1060
     bool extended_0;
 
 
@@ -610,113 +610,113 @@ float4 sk_finish_0(Frost_0 material_0, EffectInput_0 i_2)
     if((GlobalParams_0.sk_extended_range_0) != 0U)
     {
 
-#line 1062
+#line 1064
         if(i_2.hasBackdrop_0)
         {
 
-#line 1062
+#line 1064
             extended_0 = true;
 
-#line 1062
+#line 1064
         }
         else
         {
 
-#line 1062
+#line 1064
             extended_0 = i_2.hasContent_0;
 
-#line 1062
+#line 1064
         }
 
-#line 1062
+#line 1064
     }
     else
     {
 
-#line 1062
+#line 1064
         extended_0 = false;
 
-#line 1062
+#line 1064
     }
 
-#line 1062
+#line 1064
     float headroom_1;
     if(i_2.backdropLinear_0)
     {
 
-#line 1063
+#line 1065
         headroom_1 = 65504.0f;
 
-#line 1063
+#line 1065
     }
     else
     {
 
-#line 1063
+#line 1065
         if(extended_0)
         {
 
-#line 1063
+#line 1065
             headroom_1 = sk_frame_headroom_0(i_2);
 
-#line 1063
+#line 1065
         }
         else
         {
 
-#line 1063
+#line 1065
             headroom_1 = 1.0f;
 
-#line 1063
+#line 1065
         }
 
-#line 1063
+#line 1065
     }
 
-#line 1063
+#line 1065
     bool _S18;
     if(extended_0)
     {
 
-#line 1064
+#line 1066
         _S18 = true;
 
-#line 1064
+#line 1066
     }
     else
     {
 
-#line 1064
+#line 1066
         _S18 = i_2.backdropLinear_0;
 
-#line 1064
+#line 1066
     }
 
-#line 1064
+#line 1066
     if(_S18)
     {
 
-#line 1064
+#line 1066
         shaded_1 = sk_clamp_extended_0(shaded_1, headroom_1);
 
-#line 1064
+#line 1066
     }
     else
     {
 
-#line 1064
+#line 1066
         shaded_1 = sk_clamp_premultiplied_0(shaded_1);
 
-#line 1064
+#line 1066
     }
 
 
     float coverage_1 = saturate(0.5f - (i_2.sd_0 - i_2.bleed_1)) * saturate(i_2.opacity_1) * i_2.clip_0;
 
-#line 1067
+#line 1069
     float4 result_2;
 
-#line 1072
+#line 1074
     if(i_2.hasBackdrop_0)
     {
         float4 page_1 = sk_backdrop_page_0.SampleLevel(sk_clamp_sampler_0, i_2.uv_0, 0.0f);
@@ -726,53 +726,53 @@ float4 sk_finish_0(Frost_0 material_0, EffectInput_0 i_2)
         if(i_2.backdropLinear_0)
         {
 
-#line 1078
+#line 1080
             shaded_1 = sk_linear_to_frame_0(lerp(sk_frame_to_linear_0(page_1), shaded_1, (float4)coverage_1)) * float4(1.0000152587890625f, 1.0000152587890625f, 1.0000152587890625f, 1.0f);
 
-#line 1078
+#line 1080
         }
         else
         {
 
-#line 1078
+#line 1080
             shaded_1 = lerp(page_1, shaded_1, (float4)coverage_1);
 
-#line 1078
+#line 1080
         }
 
-#line 1078
+#line 1080
         result_2 = shaded_1;
 
-#line 1072
+#line 1074
     }
     else
     {
 
-#line 1072
+#line 1074
         result_2 = shaded_1 * coverage_1;
 
-#line 1072
+#line 1074
     }
 
-#line 1085
+#line 1087
     if(extended_0)
     {
 
-#line 1085
+#line 1087
         shaded_1 = sk_clamp_extended_0(result_2, headroom_1);
 
-#line 1085
+#line 1087
     }
     else
     {
 
-#line 1085
+#line 1087
         shaded_1 = sk_clamp_premultiplied_0(result_2);
 
-#line 1085
+#line 1087
     }
 
-#line 1085
+#line 1087
     return shaded_1;
 }
 
@@ -1519,56 +1519,56 @@ float sk_content_mask_coverage_0(float2 position_0, SkBounds_0 mask_0, SkCorners
 }
 
 
-#line 967
-EffectInput_0 sk_begin_0(uint id_0, float4 frag_position_0)
+#line 969
+EffectInput_0 sk_begin_0(uint id_0, float4 frag_position_0, bool linear_0)
 {
 
-#line 967
+#line 969
     uint _S41 = sk_effect_quads_0[id_0].flags_0;
 
 
     bool history_pass_0 = ((sk_effect_quads_0[id_0].flags_0) & 8U) != 0U;
 
-#line 970
+#line 972
     float2 position_1;
 
 
     if(history_pass_0)
     {
 
-#line 973
+#line 975
         position_1 = sk_effect_quads_0[id_0].bounds_0.origin_0 + frag_position_0.xy;
 
-#line 973
+#line 975
     }
     else
     {
 
-#line 973
+#line 975
         position_1 = frag_position_0.xy;
 
-#line 973
+#line 975
     }
 
 
     float2 uv_5 = position_1 / GlobalParams_0.sk_viewport_size_0;
 
-#line 976
+#line 978
     SkCorners_0 _S42 = sk_effect_quads_0[id_0].corner_radii_0;
 
-#line 976
+#line 978
     float _S43 = sk_effect_quads_0[id_0].bleed_0;
 
-#line 984
+#line 986
     float _S44 = sk_quad_sdf_0(position_1, sk_effect_quads_0[id_0].bounds_0, sk_effect_quads_0[id_0].corner_radii_0) + sk_effect_quads_0[id_0].bleed_0;
 
     float2 element_origin_0 = sk_effect_quads_0[id_0].bounds_0.origin_0 + sk_effect_quads_0[id_0].bleed_0;
     float2 element_size_0 = max(sk_effect_quads_0[id_0].bounds_0.size_0 - 2.0f * sk_effect_quads_0[id_0].bleed_0, float2(1.0f, 1.0f));
 
-#line 987
+#line 989
     SkCornerShapes_0 shapes_3 = sk_effect_quads_0[id_0].corner_shapes_0;
 
-#line 987
+#line 989
     float sd_element_0;
 
 
@@ -1584,28 +1584,28 @@ EffectInput_0 sk_begin_0(uint id_0, float4 frag_position_0)
         radii_4.bottom_right_0 = max(_S42.bottom_right_0 - _S43, 0.0f);
         radii_4.bottom_left_0 = max(_S42.bottom_left_0 - _S43, 0.0f);
 
-#line 1000
+#line 1002
         sd_element_0 = sk_shaped_quad_sdf_0(position_1, element_0, radii_4, shapes_3);
 
-#line 991
+#line 993
     }
     else
     {
 
-#line 991
+#line 993
         sd_element_0 = _S44;
 
-#line 991
+#line 993
     }
 
-#line 1004
+#line 1006
     bool has_backdrop_0 = (_S41 & 1U) != 0U;
 
     EffectInput_0 i_3;
     i_3.uv_0 = uv_5;
     float2 _S45 = position_1 - element_origin_0;
 
-#line 1008
+#line 1010
     i_3.px_0 = _S45;
     i_3.size_1 = element_size_0;
     i_3.local_0 = _S45 / element_size_0;
@@ -1616,47 +1616,65 @@ EffectInput_0 sk_begin_0(uint id_0, float4 frag_position_0)
     i_3.quad_0 = id_0;
     i_3.backdropBounded_0 = (_S41 & 32U) != 0U;
 
-#line 1016
+#line 1018
     bool _S46;
-    if(has_backdrop_0)
+    if(linear_0)
     {
 
-#line 1017
-        _S46 = (_S41 & 64U) != 0U;
+#line 1019
+        _S46 = has_backdrop_0;
 
-#line 1017
+#line 1019
     }
     else
     {
 
-#line 1017
+#line 1019
         _S46 = false;
 
-#line 1017
+#line 1019
     }
 
-#line 1017
+#line 1019
+    if(_S46)
+    {
+
+#line 1019
+        _S46 = (_S41 & 64U) != 0U;
+
+#line 1019
+    }
+    else
+    {
+
+#line 1019
+        _S46 = false;
+
+#line 1019
+    }
+
+#line 1019
     i_3.backdropLinear_0 = _S46;
 
 
     if(_S46)
     {
 
-#line 1020
+#line 1022
         _S46 = !((sk_effect_quads_0[id_0].backdrop_blur_radius_0) <= 0.0f);
 
-#line 1020
+#line 1022
     }
     else
     {
 
-#line 1020
+#line 1022
         _S46 = false;
 
-#line 1020
+#line 1022
     }
 
-#line 1020
+#line 1022
     i_3.backdropLinearBlur_0 = _S46;
     i_3.bleed_1 = _S43;
     i_3.backdrop_0 = EffectInput_backdropAt_0(i_3, uv_5);
@@ -1682,7 +1700,7 @@ float EffectInput_param_0(EffectInput_0 this_7, uint slot_0)
 #line 96 "crates/sk-effects/shaders/frost.slang+wrapper"
 float4 effect_fragment(nointerpolation uint sk_id_0 : TEXCOORD0, float4 sk_position_0 : SV_Position) : SV_TARGET
 {
-    EffectInput_0 sk_in_0 = sk_begin_0(sk_id_0, sk_position_0);
+    EffectInput_0 sk_in_0 = sk_begin_0(sk_id_0, sk_position_0, false);
 
 
 

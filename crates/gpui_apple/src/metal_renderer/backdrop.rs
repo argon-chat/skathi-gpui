@@ -129,15 +129,21 @@ impl BackdropState {
     }
 }
 
+/// `BackdropEncoding::Linear`: the snapshot into linear light, and the
+/// pyramid built from it, all in `LINEAR_FORMAT`.
+struct LinearPasses {
+    copy: Pipeline,
+    downsample: Pipeline,
+    upsample: Pipeline,
+}
+
 pub(super) struct MetalBackdrop {
     blur_downsample: Pipeline,
     blur_upsample: Pipeline,
     blur_rect: Pipeline,
-    /// vue-native fork: `BackdropEncoding::Linear`: the snapshot into linear
-    /// light, and the pyramid built from it, all in `LINEAR_FORMAT`.
-    backdrop_linear: Pipeline,
-    linear_downsample: Pipeline,
-    linear_upsample: Pipeline,
+    /// vue-native fork: built on the first `BackdropEncoding::Linear` request,
+    /// so a window without one never compiles them.
+    linear_passes: Option<LinearPasses>,
     frame_copy: Pipeline,
     /// vue-native fork: `<sk-layer>` pictures, destination-over.
     vn_underlay: Pipeline,
@@ -610,6 +616,16 @@ impl MetalRenderer {
         let (width, height) = (frame.texture.width(), frame.texture.height());
         let format = state.format;
         let linear = request.linear_blur();
+        let linear_passes = if linear {
+            let passes = state.linear_passes(&self.device, &self.library)?;
+            Some((
+                passes.copy.clone(),
+                passes.downsample.clone(),
+                passes.upsample.clone(),
+            ))
+        } else {
+            None
+        };
         let targets = state.ensure_targets(
             &self.device,
             width,
@@ -776,20 +792,21 @@ impl MetalRenderer {
             Ok(())
         };
 
-        let (source, levels, downsample, upsample) = if linear {
+        let (source, levels, downsample, upsample) = if let Some((pass, down, up)) = &linear_passes
+        {
             let copy = targets
                 .linear
                 .first()
                 .context("missing linear backdrop copy")?;
-            blur_pass(&state.backdrop_linear, raw, copy, 0)?;
+            blur_pass(pass, raw, copy, 0)?;
             (
                 copy,
                 targets
                     .linear
                     .get(1..=kernel_levels)
                     .context("missing linear blur pyramid levels")?,
-                &state.linear_downsample,
-                &state.linear_upsample,
+                down,
+                up,
             )
         } else {
             (
@@ -959,11 +976,10 @@ impl MetalBackdrop {
                 .with_context(|| format!("locating function {name}"))
         };
         let pass_vertex = function("backdrop_pass_vertex")?;
-        let pass_in = |label: &str, fragment: &str, format| {
+        let pass = |label: &str, fragment: &str| {
             let fragment = function(fragment)?;
             backdrop_pipeline(device, label, &pass_vertex, &fragment, format, Blend::Off)
         };
-        let pass = |label: &str, fragment: &str| pass_in(label, fragment, format);
         // A half-float frame is an EDR window's: its blur keeps light above
         // SDR white, as `sk_finish` does with `sk_extended_range`.
         let extended = format == LINEAR_FORMAT;
@@ -980,18 +996,6 @@ impl MetalBackdrop {
         let blur_upsample = pass(
             "backdrop_blur_upsample",
             variant("blur_upsample_fragment", "blur_upsample_extended_fragment"),
-        )?;
-        let backdrop_linear =
-            pass_in("backdrop_linear", "backdrop_linear_fragment", LINEAR_FORMAT)?;
-        let linear_downsample = pass_in(
-            "backdrop_linear_downsample",
-            "blur_downsample_extended_fragment",
-            LINEAR_FORMAT,
-        )?;
-        let linear_upsample = pass_in(
-            "backdrop_linear_upsample",
-            "blur_upsample_extended_fragment",
-            LINEAR_FORMAT,
         )?;
         let frame_copy = pass("backdrop_frame_copy", "frame_copy_fragment")?;
         let (underlay_vertex, underlay_fragment) = (
@@ -1084,9 +1088,7 @@ impl MetalBackdrop {
             blur_downsample,
             blur_upsample,
             blur_rect,
-            backdrop_linear,
-            linear_downsample,
-            linear_upsample,
+            linear_passes: None,
             frame_copy,
             vn_underlay,
             effects,
@@ -1163,6 +1165,38 @@ impl MetalBackdrop {
                     app_effect_pipeline(&device, &vertex, format, effect)
                 })
             });
+    }
+
+    fn linear_passes(
+        &mut self,
+        device: &ProtocolObject<dyn MTLDevice>,
+        library: &ProtocolObject<dyn MTLLibrary>,
+    ) -> Result<&LinearPasses> {
+        if self.linear_passes.is_none() {
+            let vertex = library
+                .newFunctionWithName(&NSString::from_str("backdrop_pass_vertex"))
+                .context("locating function backdrop_pass_vertex")?;
+            let pass = |label: &str, name: &str| {
+                let fragment = library
+                    .newFunctionWithName(&NSString::from_str(name))
+                    .with_context(|| format!("locating function {name}"))?;
+                backdrop_pipeline(device, label, &vertex, &fragment, LINEAR_FORMAT, Blend::Off)
+            };
+            self.linear_passes = Some(LinearPasses {
+                copy: pass("backdrop_linear", "backdrop_linear_fragment")?,
+                downsample: pass(
+                    "backdrop_linear_downsample",
+                    "blur_downsample_extended_fragment",
+                )?,
+                upsample: pass(
+                    "backdrop_linear_upsample",
+                    "blur_upsample_extended_fragment",
+                )?,
+            });
+        }
+        self.linear_passes
+            .as_ref()
+            .context("missing linear backdrop passes")
     }
 
     /// `needed` counts the snapshot as one more level below the pyramid,
