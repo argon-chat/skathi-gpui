@@ -1058,6 +1058,9 @@ impl Renderer {
             return Ok(false);
         }
         result.ok().context("Presenting native D3D12 swap chain")?;
+        if result.0 == 0 {
+            scene.vn_submit_underlays();
+        }
         if self.vn_commit.after_present {
             self.vn_commit_now();
         }
@@ -2858,6 +2861,7 @@ impl Encoding<'_> {
                 None,
                 1,
             )?;
+            self.scene.vn_drew_underlay(underlay);
         }
         underlaid.to(self.list, SHADER_READ, self.changes);
         Ok(underlaid.sampled())

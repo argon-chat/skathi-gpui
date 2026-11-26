@@ -91,6 +91,16 @@ pub use prompts::*;
 /// Default window size used when no explicit size is provided.
 pub const DEFAULT_WINDOW_SIZE: Size<Pixels> = size(px(1536.), px(1095.));
 
+/// One page frame handed to the platform by a window.
+pub struct VnSubmittedFrame<'a> {
+    /// The window's page-frame number, starting at one.
+    pub sequence: u64,
+    /// The platform's target display time for this frame, in monotonic nanoseconds.
+    pub target_present_at: Option<u64>,
+    /// (Underlay key, picture frame) for each picture composited by the submitted draw.
+    pub pictures: &'a [(u64, u64)],
+}
+
 /// A 6:5 aspect ratio minimum window size to be used for functional,
 /// additional-to-main-Zed windows, like the settings and rules library windows.
 pub const DEFAULT_ADDITIONAL_WINDOW_SIZE: Size<Pixels> = Size {
@@ -1777,7 +1787,7 @@ pub struct Window {
     element_image_headroom: (f32, bool),
     /// vue-native fork: page frames handed to the platform so far.
     vn_frames_submitted: u64,
-    vn_on_frame_submitted: Option<Box<dyn FnMut(u64)>>,
+    vn_on_frame_submitted: Option<Box<dyn FnMut(VnSubmittedFrame<'_>)>>,
     /// The composed CSS `transform` of every ancestor currently being painted,
     /// in DEVICE space. Identity outside a `Style::vn_transform`.
     ///
@@ -3885,7 +3895,12 @@ impl Window {
     /// vue-native: calls `callback` on this thread right after each page frame
     /// is handed to the platform (drawn and presented or committed), with its
     /// sequence number in this window, counting from 1. Replaces any earlier one.
-    pub fn vn_on_frame_submitted(&mut self, callback: Box<dyn FnMut(u64)>) {
+    pub fn vn_on_frame_submitted(&mut self, mut callback: Box<dyn FnMut(u64)>) {
+        self.vn_on_frame_submission(Box::new(move |frame| callback(frame.sequence)));
+    }
+
+    /// Calls `callback` on the UI thread with the layer pictures and display target of each submit.
+    pub fn vn_on_frame_submission(&mut self, callback: Box<dyn FnMut(VnSubmittedFrame<'_>)>) {
         self.vn_on_frame_submitted = Some(callback);
     }
 
@@ -3910,6 +3925,18 @@ impl Window {
         key: u64,
         place: crate::VnUnderlayPlace,
         picture: Option<Arc<RenderImage>>,
+    ) -> Result<()> {
+        self.vn_paint_underlay_frame(key, place, picture, None)
+    }
+
+    /// Like [`Self::vn_paint_underlay`], with the frame ID of the live atlas tile.
+    /// Update the cell when replacing the tile's pixels in place. Give a new tile a new cell.
+    pub fn vn_paint_underlay_frame(
+        &mut self,
+        key: u64,
+        place: crate::VnUnderlayPlace,
+        picture: Option<Arc<RenderImage>>,
+        frame: Option<Rc<Cell<u64>>>,
     ) -> Result<()> {
         self.invalidator.debug_assert_paint();
         let tile = match &picture {
@@ -3936,7 +3963,7 @@ impl Window {
             size: size(ScaledPixels(b[2].max(0.)), ScaledPixels(b[3].max(0.))),
         };
         let [top_left, top_right, bottom_right, bottom_left] = place.radii.map(ScaledPixels);
-        self.next_frame.scene.vn_insert_underlay(crate::VnUnderlay {
+        let underlay = crate::VnUnderlay {
             order: 0,
             sampling: PolychromeSprite::sampling_word(headroom, 0, signed),
             tile: tile.unwrap_or(AtlasTile {
@@ -3965,7 +3992,10 @@ impl Window {
             },
             key: [key as u32, (key >> 32) as u32],
             pad: [0; 2],
-        });
+        };
+        self.next_frame
+            .scene
+            .vn_insert_underlay_frame(underlay, frame);
         Ok(())
     }
 
@@ -5434,10 +5464,18 @@ impl Window {
         let _foreground_turn = profiler::journal::foreground_turn();
         #[cfg(feature = "profiler")]
         let present_start = Instant::now();
-        self.platform_window.draw(&self.rendered_frame.scene);
+        let scene = &self.rendered_frame.scene;
+        if self.vn_on_frame_submitted.is_some() {
+            scene.vn_begin_underlay_frame();
+        }
+        self.platform_window.draw(scene);
         self.vn_frames_submitted += 1;
         if let Some(submitted) = self.vn_on_frame_submitted.as_mut() {
-            submitted(self.vn_frames_submitted);
+            submitted(VnSubmittedFrame {
+                sequence: self.vn_frames_submitted,
+                target_present_at: self.platform_window.take_frame_presentation_target(),
+                pictures: &scene.vn_take_submitted_pictures(),
+            });
         }
         #[cfg(feature = "profiler")]
         self.window_profiler.record_present(

@@ -745,6 +745,7 @@ impl MetalRenderer {
                             1,
                             picture.order as usize,
                         );
+                        draw.scene.vn_drew_underlay(picture);
                     }
                 }
                 encoder.endEncoding();

@@ -12,6 +12,7 @@ use crate::{
 };
 use smallvec::SmallVec;
 use std::{
+    cell::{Cell, RefCell},
     collections::{HashMap, VecDeque},
     fmt::Debug,
     iter::Peekable,
@@ -122,6 +123,9 @@ pub struct Scene {
     pub vn_captures: Vec<VnCapture>,
     /// vue-native fork: pictures under the page, in paint order; in no group.
     pub vn_underlays: Vec<VnUnderlay>,
+    vn_underlay_frames: Vec<Option<Rc<Cell<u64>>>>,
+    vn_drawn_pictures: RefCell<Option<SmallVec<[(u64, u64); 2]>>>,
+    vn_underlays_submitted: Cell<bool>,
     pub native_views: Vec<PaintNativeView>,
     animations: Vec<SpriteAnimation>,
 }
@@ -666,6 +670,9 @@ impl Scene {
         self.vn_group_ranges.clear();
         self.vn_captures.clear();
         self.vn_underlays.clear();
+        self.vn_underlay_frames.clear();
+        *self.vn_drawn_pictures.get_mut() = None;
+        self.vn_underlays_submitted.set(false);
         self.native_views.clear();
         self.animations.clear();
     }
@@ -673,16 +680,56 @@ impl Scene {
     /// vue-native fork: records a picture under the page ([`VnUnderlay`]);
     /// `order` is set here.
     pub fn vn_insert_underlay(&mut self, underlay: VnUnderlay) {
+        self.vn_insert_underlay_frame(underlay, None);
+    }
+
+    pub(crate) fn vn_insert_underlay_frame(
+        &mut self,
+        underlay: VnUnderlay,
+        frame: Option<Rc<Cell<u64>>>,
+    ) {
         if underlay.visible_bounds().is_empty() {
             return;
         }
         self.paint_operations
-            .push(PaintOperation::VnUnderlay(underlay));
+            .push(PaintOperation::VnUnderlay(underlay, frame.clone()));
+        self.vn_underlay_frames.push(frame);
         self.vn_underlays.push(VnUnderlay {
             order: self.vn_underlays.len() as u32,
             flags: underlay.flags & !vn_underlay_flags::READ,
             ..underlay
         });
+    }
+
+    pub(crate) fn vn_begin_underlay_frame(&self) {
+        self.vn_drawn_pictures.replace(Some(SmallVec::new()));
+        self.vn_underlays_submitted.set(false);
+    }
+
+    /// Records a layer's current tile contents when the renderer encodes its backdrop draw.
+    pub fn vn_drew_underlay(&self, underlay: &VnUnderlay) {
+        if let Some(Some(frame)) = self.vn_underlay_frames.get(underlay.order as usize)
+            && let Some(pictures) = self.vn_drawn_pictures.borrow_mut().as_mut()
+        {
+            let picture = (underlay.key(), frame.get());
+            if !pictures.contains(&picture) {
+                pictures.push(picture);
+            }
+        }
+    }
+
+    /// Confirms this window draw reached its platform present.
+    pub fn vn_submit_underlays(&self) {
+        self.vn_underlays_submitted.set(true);
+    }
+
+    pub(crate) fn vn_take_submitted_pictures(&self) -> SmallVec<[(u64, u64); 2]> {
+        let pictures = self.vn_drawn_pictures.take();
+        if self.vn_underlays_submitted.replace(false) {
+            pictures.unwrap_or_default()
+        } else {
+            SmallVec::new()
+        }
     }
 
     /// vue-native fork: the keys of the underlays a backdrop reader samples,
@@ -1532,7 +1579,9 @@ impl Scene {
                 PaintOperation::VnEndIsolation => self.vn_pop_isolation(),
                 PaintOperation::VnSnapshot(paint) => self.vn_insert_snapshot(*paint),
                 PaintOperation::VnBeginMask(luminance) => self.vn_begin_mask(*luminance),
-                PaintOperation::VnUnderlay(underlay) => self.vn_insert_underlay(*underlay),
+                PaintOperation::VnUnderlay(underlay, frame) => {
+                    self.vn_insert_underlay_frame(*underlay, frame.clone());
+                }
             }
         }
     }
@@ -1763,7 +1812,7 @@ pub(crate) enum PaintOperation {
     /// vue-native fork: [`Scene::vn_begin_mask`].
     VnBeginMask(bool),
     /// vue-native fork: [`Scene::vn_insert_underlay`].
-    VnUnderlay(VnUnderlay),
+    VnUnderlay(VnUnderlay, Option<Rc<Cell<u64>>>),
 }
 
 #[derive(Clone)]

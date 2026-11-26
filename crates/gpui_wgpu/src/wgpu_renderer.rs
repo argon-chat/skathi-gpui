@@ -1244,6 +1244,7 @@ impl WgpuRenderer {
         }
 
         core.resources.queue.present(frame);
+        scene.vn_submit_underlays();
         true
     }
 }

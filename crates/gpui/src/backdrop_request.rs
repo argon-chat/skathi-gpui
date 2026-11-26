@@ -274,4 +274,42 @@ mod tests {
         plain.finish();
         assert_eq!(plain.vn_underlays_read().count(), 0, "nothing reads");
     }
+
+    #[test]
+    fn submitted_pictures_follow_the_composited_tile_across_scene_reuse() {
+        use std::{cell::Cell, rc::Rc};
+
+        let frame = Rc::new(Cell::new(11));
+        let mut first = Scene::default();
+        first.vn_insert_underlay_frame(underlay(0., 1, true), Some(frame.clone()));
+        first.vn_insert_underlay_frame(underlay(20., 2, true), Some(Rc::new(Cell::new(18))));
+        first.finish();
+
+        let mut replay = Scene::default();
+        replay.replay(0..first.paint_operations.len(), &first);
+        replay.finish();
+        let picture = &replay.vn_underlays[0];
+        replay.vn_begin_underlay_frame();
+        replay.vn_drew_underlay(picture);
+        frame.set(12);
+        replay.vn_submit_underlays();
+        assert_eq!(replay.vn_take_submitted_pictures().as_slice(), [(1, 11)]);
+
+        for _ in 0..2 {
+            replay.vn_begin_underlay_frame();
+            replay.vn_drew_underlay(picture);
+            replay.vn_drew_underlay(picture);
+            replay.vn_submit_underlays();
+            assert_eq!(replay.vn_take_submitted_pictures().as_slice(), [(1, 12)]);
+        }
+        replay.vn_begin_underlay_frame();
+        replay.vn_drew_underlay(picture);
+        assert!(
+            replay.vn_take_submitted_pictures().is_empty(),
+            "present skipped"
+        );
+        replay.vn_begin_underlay_frame();
+        replay.vn_submit_underlays();
+        assert!(replay.vn_take_submitted_pictures().is_empty(), "no reader");
+    }
 }

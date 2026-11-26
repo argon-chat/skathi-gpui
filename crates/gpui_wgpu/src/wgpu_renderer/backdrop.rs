@@ -699,6 +699,7 @@ impl WgpuRendererCore {
                     pass.set_bind_group(2, &atlas.bind_group, &[]);
                     let instance = instances.first_instance + picture.order;
                     pass.draw(0..4, instance..instance + 1);
+                    draw.scene.vn_drew_underlay(picture);
                 }
                 underlaid
             }

@@ -166,7 +166,8 @@ pub struct MetalRenderer {
     /// vue-native: those whose outcome has not been reported yet.
     presented: Arc<Mutex<presented::Presents>>,
     /// vue-native: when the display link's drawable for this frame is to reach the screen.
-    frame_target: Option<f64>,
+    frame_target: Option<u64>,
+    submitted_target: Option<u64>,
     /// vue-native: the screen's refresh interval, in nanoseconds.
     refresh_ns: u64,
     /// vue-native: the format the pipelines draw, the layer's (`BGRA8Unorm`, or `RGBA16Float`
@@ -426,6 +427,7 @@ impl MetalRenderer {
             presents: 0,
             presented: Arc::default(),
             frame_target: None,
+            submitted_target: None,
             refresh_ns: 16_666_667,
             target_format: MTLPixelFormat::BGRA8Unorm,
             spare_pipelines: None,
@@ -567,6 +569,7 @@ impl MetalRenderer {
         &mut self,
         drawable: Option<Retained<ProtocolObject<dyn CAMetalDrawable>>>,
     ) -> Option<Retained<ProtocolObject<dyn CAMetalDrawable>>> {
+        self.frame_target = None;
         match &mut self.display_link_mode {
             DisplayLinkMode::Attached { drawable: current } => mem::replace(current, drawable),
             DisplayLinkMode::Detached => {
@@ -584,7 +587,12 @@ impl MetalRenderer {
     /// vue-native: the display link's `targetPresentationTimestamp` for the drawable last handed
     /// to [`Self::set_frame_drawable`].
     pub fn set_frame_target(&mut self, at: f64) {
-        self.frame_target = Some(at);
+        self.frame_target = (at.is_finite() && at > 0.).then(|| host_ns(at));
+    }
+
+    /// Takes the display link's target for the last submitted draw, in host-clock nanoseconds.
+    pub fn take_frame_presentation_target(&mut self) -> Option<u64> {
+        self.submitted_target.take()
     }
 
     /// vue-native: the refresh interval of the screen the layer is on.
@@ -638,6 +646,7 @@ impl MetalRenderer {
     }
 
     pub fn draw(&mut self, scene: &Scene) {
+        self.submitted_target = None;
         let layer = match &self.layer {
             Some(l) => l.clone(),
             None => {
@@ -647,7 +656,6 @@ impl MetalRenderer {
                 return;
             }
         };
-        let target = self.frame_target.take();
         // Native views sit beneath the layer, so it can only be opaque, and
         // eligible for direct-to-display presentation, while none are showing.
         let shows_native_views = !scene.native_views.is_empty();
@@ -655,13 +663,13 @@ impl MetalRenderer {
             self.shows_native_views = shows_native_views;
             layer.setOpaque(self.opaque && !shows_native_views);
         }
-        let drawable = match &mut self.display_link_mode {
+        let (drawable, link_target) = match &mut self.display_link_mode {
             DisplayLinkMode::Attached { drawable } => {
                 let Some(drawable) = drawable.take() else {
                     log::error!("skipped a frame drawn outside its display link's update");
                     return;
                 };
-                drawable
+                (drawable, self.frame_target.take())
             }
             DisplayLinkMode::Detached => {
                 let Some(drawable) = layer.nextDrawable() else {
@@ -671,7 +679,7 @@ impl MetalRenderer {
                     );
                     return;
                 };
-                drawable
+                (drawable, None)
             }
         };
         // A display link's drawable was sized when the link handed it out,
@@ -697,12 +705,14 @@ impl MetalRenderer {
 
         let target = {
             let mut presented = self.presented.lock();
-            match (&self.display_link_mode, target) {
-                (DisplayLinkMode::Attached { .. }, Some(target)) => {
-                    presented.anchor(host_ns(target));
-                    host_ns(target)
+            match link_target {
+                Some(target) => {
+                    presented.anchor(target);
+                    target
                 }
-                _ => presented.transaction_target(host_ns(current_media_time()), self.refresh_ns),
+                None => {
+                    presented.transaction_target(host_ns(current_media_time()), self.refresh_ns)
+                }
             }
         };
         self.report_present(&layer, &drawable, target);
@@ -714,6 +724,8 @@ impl MetalRenderer {
             command_buffer.presentDrawable(ProtocolObject::from_ref(&*drawable));
             command_buffer.commit();
         }
+        self.submitted_target = link_target;
+        scene.vn_submit_underlays();
     }
 
     /// vue-native: tells `gpui::present_feedback` when the drawable, aimed at `target`, reached
@@ -2563,7 +2575,14 @@ mod tests {
                 assert_eq!(texture.pixelFormat(), handed_out);
                 assert!(renderer.set_hdr_output(output));
                 renderer.set_frame_drawable(Some(drawable));
+                let target = current_media_time() + 1. / 60.;
+                renderer.set_frame_target(target);
                 renderer.draw(&scene);
+                assert_eq!(
+                    renderer.take_frame_presentation_target(),
+                    Some(host_ns(target))
+                );
+                assert_eq!(renderer.take_frame_presentation_target(), None);
                 assert!(renderer.set_frame_drawable(None).is_none(), "drawn");
                 let done = renderer
                     .command_queue
@@ -2792,18 +2811,28 @@ mod tests {
             renderer.display_link_mode,
             DisplayLinkMode::Attached { drawable: Some(_) }
         ));
+        renderer.set_frame_target(current_media_time());
         renderer.draw(&Scene::default());
         assert!(matches!(
             renderer.display_link_mode,
             DisplayLinkMode::Attached { drawable: None }
         ));
+        assert!(renderer.submitted_target.is_some());
+        renderer.draw(&Scene::default());
+        assert_eq!(
+            renderer.take_frame_presentation_target(),
+            None,
+            "skipped draw"
+        );
         // A frame that drew consumed its drawable; one that didn't hands it back.
         assert!(
             renderer
                 .set_frame_drawable(Some(drawable.clone()))
                 .is_none()
         );
+        renderer.set_frame_target(current_media_time());
         assert!(renderer.set_frame_drawable(None).is_some());
+        assert_eq!(renderer.frame_target, None, "unused drawable returned");
 
         renderer.set_frame_drawable(Some(drawable));
         renderer.set_frame_target(123.);
@@ -2813,6 +2842,12 @@ mod tests {
             renderer.display_link_mode,
             DisplayLinkMode::Detached
         ));
+        renderer.draw(&Scene::default());
+        assert_eq!(
+            renderer.take_frame_presentation_target(),
+            None,
+            "nextDrawable"
+        );
         Ok(())
     }
 

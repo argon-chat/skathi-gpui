@@ -2896,6 +2896,10 @@ impl PlatformWindow for MacWindow {
         native_views::apply_layout(&self.0, native_view_layout);
     }
 
+    fn take_frame_presentation_target(&self) -> Option<u64> {
+        self.0.lock().renderer.take_frame_presentation_target()
+    }
+
     unsafe fn attach_native_view(
         &self,
         id: gpui::NativeViewId,
