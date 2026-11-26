@@ -901,6 +901,9 @@ impl MetalRenderer {
 
         command_buffer.commit();
         command_buffer.waitUntilCompleted();
+        if let Some(error) = command_buffer.error() {
+            anyhow::bail!("Metal offscreen render failed: {error}");
+        }
         Ok(target_texture)
     }
 
