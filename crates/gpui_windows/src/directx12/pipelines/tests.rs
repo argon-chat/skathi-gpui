@@ -208,7 +208,15 @@ fn native_app_effects_are_warmed_before_their_first_frame_and_after_a_reload() -
             let live = pipelines
                 .app_warmup
                 .is_idle()
-                .then(|| pipelines.app_warm.lock().fragments.last().map(|f| f.id))
+                .then(|| {
+                    pipelines
+                        .app_warm
+                        .lock()
+                        .fragments
+                        .last()?
+                        .upgrade()
+                        .map(|f| f.id)
+                })
                 .flatten();
             let found = live.and_then(|id| {
                 pipelines
@@ -296,13 +304,15 @@ fn native_app_effects_are_warmed_only_as_the_prewarm_setting_says() -> Result<()
     };
     let format = windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
     let index = EffectShader::ALL.len() as u32;
-    for (prewarm, warmed, on_frame) in [
-        (gpui::AppEffectsPrewarm::Off, 0, 2),
+    for (prewarm, warmed, first_draw, both_drawn) in [
+        (gpui::AppEffectsPrewarm::Off, 0, 1, 2),
         (
             gpui::AppEffectsPrewarm::Only(vec!["other".into(), "missing".into()]),
             1,
+            0,
             1,
         ),
+        (gpui::AppEffectsPrewarm::All, 2, 0, 0),
     ] {
         let _prewarm = Prewarm::set(prewarm);
         gpui::reload_app_effects(
@@ -331,10 +341,19 @@ fn native_app_effects_are_warmed_only_as_the_prewarm_setting_says() -> Result<()
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert_eq!(pipelines.app_warm.lock().fragments.len(), warmed);
+        let (first, _) = pipelines
+            .effect(index + 1, format, 1)?
+            .context("other missing")?;
+        assert_eq!(pipelines.app_fragments_compiled_on_frame, first_draw);
+        let (again, _) = pipelines
+            .effect(index + 1, format, 1)?
+            .context("other missing on its second draw")?;
+        assert_eq!(first.as_raw(), again.as_raw());
+        assert_eq!(pipelines.app_fragments_compiled_on_frame, first_draw);
         pipelines
             .effect(index, format, 1)?
             .context("app effect missing")?;
-        assert_eq!(pipelines.app_fragments_compiled_on_frame, on_frame);
+        assert_eq!(pipelines.app_fragments_compiled_on_frame, both_drawn);
         pipelines.prewarm(DXGI_FORMAT_R16G16B16A16_FLOAT);
         assert_eq!(
             pipelines.app_warm.lock().fragments.len(),

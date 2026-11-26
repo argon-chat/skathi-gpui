@@ -66,13 +66,15 @@ impl MetalRenderer {
         let BackdropState::Ready(state) = &mut self.backdrop else {
             return frame;
         };
-        state.sync_app_effects(device);
         let first_step = scene.effect_quads.len() + scene.vn_effect_draws.len();
         frame.quads.reserve(first_step);
         frame.quads.extend_from_slice(&scene.effect_quads);
         let mut steps = Vec::new();
         for draw in &scene.vn_effect_draws {
             let mut quad = draw.quad;
+            if quad.has_history() {
+                state.sync_app_effect(device, quad.effect_id);
+            }
             let history = if quad.has_history() && state.history_effect(quad.effect_id).is_some() {
                 state.histories.prepare(
                     draw.history,

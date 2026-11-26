@@ -305,12 +305,14 @@ fn app_effects_if_settled() -> Option<Arc<AppEffects>> {
 pub struct AppEffectPipelines<P> {
     generation: Option<u64>,
     slots: Vec<AppEffectSlot<P>>,
+    pending: usize,
 }
 
 struct AppEffectSlot<P> {
-    /// What the slot was last asked to build; `pipeline` may come from an earlier version.
+    /// The current manifest entry. An edit keeps the last working pipeline until its replacement builds.
     effect: AppEffect,
     pipeline: Option<P>,
+    needs_build: bool,
 }
 
 impl<P> Default for AppEffectPipelines<P> {
@@ -318,13 +320,13 @@ impl<P> Default for AppEffectPipelines<P> {
         Self {
             generation: None,
             slots: Vec::new(),
+            pending: 0,
         }
     }
 }
 
 impl<P> AppEffectPipelines<P> {
-    /// Catches up with [`reload_app_effects`]; false when nothing changed.
-    pub fn sync(&mut self, mut build: impl FnMut(&AppEffect) -> anyhow::Result<P>) -> bool {
+    fn refresh(&mut self) -> bool {
         let generation = app_effects_generation();
         if self.generation == Some(generation) {
             return false;
@@ -333,41 +335,79 @@ impl<P> AppEffectPipelines<P> {
         let app = app_effects();
         let effects = app.as_deref().map(AppEffects::effects).unwrap_or_default();
         let mut previous = std::mem::take(&mut self.slots);
+        self.pending = 0;
         for effect in effects {
             let old = previous
                 .iter()
                 .position(|slot| slot.effect.name == effect.name)
                 .map(|index| previous.swap_remove(index));
-            let pipeline = match old {
-                Some(old) if old.effect == *effect => old.pipeline,
-                old => match (build(effect), old.and_then(|old| old.pipeline)) {
-                    (Ok(pipeline), _) => Some(pipeline),
-                    (Err(error), Some(previous)) => {
-                        advisory(
-                            generation,
-                            format!(
-                                "`--shading: {}(…)` keeps its previous shader — the new one is \
-                                 unusable: {error:#}",
-                                effect.name
-                            ),
-                        );
-                        Some(previous)
-                    }
-                    (Err(error), None) => {
-                        advisory(
-                            generation,
-                            format!("`--shading: {}(…)` is unavailable — {error:#}", effect.name),
-                        );
-                        None
-                    }
+            let slot = match old {
+                Some(old) if old.effect == *effect => old,
+                old => AppEffectSlot {
+                    effect: effect.clone(),
+                    pipeline: old.and_then(|old| old.pipeline),
+                    needs_build: true,
                 },
             };
-            self.slots.push(AppEffectSlot {
-                effect: effect.clone(),
-                pipeline,
-            });
+            self.pending += usize::from(slot.needs_build);
+            self.slots.push(slot);
         }
         true
+    }
+
+    fn build_at(
+        &mut self,
+        index: usize,
+        build: impl FnOnce(&AppEffect) -> anyhow::Result<P>,
+    ) -> bool {
+        let Some(slot) = self.slots.get_mut(index) else {
+            return false;
+        };
+        if !std::mem::take(&mut slot.needs_build) {
+            return false;
+        }
+        self.pending -= 1;
+        match build(&slot.effect) {
+            Ok(pipeline) => slot.pipeline = Some(pipeline),
+            Err(error) => {
+                let name = &slot.effect.name;
+                let message = if slot.pipeline.is_some() {
+                    format!(
+                        "`--shading: {name}(…)` keeps its previous shader — the new one is unusable: {error:#}"
+                    )
+                } else {
+                    format!("`--shading: {name}(…)` is unavailable — {error:#}")
+                };
+                advisory(self.generation.unwrap(), message);
+            }
+        }
+        true
+    }
+
+    /// Builds all pending effects, returning whether the manifest or its pipelines changed.
+    pub fn sync(&mut self, mut build: impl FnMut(&AppEffect) -> anyhow::Result<P>) -> bool {
+        let changed = self.refresh();
+        if self.pending == 0 {
+            return changed;
+        }
+        for index in 0..self.slots.len() {
+            self.build_at(index, &mut build);
+        }
+        true
+    }
+
+    /// Resolves only the requested manifest slot, taking its warm pipeline when available.
+    /// Returns whether the manifest or the slot changed.
+    pub fn sync_warmed_at(
+        &mut self,
+        index: usize,
+        warmup: &AppEffectWarmup<P>,
+        build: impl FnOnce(&AppEffect) -> anyhow::Result<P>,
+    ) -> bool {
+        let changed = self.refresh();
+        self.build_at(index, |effect| {
+            warmup.take(effect).unwrap_or_else(|| build(effect))
+        }) || changed
     }
 
     /// [`Self::sync`], taking what `warmup` built and building the rest here.
@@ -451,7 +491,7 @@ impl<P: Send + 'static> AppEffectWarmup<P> {
         mut build: impl FnMut(&AppEffect) -> anyhow::Result<P> + Send + 'static,
     ) {
         let generation = app_effects_generation();
-        if pipelines.generation == Some(generation) || self.started == Some(generation) {
+        if self.started == Some(generation) {
             return;
         }
         let prewarm = PREWARM.lock().clone();
@@ -478,26 +518,46 @@ impl<P: Send + 'static> AppEffectWarmup<P> {
                 }
             }
         }
-        let effects: Vec<WarmEntry<P>> = app
-            .effects()
-            .iter()
-            .filter(|effect| prewarm.includes(&effect.name))
-            .filter(|effect| !pipelines.slots.iter().any(|slot| slot.effect == **effect))
-            .map(|effect| WarmEntry {
-                effect: effect.clone(),
-                slot: WarmSlot::Queued,
-            })
-            .collect();
         let job = {
             let mut state = self.shared.state.lock();
+            let mut previous = std::mem::take(&mut state.entries);
+            state.entries = app
+                .effects()
+                .iter()
+                .filter(|effect| prewarm.includes(&effect.name))
+                .filter(|effect| {
+                    !pipelines
+                        .slots
+                        .iter()
+                        .any(|slot| !slot.needs_build && slot.effect == **effect)
+                })
+                .map(|effect| {
+                    previous
+                        .iter()
+                        .position(|entry| {
+                            entry.effect == *effect && !matches!(entry.slot, WarmSlot::Taken)
+                        })
+                        .map(|i| previous.swap_remove(i))
+                        .unwrap_or_else(|| WarmEntry {
+                            effect: effect.clone(),
+                            slot: WarmSlot::Queued,
+                        })
+                })
+                .collect();
             state.job += 1;
-            state.entries = effects;
-            if state.entries.is_empty() {
-                return;
-            }
             state.job
         };
         self.shared.finished.notify_all();
+        if !self
+            .shared
+            .state
+            .lock()
+            .entries
+            .iter()
+            .any(|entry| matches!(entry.slot, WarmSlot::Queued))
+        {
+            return;
+        }
         let shared = Arc::downgrade(&self.shared);
         let spawned = std::thread::Builder::new()
             .name(thread.into())
@@ -524,11 +584,9 @@ impl<P: Send + 'static> AppEffectWarmup<P> {
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build(&effect)))
                             .unwrap_or_else(|_| Err(anyhow::anyhow!("building it panicked")));
                     let mut state = shared.state.lock();
-                    if state.job == job
-                        && let Some(entry) = state.entries.iter_mut().find(|entry| {
-                            entry.effect == effect && matches!(entry.slot, WarmSlot::Building)
-                        })
-                    {
+                    if let Some(entry) = state.entries.iter_mut().find(|entry| {
+                        entry.effect == effect && matches!(entry.slot, WarmSlot::Building)
+                    }) {
                         entry.slot = WarmSlot::Built(built);
                     }
                     drop(state);
@@ -537,7 +595,11 @@ impl<P: Send + 'static> AppEffectWarmup<P> {
             });
         if let Err(error) = spawned {
             log::debug!("app effects are built on their first frame: {error}");
-            self.shared.state.lock().entries.clear();
+            self.shared
+                .state
+                .lock()
+                .entries
+                .retain(|entry| !matches!(entry.slot, WarmSlot::Queued));
         }
     }
 }
@@ -646,7 +708,7 @@ mod tests {
                 "// one",
                 "// one",
                 vec![],
-                vec!["ripple", "plain"],
+                vec!["plain", "ripple"],
             ),
             (
                 AppEffectsPrewarm::All,
@@ -680,10 +742,19 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
             let mut built_on_frame = Vec::new();
-            assert!(pipelines.sync_warmed(&warmup, |effect| {
+            assert!(pipelines.sync_warmed_at(1, &warmup, |effect| {
                 built_on_frame.push(effect.name.clone());
                 source(effect)
             }));
+            assert_eq!(
+                built_on_frame.len(),
+                usize::from(on_frame.contains(&"plain"))
+            );
+            assert!(!pipelines.sync_warmed_at(1, &warmup, |_| panic!("built twice")));
+            pipelines.sync_warmed_at(0, &warmup, |effect| {
+                built_on_frame.push(effect.name.clone());
+                source(effect)
+            });
             assert_eq!(*built.lock(), warmed);
             assert_eq!(built_on_frame, on_frame);
             assert_eq!(pipelines.get(0).map(String::as_str), Some(ripple));

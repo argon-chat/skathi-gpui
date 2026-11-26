@@ -266,7 +266,9 @@ impl MetalRenderer {
         let snapshots =
             !scene.backdrop_blur_rects.is_empty() || effect_quads().any(EffectQuad::needs_backdrop);
         if let BackdropState::Ready(state) = &mut self.backdrop {
-            state.sync_app_effects(&self.device);
+            for quad in effect_quads() {
+                state.sync_app_effect(&self.device, quad.effect_id);
+            }
             state.upload_effect_textures(&self.device, scene);
             let kernel_levels = scene
                 .backdrop_blur_rects
@@ -1143,17 +1145,21 @@ impl MetalBackdrop {
             .collect();
     }
 
-    pub(super) fn sync_app_effects(&mut self, device: &ProtocolObject<dyn MTLDevice>) {
+    pub(super) fn sync_app_effect(&mut self, device: &ProtocolObject<dyn MTLDevice>, id: u32) {
+        let Some(index) = id.checked_sub(gpui::effect_id::COUNT) else {
+            return;
+        };
         let (vertex, format) = (&self.effect_vertex, self.format);
         #[cfg(test)]
         let built_in_sync = &mut self.app_effects_built_in_sync;
-        self.app_effects.sync_warmed(&self.app_warmup, |effect| {
-            #[cfg(test)]
-            {
-                *built_in_sync += 1;
-            }
-            app_effect_pipeline(device, vertex, format, effect)
-        });
+        self.app_effects
+            .sync_warmed_at(index as usize, &self.app_warmup, |effect| {
+                #[cfg(test)]
+                {
+                    *built_in_sync += 1;
+                }
+                app_effect_pipeline(device, vertex, format, effect)
+            });
     }
 
     /// Builds the app's effects changed by a reload on a background thread.

@@ -4,7 +4,7 @@ use std::{
     borrow::Cow,
     mem::ManuallyDrop,
     sync::{
-        Arc,
+        Arc, Weak,
         atomic::{AtomicU64, Ordering},
     },
     time::Instant,
@@ -96,10 +96,9 @@ enum PipelineKind {
 /// vue-native: an app effect's fragment stage, compiled when the app's effects
 /// are installed or reloaded. A reload that changes the effect makes a new one,
 /// so pipelines cached under the old `id` are never served for the new source.
-#[derive(Clone)]
 struct AppFragment {
     id: u64,
-    bytecode: Arc<[u8]>,
+    bytecode: Box<[u8]>,
     needs_backdrop: bool,
     history: bool,
 }
@@ -110,7 +109,7 @@ struct AppFragment {
 #[derive(Default)]
 struct AppWarm {
     formats: Vec<DXGI_FORMAT>,
-    fragments: Vec<AppFragment>,
+    fragments: Vec<Weak<AppFragment>>,
 }
 
 /// vue-native: the fragment stage of the punch. It shares the effects' vertex
@@ -238,8 +237,8 @@ pub(super) struct Pipelines {
     /// Pipelines a background thread created ahead of their first use.
     warmed: Arc<Mutex<Vec<CachedPipeline>>>,
     /// Synced at the first frame that draws an app effect, from the warmup.
-    app_effects: gpui::AppEffectPipelines<AppFragment>,
-    app_warmup: gpui::AppEffectWarmup<AppFragment>,
+    app_effects: gpui::AppEffectPipelines<Arc<AppFragment>>,
+    app_warmup: gpui::AppEffectWarmup<Arc<AppFragment>>,
     app_warm: Arc<Mutex<AppWarm>>,
     app_fragments_made: Arc<AtomicU64>,
     #[cfg(test)]
@@ -294,7 +293,7 @@ impl Pipelines {
                 Vec::new()
             } else {
                 warm.formats.push(format);
-                warm.fragments.clone()
+                warm.fragments.iter().filter_map(Weak::upgrade).collect()
             }
         };
         let device = self.device.clone();
@@ -358,7 +357,7 @@ impl Pipelines {
                 };
                 let formats = {
                     let mut warm = warm.lock();
-                    warm.fragments.push(fragment.clone());
+                    warm.fragments.push(Arc::downgrade(&fragment));
                     warm.formats.clone()
                 };
                 let mut pipelines = formats
@@ -423,11 +422,9 @@ impl Pipelines {
                 effect.needs_backdrop(),
             )
         } else {
-            self.sync_app_effects(format);
-            let Some(fragment) = self
-                .app_effects
-                .get(index as usize - EffectShader::ALL.len())
-            else {
+            let app_index = index as usize - EffectShader::ALL.len();
+            self.sync_app_effect(app_index, format);
+            let Some(fragment) = self.app_effects.get(app_index) else {
                 return Ok(None);
             };
             (
@@ -469,7 +466,7 @@ impl Pipelines {
     /// from the warmup or else compiling it and creating its pipeline for
     /// `format` here; a shader that fails either step keeps the effect's
     /// previous pipeline.
-    fn sync_app_effects(&mut self, format: DXGI_FORMAT) {
+    fn sync_app_effect(&mut self, index: usize, format: DXGI_FORMAT) {
         let Self {
             device,
             root_signature,
@@ -483,7 +480,7 @@ impl Pipelines {
         } = self;
         #[cfg(test)]
         let compiled_on_frame = &mut self.app_fragments_compiled_on_frame;
-        let synced = app_effects.sync_warmed(app_warmup, |effect| {
+        let synced = app_effects.sync_warmed_at(index, app_warmup, |effect| {
             #[cfg(test)]
             {
                 *compiled_on_frame += 1;
@@ -499,25 +496,30 @@ impl Pipelines {
                 cache.push(create_app_history(device, root_signature, &fragment)?);
             }
             if gpui::app_effect_prewarmed(&effect.name) {
-                app_warm.lock().fragments.push(fragment.clone());
+                app_warm.lock().fragments.push(Arc::downgrade(&fragment));
             }
             Ok(fragment)
         });
         if synced {
-            let live: Vec<u64> = app_effects
+            let mut live: Vec<u64> = app_effects
                 .pipelines()
                 .map(|fragment| fragment.id)
                 .collect();
+            // A warmup can own a fragment before its first draw takes it.
+            let mut warm = app_warm.lock();
+            warm.fragments.retain(|weak| match weak.upgrade() {
+                Some(fragment) => {
+                    live.push(fragment.id);
+                    true
+                }
+                None => false,
+            });
             let live_pipeline = |cached: &CachedPipeline| match cached.key.kind {
                 PipelineKind::AppEffect(id) | PipelineKind::AppHistory(id) => live.contains(&id),
                 _ => true,
             };
             cache.retain(live_pipeline);
             warmed.lock().retain(live_pipeline);
-            app_warm
-                .lock()
-                .fragments
-                .retain(|fragment| live.contains(&fragment.id));
         }
     }
 
@@ -847,17 +849,17 @@ fn create_primitive(
 }
 
 /// vue-native: compiles an app effect's HLSL; thread-safe.
-fn compile_app_effect(effect: &gpui::AppEffect, made: &AtomicU64) -> Result<AppFragment> {
+fn compile_app_effect(effect: &gpui::AppEffect, made: &AtomicU64) -> Result<Arc<AppFragment>> {
     let (file, source) = effect.hlsl.get("HLSL")?;
     let fragment =
         shader_resources::compile_hlsl_source(source, file, "effect_fragment\0", "ps_5_1\0")
             .with_context(|| format!("compiling {file} failed"))?;
-    Ok(AppFragment {
+    Ok(Arc::new(AppFragment {
         id: made.fetch_add(1, Ordering::Relaxed) + 1,
         bytecode: bytes(&fragment).into(),
         needs_backdrop: effect.needs_backdrop,
         history: effect.history,
-    })
+    }))
 }
 
 fn create_app_effect(
