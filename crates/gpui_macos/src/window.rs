@@ -496,6 +496,14 @@ unsafe fn build_window_class(name: &CStr, superclass: &AnyClass) -> *const AnyCl
             window_did_change_occlusion_state as extern "C" fn(_, Sel, *mut AnyObject),
         );
         decl.add_method(
+            sel!(windowDidMiniaturize:),
+            window_did_change_miniaturization as extern "C" fn(_, Sel, *mut AnyObject),
+        );
+        decl.add_method(
+            sel!(windowDidDeminiaturize:),
+            window_did_change_miniaturization as extern "C" fn(_, Sel, *mut AnyObject),
+        );
+        decl.add_method(
             sel!(windowWillEnterFullScreen:),
             window_will_enter_fullscreen as extern "C" fn(_, Sel, *mut AnyObject),
         );
@@ -2416,6 +2424,7 @@ impl PlatformWindow for MacWindow {
                         let _: () = msg_send![window, orderFront: ptr::null_mut::<AnyObject>()];
                     }
                 }
+                refresh_covered_window(&state);
                 player_chrome::settle_traffic_lights(&state);
                 completed(true);
             })
@@ -2472,6 +2481,7 @@ impl PlatformWindow for MacWindow {
         unsafe {
             let _: () = msg_send![window, orderOut: ptr::null_mut::<AnyObject>()];
         }
+        refresh_covered_window(&self.0);
         true
     }
 
@@ -4125,6 +4135,22 @@ extern "C" fn window_did_change_occlusion_state(this: &AnyObject, _: Sel, _: *mu
     }
 }
 
+extern "C" fn window_did_change_miniaturization(this: &AnyObject, _: Sel, _: *mut AnyObject) {
+    if let Some(window_state) = hosted(this) {
+        refresh_covered_window(&window_state);
+    }
+}
+
+// Ordering or minimizing an already covered window can leave its AppKit occlusion state unchanged.
+fn refresh_covered_window(window_state: &Rc<Mutex<MacWindowState>>) {
+    let state = window_state.lock();
+    if !state.draws_while_occluded || state.on_screen() {
+        return;
+    }
+    drop(state);
+    occlusion_changed(window_state);
+}
+
 fn occlusion_changed(window_state: &Rc<Mutex<MacWindowState>>) {
     let mut lock = window_state.lock();
     if lock.draws() {
@@ -4134,8 +4160,6 @@ fn occlusion_changed(window_state: &Rc<Mutex<MacWindowState>>) {
         lock.stop_display_link();
     }
     drop(lock);
-    // The only visibility source: AppKit posts this for covering, minimizing,
-    // hiding, Space switches, and display sleep alike.
     report_visibility(window_state);
 }
 
