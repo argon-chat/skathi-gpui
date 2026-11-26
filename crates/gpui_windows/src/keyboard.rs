@@ -33,6 +33,30 @@ impl PlatformKeyboardLayout for WindowsKeyboardLayout {
     fn name(&self) -> &str {
         &self.name
     }
+
+    fn key_label(&self, code: gpui::NativeKeyCode) -> Option<String> {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            GetKeyboardLayout, MAPVK_VSC_TO_VK_EX, MapVirtualKeyExW, ToUnicodeEx,
+        };
+        let gpui::NativeKeyCode::Windows(scan) = code else {
+            return None;
+        };
+        let layout = unsafe { GetKeyboardLayout(0) };
+        let vk = unsafe { MapVirtualKeyExW(scan.into(), MAPVK_VSC_TO_VK_EX, Some(layout)) };
+        let mut buf = [0u16; 16];
+        // Bit 2 leaves the user's pending dead key untouched. A negative count is its spacing accent.
+        let n = unsafe {
+            ToUnicodeEx(
+                vk,
+                u32::from(scan & 0xff),
+                &[0; 256],
+                &mut buf,
+                4,
+                Some(layout),
+            )
+        };
+        (n != 0).then(|| String::from_utf16_lossy(&buf[..if n < 0 { 1 } else { n as usize }]))
+    }
 }
 
 impl PlatformKeyboardMapper for WindowsKeyboardMapper {

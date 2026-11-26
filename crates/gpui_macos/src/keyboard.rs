@@ -27,6 +27,13 @@ impl PlatformKeyboardLayout for MacKeyboardLayout {
     fn name(&self) -> &str {
         &self.name
     }
+
+    fn key_label(&self, code: gpui::NativeKeyCode) -> Option<String> {
+        let gpui::NativeKeyCode::Mac(key) = code else {
+            return None;
+        };
+        Some(crate::events::chars_for_modified_key(key, 0))
+    }
 }
 
 impl PlatformKeyboardMapper for MacKeyboardMapper {

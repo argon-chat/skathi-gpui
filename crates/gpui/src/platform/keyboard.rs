@@ -8,6 +8,10 @@ pub trait PlatformKeyboardLayout {
     fn id(&self) -> &str;
     /// Get the keyboard layout display name
     fn name(&self) -> &str;
+    /// Unmodified printable legend for a physical key on this layout.
+    fn key_label(&self, _code: crate::NativeKeyCode) -> Option<String> {
+        None
+    }
 }
 
 /// A trait for platform-specific keyboard mappings

@@ -490,12 +490,7 @@ impl X11Connection {
             xkbc::x11::state_new_from_device(&xkb_keymap, &xcb_connection, xkb_device_id)
         };
         let compose_state = get_xkb_compose_state(&xkb_context);
-        let layout_idx = xkb_state.serialize_layout(STATE_LAYOUT_EFFECTIVE);
-        let layout_name = xkb_state
-            .get_keymap()
-            .layout_get_name(layout_idx)
-            .to_string();
-        let keyboard_layout = LinuxKeyboardLayout::new(layout_name.into());
+        let keyboard_layout = LinuxKeyboardLayout::from_state(&xkb_state);
 
         let resource_database = x11rb::resource_manager::new_from_default(&xcb_connection)
             .context("Failed to create resource database")?;
@@ -1749,23 +1744,18 @@ impl X11Client {
 
     fn handle_keyboard_layout_change(&self) {
         let mut state = self.0.borrow_mut();
-        let layout_idx = state.xkb.serialize_layout(STATE_LAYOUT_EFFECTIVE);
-        let keymap = state.xkb.get_keymap();
-        let layout_name = keymap.layout_get_name(layout_idx);
-        if layout_name != state.keyboard_layout.name() {
-            state.keyboard_layout = LinuxKeyboardLayout::new(layout_name.to_string().into());
-            let callback = state
-                .common
-                .borrow_mut()
-                .callbacks
-                .keyboard_layout_change
-                .take();
-            if let Some(mut callback) = callback {
-                drop(state);
-                callback();
-                state = self.0.borrow_mut();
-                state.common.borrow_mut().callbacks.keyboard_layout_change = Some(callback);
-            }
+        state.keyboard_layout = LinuxKeyboardLayout::from_state(&state.xkb);
+        let callback = state
+            .common
+            .borrow_mut()
+            .callbacks
+            .keyboard_layout_change
+            .take();
+        if let Some(mut callback) = callback {
+            drop(state);
+            callback();
+            state = self.0.borrow_mut();
+            state.common.borrow_mut().callbacks.keyboard_layout_change = Some(callback);
         }
     }
 }

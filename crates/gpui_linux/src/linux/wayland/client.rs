@@ -936,14 +936,8 @@ impl WaylandClientStatePtr {
         let client = self.get_client();
         let mut state = client.borrow_mut();
         let changed = if let Some(keymap_state) = &state.keymap_state {
-            let layout_idx = keymap_state.serialize_layout(xkbcommon::xkb::STATE_LAYOUT_EFFECTIVE);
-            let keymap = keymap_state.get_keymap();
-            let layout_name = keymap.layout_get_name(layout_idx);
-            let changed = layout_name != state.keyboard_layout.name();
-            if changed {
-                state.keyboard_layout = LinuxKeyboardLayout::new(layout_name.to_string().into());
-            }
-            changed
+            state.keyboard_layout = LinuxKeyboardLayout::from_state(keymap_state);
+            true
         } else {
             let changed = &UNKNOWN_KEYBOARD_LAYOUT_NAME != state.keyboard_layout.name();
             if changed {
