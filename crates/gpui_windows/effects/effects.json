@@ -3,7 +3,7 @@
   "slang": "2026.12",
   "compiler": "redslangc 0.1.1",
   "kind": "builtin",
-  "preludeSha256": "eff9abea40eae8abae382e3ce12a6e73f23c03baf8f0610c68e6dc23fc761748",
+  "preludeSha256": "34d346610a0eeeb7228f3d839e72fe4b34a9976fb9bfa1480b6270aab4fe3649",
   "effects": [
     {
       "id": 0,
