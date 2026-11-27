@@ -834,6 +834,21 @@ impl MacWindowState {
             .path(occasion, matches!(self.frame_source, FrameSource::Metal(_)))
     }
 
+    /// vue-native: how the frames after a synchronous one are presented.
+    ///
+    /// A synchronous frame is presented with its Core Animation transaction. Under
+    /// `MetalFrameSource::NextDrawable` the paced frames come from the same `nextDrawable`
+    /// pool, and presenting them outside the transaction after one presented inside it makes
+    /// the window server run into its 0.5 s fence timeout when AppKit next synchronizes a
+    /// window transaction with this layer's context: entering native fullscreen then holds
+    /// the main thread, and every update of the display, for that long. So those frames stay
+    /// with the transaction; the display link's drawables are unaffected.
+    fn resume_paced_presentation(&mut self) {
+        let with_transaction = self.frame_setting == MetalFrameSetting::NextDrawable;
+        self.renderer
+            .set_presents_with_transaction(with_transaction);
+    }
+
     /// vue-native: under `MetalFrameSource::DisplayLink` a frame wanted at once
     /// is left to the display link's next update, which is woken; returns
     /// whether it was.
@@ -1428,6 +1443,7 @@ impl MacWindow {
                 sheet_parent: None,
                 native_views: native_views::NativeViews::default(),
             }));
+            state.lock().resume_paced_presentation();
             if let Some(metal_frames) = &metal_frames {
                 let weak = Rc::downgrade(&state);
                 metal_frames.set_stall_watch(move |updates| {
@@ -4597,7 +4613,7 @@ fn key_status_changed(window_state: Rc<Mutex<MacWindowState>>, became_key: bool)
 
                 let mut lock = window_state.lock();
                 lock.request_frame_callback = Some(callback);
-                lock.renderer.set_presents_with_transaction(false);
+                lock.resume_paced_presentation();
                 lock.start_display_link(&window_state);
             }
         } else {
@@ -4752,7 +4768,7 @@ extern "C" fn display_layer(this: &AnyObject, _: Sel, _: *mut AnyObject) {
 
         let mut lock = window_state.lock();
         lock.request_frame_callback = Some(callback);
-        lock.renderer.set_presents_with_transaction(false);
+        lock.resume_paced_presentation();
         lock.start_display_link(&window_state);
         drop(lock);
         native_views::check_pointer_after_frame(&window_state);
@@ -5031,7 +5047,7 @@ fn follow_moved_view(window_state: &Rc<Mutex<MacWindowState>>) {
     });
     let mut lock = window_state.lock();
     lock.request_frame_callback = Some(callback);
-    lock.renderer.set_presents_with_transaction(false);
+    lock.resume_paced_presentation();
     lock.start_display_link(window_state);
 }
 
