@@ -1467,6 +1467,11 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
         answers: &[PromptButton],
     ) -> Option<oneshot::Receiver<usize>>;
     fn activate(&self);
+    /// Activate using the one-shot token supplied by a desktop notification or launcher.
+    #[cfg(target_os = "linux")]
+    fn activate_with_token(&self, _token: &str) {
+        self.activate();
+    }
     /// Shows a previously hidden window without synthesizing input. Returns
     /// false when unsupported. A supported backend calls `completed` after the
     /// native show, or with false if showing was cancelled or failed. A queued

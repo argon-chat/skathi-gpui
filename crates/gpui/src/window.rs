@@ -11465,6 +11465,12 @@ impl Window {
         self.platform_window.activate();
     }
 
+    /// Activate the window with a desktop-provided XDG activation token.
+    #[cfg(target_os = "linux")]
+    pub fn activate_window_with_token(&self, token: &str) {
+        self.platform_window.activate_with_token(token);
+    }
+
     /// Shows a previously hidden window, optionally requesting focus. Returns
     /// false if unsupported; otherwise `completed` reports the native result.
     pub fn show_window(

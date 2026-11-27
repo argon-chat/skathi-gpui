@@ -1984,6 +1984,14 @@ impl PlatformWindow for WaylandWindow {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    fn activate_with_token(&self, token: &str) {
+        let state = self.borrow();
+        if let Some(activation) = &state.globals.activation {
+            activation.activate(token.to_owned(), &state.surface);
+        }
+    }
+
     fn request_attention(&self) {}
 
     fn is_active(&self) -> bool {
