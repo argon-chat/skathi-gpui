@@ -93,6 +93,7 @@ impl rwh::HasDisplayHandle for RawWindow {
 #[derive(Debug)]
 struct InProgressConfigure {
     size: Option<Size<Pixels>>,
+    popup_origin: Option<Point<Pixels>>,
     fullscreen: bool,
     maximized: bool,
     resizing: bool,
@@ -254,6 +255,7 @@ impl WaylandSurfaceState {
                 xdg_popup,
                 options: options.clone(),
                 next_reposition_token: Cell::new(0),
+                geometry: None,
             }));
         }
 
@@ -330,6 +332,7 @@ pub struct WaylandPopupSurfaceState {
     // Kept so the popup can be re-anchored via `xdg_popup.reposition` when resized.
     options: PopupOptions,
     next_reposition_token: Cell<u32>,
+    geometry: Option<Bounds<Pixels>>,
 }
 
 fn build_popup_positioner(
@@ -458,7 +461,7 @@ impl WaylandSurfaceState {
         globals: &Globals,
         size: Size<Pixels>,
         parent_geometry: Bounds<Pixels>,
-    ) {
+    ) -> bool {
         if let WaylandSurfaceState::Popup(WaylandPopupSurfaceState {
             xdg_popup,
             options,
@@ -473,7 +476,9 @@ impl WaylandSurfaceState {
             let positioner = build_popup_positioner(globals, options, size, parent_geometry);
             xdg_popup.reposition(&positioner, token);
             positioner.destroy();
+            return true;
         }
+        false
     }
 
     fn set_exclusive_zone(&self, zone: i32) -> bool {
@@ -1125,6 +1130,13 @@ impl WaylandWindowStatePtr {
                 let mut state = self.state.borrow_mut();
 
                 if let Some(mut configure) = state.in_progress_configure.take() {
+                    if let (WaylandSurfaceState::Popup(popup), Some(origin), Some(size)) = (
+                        &mut state.surface_state,
+                        configure.popup_origin,
+                        configure.size,
+                    ) {
+                        popup.geometry = Some(Bounds { origin, size });
+                    }
                     let got_unmaximized = state.maximized && !configure.maximized;
                     let fullscreen_changed = state.fullscreen != configure.fullscreen;
                     let mode_changed = fullscreen_changed || state.maximized != configure.maximized;
@@ -1319,6 +1331,7 @@ impl WaylandWindowStatePtr {
                 });
                 state.in_progress_configure = Some(InProgressConfigure {
                     size,
+                    popup_origin: None,
                     fullscreen,
                     maximized,
                     resizing,
@@ -1394,6 +1407,7 @@ impl WaylandWindowStatePtr {
                 let mut state = self.state.borrow_mut();
                 state.in_progress_configure = Some(InProgressConfigure {
                     size,
+                    popup_origin: None,
                     fullscreen: false,
                     maximized: false,
                     resizing: false,
@@ -1418,9 +1432,12 @@ impl WaylandWindowStatePtr {
     // Returns `true` if the popup should be closed.
     pub fn handle_popup_event(&self, event: xdg_popup::Event) -> bool {
         match event {
-            // Only the size is needed, the position is the compositor's. The following
-            // xdg_surface.configure applies the change.
-            xdg_popup::Event::Configure { width, height, .. } => {
+            xdg_popup::Event::Configure {
+                x,
+                y,
+                width,
+                height,
+            } => {
                 let size = if width <= 0 || height <= 0 {
                     None
                 } else {
@@ -1429,6 +1446,7 @@ impl WaylandWindowStatePtr {
 
                 self.state.borrow_mut().in_progress_configure = Some(InProgressConfigure {
                     size,
+                    popup_origin: Some(Point::new(px(x as f32), px(y as f32))),
                     fullscreen: false,
                     maximized: false,
                     resizing: false,
@@ -1793,6 +1811,16 @@ impl PlatformWindow for WaylandWindow {
         self.borrow().bounds
     }
 
+    fn popup_bounds_in_parent(&self) -> Option<Bounds<Pixels>> {
+        let state = self.borrow();
+        let WaylandSurfaceState::Popup(popup) = &state.surface_state else {
+            return None;
+        };
+        let mut bounds = popup.geometry?;
+        bounds.origin += state.parent.as_ref()?.window_geometry().origin;
+        Some(bounds)
+    }
+
     fn is_maximized(&self) -> bool {
         self.borrow().maximized
     }
@@ -1826,27 +1854,27 @@ impl PlatformWindow for WaylandWindow {
         self.borrow().bounds.size
     }
 
-    fn resize(&mut self, size: Size<Pixels>) {
+    fn try_resize_popup(&mut self, size: Size<Pixels>) -> bool {
+        // Before the first configure the popup is unmapped and cannot reposition.
+        if !self.0.is_configured() {
+            return false;
+        }
         let state = self.borrow();
-        let state_ptr = self.0.clone();
+        let Some(parent) = &state.parent else {
+            return false;
+        };
+        state
+            .surface_state
+            .reposition_popup(&state.globals, size, parent.window_geometry())
+    }
 
-        // A popup's placement is the compositor's, so a resize re-runs the positioner and the
-        // configure reply drives the buffer resize. Before the first configure the popup is
-        // unmapped and cannot reposition, but the initial positioner already carries the size.
-        if matches!(state.surface_state, WaylandSurfaceState::Popup(_)) {
-            if self.0.is_configured() {
-                let parent_geometry = state
-                    .parent
-                    .as_ref()
-                    .map(|parent| parent.window_geometry())
-                    .unwrap_or_default();
-                state
-                    .surface_state
-                    .reposition_popup(&state.globals, size, parent_geometry);
-            }
+    fn resize(&mut self, size: Size<Pixels>) {
+        if matches!(self.borrow().surface_state, WaylandSurfaceState::Popup(_)) {
+            self.try_resize_popup(size);
             return;
         }
-
+        let state = self.borrow();
+        let state_ptr = self.0.clone();
         // Keep window geometry consistent with configure handling. On Wayland, window geometry is
         // surface-local: resizing should not attempt to translate the window; the compositor
         // controls placement. We also account for client-side decoration insets and tiling.

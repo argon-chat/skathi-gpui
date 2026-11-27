@@ -1416,6 +1416,12 @@ pub enum WindowFullscreenTransition {
 #[expect(missing_docs)]
 pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn bounds(&self) -> Bounds<Pixels>;
+    fn popup_bounds_in_parent(&self) -> Option<Bounds<Pixels>> {
+        None
+    }
+    fn try_resize_popup(&mut self, _size: Size<Pixels>) -> bool {
+        false
+    }
     fn is_maximized(&self) -> bool;
     fn window_bounds(&self) -> WindowBounds;
     fn content_size(&self) -> Size<Pixels>;

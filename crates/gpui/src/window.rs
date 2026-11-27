@@ -4547,6 +4547,17 @@ impl Window {
         self.platform_window.bounds()
     }
 
+    /// The compositor-configured popup geometry in its parent's surface coordinates, when available.
+    pub fn popup_bounds_in_parent(&self) -> Option<Bounds<Pixels>> {
+        self.platform_window.popup_bounds_in_parent()
+    }
+
+    /// Requests a new size from the popup's positioner. If it cannot reposition the popup,
+    /// the caller can reopen it with the new size.
+    pub fn try_resize_popup(&mut self, size: Size<Pixels>) -> bool {
+        self.platform_window.try_resize_popup(size)
+    }
+
     /// Returns the regions of this window obscured by system UI and the keyboard.
     pub fn insets(&self) -> WindowInsets {
         self.platform_window.insets()
