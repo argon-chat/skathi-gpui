@@ -56,7 +56,7 @@ ttf-parser = "0.25"
 uuid = { workspace = true, features = ["v5"] }
 # vue-native: not the workspace's feature set; every feature here is one more module of the
 # `windows` crate that every Skathi build compiles.
-windows = { version = "0.62", features = [
+windows = { version = "0.62.2", features = [
     "Data_Xml_Dom",
     "Devices_Haptics",
     "Devices_Input",
@@ -102,13 +102,14 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_WindowsAndMessaging",
 ] }
-windows-sys = { version = "0.61", features = [
+windows-sys = { version = "0.61.2", features = [
     "Wdk_System_SystemServices",
     "Win32_Storage_Packaging_Appx",
     "Win32_System_SystemInformation",
 ] }
 windows-core.workspace = true
-windows-numerics = "0.3"
+# Direct2D and DirectWrite expose this version's Vector2 in their signatures.
+windows-numerics = "0.3.1"
 windows-registry.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies.scap]
