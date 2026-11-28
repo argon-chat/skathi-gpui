@@ -1157,6 +1157,9 @@ pub enum VnHitKind {
 /// See [`Window::set_vn_hit_refiner`].
 pub type VnHitRefiner = Rc<dyn Fn(VnHitKind, Point<Pixels>, &mut Window, &mut App)>;
 
+/// vue-native fork: see [`Window::set_vn_touch_handler`].
+pub type VnTouchHandler = Rc<dyn Fn(&TouchEvent, &mut Window, &mut App) -> bool>;
+
 /// vue-native fork: how [`Window::vn_lock_pointer`] holds the pointer.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum VnPointerLock {
@@ -1832,6 +1835,8 @@ pub struct Window {
     vn_mouse_movement: Point<Pixels>,
     /// vue-native fork: see [`Window::vn_pen`].
     vn_pen: Option<crate::PenInput>,
+    /// vue-native fork: see [`Window::set_vn_touch_handler`].
+    vn_touch_handler: Option<VnTouchHandler>,
     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
     /// vue-native fork: the `clip-path` shapes in force that are no rounded
     /// rectangle, innermost first ([`Window::vn_with_clip_shape`]). A hitbox
@@ -3185,6 +3190,7 @@ impl Window {
             vn_raw_mouse_position: None,
             vn_mouse_movement: Point::default(),
             vn_pen: None,
+            vn_touch_handler: None,
             requested_autoscroll: None,
             last_text_input_configuration: None,
             focused_text_input: None,
@@ -9713,6 +9719,18 @@ impl Window {
         self.vn_hit_refiner.is_some()
     }
 
+    /// vue-native fork: hands every [`PlatformInput::Touch`] to the embedder before gpui's
+    /// gesture recognizer. When it returns true the touch is the embedder's and gpui does
+    /// nothing more with it.
+    pub fn set_vn_touch_handler(&mut self, handler: Option<VnTouchHandler>) {
+        self.vn_touch_handler = handler;
+    }
+
+    /// vue-native fork: is a touch handler installed?
+    pub fn has_vn_touch_handler(&self) -> bool {
+        self.vn_touch_handler.is_some()
+    }
+
     /// vue-native fork: which key event this window is dispatching — one
     /// number per key-down, key-up or modifiers change, taken before the
     /// keystroke interceptors run, so everything that hears one event (an
@@ -10257,6 +10275,16 @@ impl Window {
             }
             event => event,
         };
+        if let PlatformInput::Touch(touch) = &event
+            && let Some(handler) = self.vn_touch_handler.clone()
+            && handler(touch, self, cx)
+        {
+            return DispatchEventResult {
+                propagate: false,
+                default_prevented: false,
+                drop_operation: None,
+            };
+        }
         // A modal tool consumes the complete gesture before focus, native widgets,
         // click tracking and application listeners can observe it. Cloning the
         // Rc permits the interceptor to remove itself while handling an event.
@@ -15578,6 +15606,8 @@ mod tests {
                         position: point(px(x), px(0.)),
                         predicted_position: None,
                         force: None,
+                        size: None,
+                        orientation: None,
                     }
                     .to_platform_input(),
                     cx,

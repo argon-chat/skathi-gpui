@@ -96,6 +96,7 @@ pub struct WindowsWindowState {
     pub(crate) mouse_position: Cell<Option<Point<Pixels>>>,
     pub(crate) pointer_lock: crate::pointer_lock::PointerLock,
     pub(crate) pen: crate::pen::PenTracker,
+    pub(crate) touch: crate::touch::TouchTracker,
     /// The placement read as `WM_DESTROY` arrived, once the window is being destroyed.
     pub(crate) destroyed: Cell<Option<(Bounds<Pixels>, bool)>>,
 }
@@ -215,6 +216,7 @@ impl WindowsWindowState {
             mouse_position: Cell::new(None),
             pointer_lock: Default::default(),
             pen: Default::default(),
+            touch: Default::default(),
             destroyed: Cell::new(None),
         })
     }

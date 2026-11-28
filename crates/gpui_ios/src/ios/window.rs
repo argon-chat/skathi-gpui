@@ -541,6 +541,8 @@ impl IosWindowState {
             position,
             predicted_position: None,
             force: touch_force(touch),
+            size: None,
+            orientation: None,
         };
         self.handle_keyboard_dismiss_touch(&event);
         self.input_callback

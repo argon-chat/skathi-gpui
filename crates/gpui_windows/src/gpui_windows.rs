@@ -29,6 +29,7 @@ mod profiling;
 mod skathi_raster;
 mod system_notifications;
 mod system_settings;
+mod touch;
 mod util;
 mod vsync;
 mod window;

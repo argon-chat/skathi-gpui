@@ -192,6 +192,11 @@ pub struct TouchEvent {
     pub predicted_position: Option<Point<Pixels>>,
     /// Normalized touch force in `0.0..=1.0`, if the hardware reports it.
     pub force: Option<f32>,
+    /// The contact's width and height in window pixels, if the hardware reports them.
+    pub size: Option<crate::Size<Pixels>>,
+    /// Clockwise rotation of the contact's major axis from vertical, degrees in `0.0..360.0`,
+    /// if the hardware reports it.
+    pub orientation: Option<f32>,
 }
 
 impl Sealed for TouchEvent {}

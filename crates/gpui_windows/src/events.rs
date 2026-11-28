@@ -212,7 +212,7 @@ impl WindowsWindowInner {
             | WM_POINTERUP
             | WM_POINTERUPDATE
             | WM_POINTERLEAVE
-            | WM_POINTERCAPTURECHANGED => self.handle_pen_msg(handle, msg, wparam),
+            | WM_POINTERCAPTURECHANGED => self.handle_pointer_msg(handle, msg, wparam),
             crate::pen::WM_TABLET_QUERYSYSTEMGESTURESTATUS => Some(crate::pen::TABLET_GESTURES_OFF),
             WM_MOUSEMOVE => self.handle_mouse_move_msg(handle, lparam, wparam),
             WM_INPUT => self.handle_raw_input_msg(lparam),
@@ -669,6 +669,56 @@ impl WindowsWindowInner {
         let handled = !func(input).propagate;
         self.state.callbacks.input.set(Some(func));
         if handled { Some(0) } else { Some(1) }
+    }
+
+    fn handle_pointer_msg(&self, handle: HWND, msg: u32, wparam: WPARAM) -> Option<isize> {
+        use windows::Win32::UI::Input::Pointer::GetPointerType;
+        let pointer_id = wparam.loword() as u32;
+        let mut kind = POINTER_INPUT_TYPE::default();
+        // SAFETY: plain out-parameter.
+        let touch = unsafe { GetPointerType(pointer_id, &mut kind) }.is_ok() && kind == PT_TOUCH;
+        if touch || self.state.touch.find(pointer_id).is_some() {
+            return self.handle_touch_msg(handle, msg, pointer_id);
+        }
+        self.handle_pen_msg(handle, msg, wparam)
+    }
+
+    /// A finger's pointer message as a [`TouchEvent`]. Always handled, so the system neither
+    /// promotes the contact to mouse input nor runs its own gestures on it.
+    fn handle_touch_msg(&self, handle: HWND, msg: u32, pointer_id: u32) -> Option<isize> {
+        let tracked = self.state.touch.find(pointer_id);
+        let scale = self.state.scale_factor.get();
+        let reading = crate::touch::read(handle, pointer_id);
+        // A contact that can no longer be read (its window lost it) still ends, where it was.
+        let flags = reading.map_or(0, |r| r.pointer_flags);
+        let Some(phase) = crate::touch::phase(msg, flags, tracked.is_some()) else {
+            return Some(0);
+        };
+        let event = match (reading, tracked) {
+            (Some(r), _) => {
+                let id = match tracked {
+                    Some((id, _)) if phase != TouchPhase::Started => id,
+                    _ => self.state.touch.start(pointer_id, r.position(scale)),
+                };
+                r.event(id, phase, scale)
+            }
+            (None, Some((id, position))) => TouchEvent {
+                id,
+                phase,
+                position,
+                ..Default::default()
+            },
+            (None, None) => return Some(0),
+        };
+        match phase {
+            TouchPhase::Ended | TouchPhase::Cancelled => self.state.touch.end(pointer_id),
+            _ => self.state.touch.moved(pointer_id, event.position),
+        }
+        if let Some(mut func) = self.state.callbacks.input.take() {
+            func(PlatformInput::Touch(event));
+            self.state.callbacks.input.set(Some(func));
+        }
+        Some(0)
     }
 
     /// A pen's pointer message as a [`PenEvent`]; `None` (the system's mouse emulation) for any
