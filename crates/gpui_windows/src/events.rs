@@ -531,6 +531,9 @@ impl WindowsWindowInner {
         // The press can end between the request and this message: the loop starts only while the
         // button is held, as it does from a caption press.
         if unsafe { GetKeyState(VK_LBUTTON.0 as i32) } >= 0 {
+            if !self.state.is_maximized() {
+                self.start_touch_drag(handle, None);
+            }
             return Some(0);
         }
         let mut cursor = POINT::default();
@@ -561,6 +564,7 @@ impl WindowsWindowInner {
             return Some(0);
         }
         if unsafe { GetKeyState(VK_LBUTTON.0 as i32) } >= 0 {
+            self.start_touch_drag(handle, Some(wmsz));
             return Some(0);
         }
         let mut cursor = POINT::default();
@@ -686,21 +690,41 @@ impl WindowsWindowInner {
     /// A finger's pointer message as a [`TouchEvent`]. Always handled, so the system neither
     /// promotes the contact to mouse input nor runs its own gestures on it.
     fn handle_touch_msg(&self, handle: HWND, msg: u32, pointer_id: u32) -> Option<isize> {
+        let reading = crate::touch::read(handle, pointer_id);
+        if let Some(drag) = self.state.touch.drag()
+            && drag.pointer_id == pointer_id
+        {
+            match reading {
+                Some(r)
+                    if crate::touch::phase(msg, r.pointer_flags, true)
+                        == Some(TouchPhase::Moved) =>
+                {
+                    crate::touch::drag_to(handle, &drag, r.screen)
+                }
+                _ => self.state.touch.set_drag(None),
+            }
+            return Some(0);
+        }
         let tracked = self.state.touch.find(pointer_id);
         let scale = self.state.scale_factor.get();
-        let reading = crate::touch::read(handle, pointer_id);
         // A contact that can no longer be read (its window lost it) still ends, where it was.
         let flags = reading.map_or(0, |r| r.pointer_flags);
         let Some(phase) = crate::touch::phase(msg, flags, tracked.is_some()) else {
             return Some(0);
         };
         let event = match (reading, tracked) {
-            (Some(r), _) => {
-                let id = match tracked {
-                    Some((id, _)) if phase != TouchPhase::Started => id,
-                    _ => self.state.touch.start(pointer_id, r.position(scale)),
-                };
-                r.event(id, phase, scale)
+            (Some(r), Some((id, _))) => {
+                let event = r.event(id, phase, scale);
+                let changed = self.state.touch.moved(pointer_id, &event, r.screen);
+                if phase == TouchPhase::Moved && !changed {
+                    return Some(0);
+                }
+                event
+            }
+            (Some(r), None) => {
+                let event = r.event(TouchId(0), phase, scale);
+                let id = self.state.touch.start(pointer_id, &event, r.screen);
+                TouchEvent { id, ..event }
             }
             (None, Some((id, position))) => TouchEvent {
                 id,
@@ -710,15 +734,56 @@ impl WindowsWindowInner {
             },
             (None, None) => return Some(0),
         };
-        match phase {
-            TouchPhase::Ended | TouchPhase::Cancelled => self.state.touch.end(pointer_id),
-            _ => self.state.touch.moved(pointer_id, event.position),
+        if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+            self.state.touch.end(pointer_id);
         }
-        if let Some(mut func) = self.state.callbacks.input.take() {
-            func(PlatformInput::Touch(event));
-            self.state.callbacks.input.set(Some(func));
-        }
+        self.deliver_touch(event);
         Some(0)
+    }
+
+    /// An end the window cannot take now (a nested message loop holds its input callback) is
+    /// delivered as a cancel with the next touch event, so no contact stays down for the app.
+    fn deliver_touch(&self, event: TouchEvent) {
+        match self.state.callbacks.input.take() {
+            Some(mut func) => {
+                for event in self.state.touch.outbox(event, true) {
+                    func(PlatformInput::Touch(event));
+                }
+                self.state.callbacks.input.set(Some(func));
+            }
+            None => {
+                self.state.touch.outbox(event, false);
+            }
+        }
+    }
+
+    /// A move or resize asked for while a finger, not the mouse, is down: the finger drives it
+    /// (no snap layouts, which only the system's mouse loop offers) and ends for the app.
+    fn start_touch_drag(&self, handle: HWND, resize: Option<u32>) -> bool {
+        let Some((pointer_id, id, position, from)) = self.state.touch.first() else {
+            return false;
+        };
+        let mut rect = RECT::default();
+        if unsafe { GetWindowRect(handle, &mut rect) }
+            .log_err()
+            .is_none()
+        {
+            return false;
+        }
+        self.state.touch.set_drag(Some(crate::touch::Drag {
+            pointer_id,
+            from,
+            rect,
+            resize,
+        }));
+        self.state.touch.end(pointer_id);
+        self.deliver_touch(TouchEvent {
+            id,
+            phase: TouchPhase::Cancelled,
+            position,
+            ..Default::default()
+        });
+        true
     }
 
     /// A pen's pointer message as a [`PenEvent`]; `None` (the system's mouse emulation) for any
